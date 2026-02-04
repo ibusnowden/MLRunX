@@ -1,0 +1,131 @@
+# MLRun Benchmark CI Thresholds
+# See: BENCH-000 specification
+#
+# This file defines performance thresholds for CI benchmarks.
+# Nightly and release workflows check against these values.
+
+version: 1
+
+# Workload thresholds (all values in milliseconds unless noted)
+workloads:
+  w1_run_scale:
+    # Query performance at scale
+    list_runs:
+      p95_ms: 200
+      p99_ms: 500
+    filter_tag:
+      p95_ms: 150
+      p99_ms: 400
+    filter_status:
+      p95_ms: 150
+      p99_ms: 400
+    search:
+      p95_ms: 200
+      p99_ms: 500
+    compare_runs:
+      p95_ms: 300
+      p99_ms: 800
+
+  w2_ingest_latency:
+    # High-frequency ingestion
+    sdk_enqueue_us:
+      p95: 50
+      p99: 200
+    log_to_visible_ms:
+      p95: 500
+      p99: 1000
+    ingest_rpc_ms:
+      p95: 100
+      p99: 300
+
+  w3_mixed:
+    # Mixed dashboard workload
+    dashboard_load:
+      p95_ms: 300
+      p99_ms: 800
+
+# Regression detection policy
+regression:
+  # Percentage above threshold that triggers regression alert
+  allowable_deviation_percent: 20
+
+  # Number of consecutive failures before alert
+  consecutive_failures: 2
+
+  # Window for baseline calculation (days)
+  baseline_window_days: 7
+
+  # Minimum samples required for valid baseline
+  min_baseline_samples: 3
+
+# Scale configurations for different CI contexts
+scale:
+  # Nightly CI (fast, lower data volume)
+  nightly:
+    w1:
+      runs: 1000
+      queries_per_type: 100
+    w2:
+      duration_s: 30
+      frequency_hz: 10
+    w3:
+      concurrent_users: 5
+      duration_s: 30
+
+  # Release gate (full scale)
+  release:
+    w1:
+      runs: 10000
+      queries_per_type: 100
+    w2:
+      duration_s: 300
+      frequency_hz: 10
+    w3:
+      concurrent_users: 50
+      duration_s: 60
+
+  # Stress testing (optional, manual)
+  stress:
+    w1:
+      runs: 100000
+      queries_per_type: 1000
+    w2:
+      duration_s: 600
+      frequency_hz: 100
+    w3:
+      concurrent_users: 200
+      duration_s: 300
+
+# Alert configuration
+alerts:
+  # GitHub Actions annotations
+  github:
+    enabled: true
+    warn_on_approach: true  # Warn when within 80% of threshold
+    fail_on_exceed: true
+
+  # Slack notifications (optional)
+  slack:
+    enabled: false
+    webhook_env_var: SLACK_BENCHMARK_WEBHOOK
+    channels:
+      regression: "#mlrun-alerts"
+      weekly_report: "#mlrun-perf"
+
+# Output configuration
+output:
+  # JSON reports
+  json:
+    enabled: true
+    path: bench/results
+
+  # Markdown summary
+  markdown:
+    enabled: true
+    path: bench/results
+
+  # Historical data storage
+  history:
+    enabled: true
+    path: bench/results/history
+    retention_days: 90
