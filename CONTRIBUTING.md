@@ -9,6 +9,7 @@ Thank you for your interest in contributing to MLRunX! This document provides gu
 - [Development Setup](#development-setup)
 - [Making Changes](#making-changes)
 - [Definition of Done](#definition-of-done)
+- [Release Process](#release-process)
 - [Code Style](#code-style)
 - [Testing](#testing)
 - [Documentation](#documentation)
@@ -196,6 +197,14 @@ Types:
 3. Verify proto compiles (`make proto-check`)
 4. Update generated code
 5. Note in PR description
+
+---
+
+## Release Process
+
+For Python package shipping (stable wheels now, PyPI later, and dev installs by commit), use:
+
+- `docs/ops/release_channels.md`
 
 ---
 

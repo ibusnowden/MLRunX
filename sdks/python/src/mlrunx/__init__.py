@@ -32,6 +32,7 @@ Example usage:
 
 __version__ = "0.1.0"
 
+from mlrunx.autodebug import AutoDebugHelper
 from mlrunx.config import Config, configure, get_config
 from mlrunx.run import Run
 
@@ -39,6 +40,7 @@ __all__ = [
     "__version__",
     "init",
     "Run",
+    "AutoDebugHelper",
     "Config",
     "configure",
     "get_config",
