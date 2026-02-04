@@ -181,6 +181,10 @@ cargo check
 cd apps/ui && npm install && npm run dev
 ```
 
+### Package Release Flow
+
+- Stable vs dev release process: `docs/ops/release_channels.md`
+
 ### Testing Connectivity
 
 ```bash
