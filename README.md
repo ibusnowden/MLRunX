@@ -206,8 +206,8 @@ open http://localhost:9002
 ## Roadmap 2026
 
 ### Phase 1: MVP + Core (Q1-Q2)
-- [x] M0: Project scaffolding + CI
-- [ ] M1: Local-first single-user alpha
+- [X] M0: Project scaffolding + CI
+- [X] M1: Local-first single-user alpha
 - [ ] M2: High-throughput ingest + ClickHouse schema
 - [ ] M3: UI v0 (runs table, compare view, charts)
 - [ ] M4: One-click Docker + basic K8s
