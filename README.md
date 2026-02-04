@@ -152,13 +152,16 @@ docker compose logs -f
 | **API** | 3001 | Rust API gateway |
 | **Ingest** | 3002 (HTTP), 50051 (gRPC) | Ingest service |
 
-### Default Credentials (Local Dev)
+### Insecure Local Dev Defaults (Docker Only)
 
-| Service | User | Password |
-|---------|------|----------|
-| ClickHouse | `track` | `track_dev` |
-| PostgreSQL | `track` | `track_dev` |
-| MinIO | `track` | `track_dev_secret` |
+> ⚠️ These defaults are for local Docker quickstart only. Do **not** use them in staging/production or on internet-exposed hosts.
+> For hosted deployments, copy `infra/docker/.env.example` to `infra/docker/.env` and set strong random secrets.
+
+| Service | Env Vars | Local Default |
+|---------|----------|---------------|
+| ClickHouse | `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | `track` / `track_dev` |
+| PostgreSQL | `POSTGRES_USER` / `POSTGRES_PASSWORD` | `track` / `track_dev` |
+| MinIO | `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | `track` / `track_dev_secret` |
 
 ### Development Setup
 
@@ -181,6 +184,8 @@ cd apps/ui && npm install && npm run dev
 ### Testing Connectivity
 
 ```bash
+# If you changed credentials in infra/docker/.env, replace values below.
+
 # ClickHouse
 docker exec track-clickhouse clickhouse-client --user track --password track_dev --query "SELECT 1"
 
