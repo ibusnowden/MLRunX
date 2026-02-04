@@ -6,8 +6,8 @@ import time
 
 import pytest
 
-from mlrun.batching import AdaptiveBatcher, BatchConfig, BatchStats, FlushMetrics
-from mlrun.queue import Event, EventType
+from mlrunx.batching import AdaptiveBatcher, BatchConfig, BatchStats, FlushMetrics
+from mlrunx.queue import Event, EventType
 
 
 class TestBatchConfig:

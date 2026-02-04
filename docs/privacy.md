@@ -1,6 +1,6 @@
-# MLRun Privacy Policy
+# MLRunX Privacy Policy
 
-MLRun is designed with **privacy-first defaults**. Your experiment data stays on your infrastructure, and no information is sent to external services unless you explicitly enable it.
+MLRunX is designed with **privacy-first defaults**. Your experiment data stays on your infrastructure, and no information is sent to external services unless you explicitly enable it.
 
 ## Core Privacy Principles
 
@@ -29,7 +29,7 @@ On a typical Docker installation:
 
 ## Data Retention
 
-MLRun currently enforces metrics retention via ClickHouse TTL (90 days by default). Other retention settings are planned; until then, artifacts and logs are kept until manually deleted.
+MLRunX currently enforces metrics retention via ClickHouse TTL (90 days by default). Other retention settings are planned; until then, artifacts and logs are kept until manually deleted.
 
 | Data Type | Default Retention | Configuration |
 |-----------|------------------|---------------|
@@ -44,10 +44,10 @@ All telemetry is **disabled by default**. The following toggles are available:
 
 ```bash
 # All disabled by default (true = disabled)
-MLRUN_TELEMETRY_DISABLED=true
-MLRUN_CRASH_REPORTING_DISABLED=true
-MLRUN_ANALYTICS_DISABLED=true
-MLRUN_UPDATE_CHECK_DISABLED=true
+MLRUNX_TELEMETRY_DISABLED=true
+MLRUNX_CRASH_REPORTING_DISABLED=true
+MLRUNX_ANALYTICS_DISABLED=true
+MLRUNX_UPDATE_CHECK_DISABLED=true
 
 # Next.js telemetry is also disabled
 NEXT_TELEMETRY_DISABLED=1
@@ -55,7 +55,7 @@ NEXT_TELEMETRY_DISABLED=1
 
 ### What Would Telemetry Collect?
 
-If you choose to enable telemetry in the future (to help improve MLRun), it would only collect:
+If you choose to enable telemetry in the future (to help improve MLRunX), it would only collect:
 - Aggregate usage statistics (run counts, metric counts)
 - Error reports (stack traces without experiment data)
 - Feature usage patterns
@@ -68,7 +68,7 @@ Telemetry would **never** collect:
 
 ## Network Isolation
 
-The default Docker Compose setup uses an isolated bridge network (`mlrun-network`). Services communicate internally and expose the following ports on the host by default:
+The default Docker Compose setup uses an isolated bridge network (`mlrunx-network`). Services communicate internally and expose the following ports on the host by default:
 
 | Port | Service | Access |
 |------|---------|--------|
@@ -93,10 +93,10 @@ ports:
 The Python SDK is designed to work completely offline:
 
 ```python
-import mlrun
+import mlrunx
 
 # Configure for offline mode
-mlrun.configure(
+mlrunx.configure(
     server_url="http://localhost:3001",  # Local server
     offline_mode=True,  # Enable offline spool if server unavailable
 )
@@ -113,21 +113,21 @@ You can export all your data at any time:
 
 ```bash
 # PostgreSQL metadata
-docker exec mlrun-postgres pg_dump -U mlrun mlrun > backup.sql
+docker exec mlrunx-postgres pg_dump -U mlrunx mlrunx > backup.sql
 
 # ClickHouse metrics
-docker exec mlrun-clickhouse clickhouse-client \
-  --user mlrun --password mlrun_dev \
-  --query "SELECT * FROM mlrun.metrics FORMAT JSONEachRow" > metrics.json
+docker exec mlrunx-clickhouse clickhouse-client \
+  --user mlrunx --password mlrunx_dev \
+  --query "SELECT * FROM mlrunx.metrics FORMAT JSONEachRow" > metrics.json
 
 # MinIO artifacts
-docker run --rm --network mlrun-network \
-  minio/mc mc mirror minio/mlrun-artifacts ./artifacts/
+docker run --rm --network mlrunx-network \
+  minio/mc mc mirror minio/mlrunx-artifacts ./artifacts/
 ```
 
 ## Data Deletion
 
-To completely remove all MLRun data:
+To completely remove all MLRunX data:
 
 ```bash
 # Stop all services
@@ -137,9 +137,9 @@ docker compose down
 docker compose down -v
 
 # Or selectively remove specific volumes
-docker volume rm mlrun_clickhouse-data
-docker volume rm mlrun_postgres-data
-docker volume rm mlrun_minio-data
+docker volume rm mlrunx_clickhouse-data
+docker volume rm mlrunx_postgres-data
+docker volume rm mlrunx_minio-data
 ```
 
 ## Security Recommendations
@@ -153,12 +153,12 @@ docker volume rm mlrun_minio-data
 
 2. **Generate a secure API key**:
    ```bash
-   MLRUN_API_KEY=$(openssl rand -hex 32)
+   MLRUNX_API_KEY=$(openssl rand -hex 32)
    ```
 
 3. **Disable dev mode in production**:
    ```bash
-   MLRUN_AUTH_DISABLED=false
+   MLRUNX_AUTH_DISABLED=false
    ```
 
 4. **Use network isolation** in production deployments
@@ -170,4 +170,4 @@ docker volume rm mlrun_minio-data
 If you have privacy concerns or questions, please:
 - Open an issue on GitHub
 - Review our source code (fully open source)
-- Run MLRun in an air-gapped environment if needed
+- Run MLRunX in an air-gapped environment if needed

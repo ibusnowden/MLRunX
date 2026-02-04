@@ -1,16 +1,16 @@
 -- ============================================================================
--- MLRun ClickHouse Schema
+-- MLRunX ClickHouse Schema
 -- Time-series metrics storage.
 -- ============================================================================
 
--- Create the mlrun database
-CREATE DATABASE IF NOT EXISTS mlrun;
+-- Create the mlrunx database
+CREATE DATABASE IF NOT EXISTS mlrunx;
 
 -- ============================================================================
 -- Metrics Table
 -- ============================================================================
 
-CREATE TABLE IF NOT EXISTS mlrun.metrics
+CREATE TABLE IF NOT EXISTS mlrunx.metrics
 (
     run_id       String,
     project_id   String,
@@ -34,7 +34,7 @@ SETTINGS index_granularity = 8192;
 -- Metrics Summary Table
 -- ============================================================================
 
-CREATE TABLE IF NOT EXISTS mlrun.metrics_summary
+CREATE TABLE IF NOT EXISTS mlrunx.metrics_summary
 (
     run_id       String,
     project_id   String,
@@ -53,8 +53,8 @@ ORDER BY (run_id, name)
 SETTINGS index_granularity = 8192;
 
 -- Materialized view for auto-summary
-CREATE MATERIALIZED VIEW IF NOT EXISTS mlrun.metrics_summary_mv
-TO mlrun.metrics_summary
+CREATE MATERIALIZED VIEW IF NOT EXISTS mlrunx.metrics_summary_mv
+TO mlrunx.metrics_summary
 AS SELECT
     run_id,
     project_id,
@@ -67,14 +67,14 @@ AS SELECT
     min(timestamp) AS first_at,
     max(timestamp) AS last_at,
     now64(3) AS updated_at
-FROM mlrun.metrics
+FROM mlrunx.metrics
 GROUP BY run_id, project_id, name;
 
 -- ============================================================================
 -- System Events Table (for debugging/audit)
 -- ============================================================================
 
-CREATE TABLE IF NOT EXISTS mlrun.system_events
+CREATE TABLE IF NOT EXISTS mlrunx.system_events
 (
     event_id     UUID DEFAULT generateUUIDv4(),
     event_type   String,

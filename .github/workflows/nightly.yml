@@ -1,4 +1,4 @@
-# MLRun Nightly CI Pipeline
+# MLRunX Nightly CI Pipeline
 # Runs integration tests and benchmarks every night
 # See: /docs/testing.md for test strategy
 
@@ -43,9 +43,9 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_DB: mlrun
-          POSTGRES_USER: mlrun
-          POSTGRES_PASSWORD: mlrun_dev
+          POSTGRES_DB: mlrunx
+          POSTGRES_USER: mlrunx
+          POSTGRES_PASSWORD: mlrunx_dev
         ports:
           - 5432:5432
         options: >-
@@ -69,8 +69,8 @@ jobs:
         ports:
           - 9001:9000
         env:
-          MINIO_ROOT_USER: mlrun
-          MINIO_ROOT_PASSWORD: mlrun_dev_secret
+          MINIO_ROOT_USER: mlrunx
+          MINIO_ROOT_PASSWORD: mlrunx_dev_secret
         options: >-
           --health-cmd "mc ready local"
           --health-interval 10s
@@ -108,12 +108,12 @@ jobs:
       - name: Run integration tests
         run: make test-integration
         env:
-          DATABASE_URL: postgres://mlrun:mlrun_dev@localhost:5432/mlrun
+          DATABASE_URL: postgres://mlrunx:mlrunx_dev@localhost:5432/mlrunx
           CLICKHOUSE_URL: http://localhost:8123
           REDIS_URL: redis://localhost:6379
           MINIO_ENDPOINT: localhost:9001
-          MINIO_ACCESS_KEY: mlrun
-          MINIO_SECRET_KEY: mlrun_dev_secret
+          MINIO_ACCESS_KEY: mlrunx
+          MINIO_SECRET_KEY: mlrunx_dev_secret
 
   # ===========================================================================
   # Performance Benchmarks
@@ -134,9 +134,9 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_DB: mlrun
-          POSTGRES_USER: mlrun
-          POSTGRES_PASSWORD: mlrun_dev
+          POSTGRES_DB: mlrunx
+          POSTGRES_USER: mlrunx
+          POSTGRES_PASSWORD: mlrunx_dev
         ports:
           - 5432:5432
 
@@ -241,9 +241,9 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_DB: mlrun
-          POSTGRES_USER: mlrun
-          POSTGRES_PASSWORD: mlrun_dev
+          POSTGRES_DB: mlrunx
+          POSTGRES_USER: mlrunx
+          POSTGRES_PASSWORD: mlrunx_dev
         ports:
           - 5432:5432
 
@@ -313,6 +313,6 @@ jobs:
           echo "::error::One or more nightly jobs failed"
           # Add Slack notification here when configured
           # curl -X POST -H 'Content-type: application/json' \
-          #   --data '{"text":"MLRun nightly build failed!"}' \
+          #   --data '{"text":"MLRunX nightly build failed!"}' \
           #   ${{ secrets.SLACK_WEBHOOK_URL }}
           exit 1

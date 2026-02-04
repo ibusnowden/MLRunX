@@ -1,4 +1,4 @@
-"""GRPO Math Training with TRL and MLRun SDK.
+"""GRPO Math Training with TRL and MLRunX SDK.
 
 This example demonstrates Group Relative Policy Optimization (GRPO) for
 fine-tuning a language model on math problems using TRL's built-in GRPOTrainer.
@@ -6,7 +6,7 @@ fine-tuning a language model on math problems using TRL's built-in GRPOTrainer.
 Features demonstrated:
 - GRPO training on GSM8K math dataset
 - Qwen3 model with LoRA for CPU efficiency
-- MLRun integration for tracking rewards, loss, and metrics
+- MLRunX integration for tracking rewards, loss, and metrics
 - DeepSeek-style no-KL training for math
 
 Requirements:
@@ -19,7 +19,7 @@ Usage:
     # Full run (GPU)
     python grpo_math_trl.py --max-steps 500
 
-Note: Works in offline mode if MLRun server is not running.
+Note: Works in offline mode if MLRunX server is not running.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import mlrun
+import mlrunx
 from system_metrics import get_system_metrics, get_device_info
 
 # Check dependencies
@@ -175,13 +175,13 @@ def compute_reward(completions: list[str], ground_truth: str) -> list[float]:
 
 
 # =============================================================================
-# MLRun Callback for GRPOTrainer
+# MLRunX Callback for GRPOTrainer
 # =============================================================================
 
-class MLRunGRPOCallback(TrainerCallback):
-    """Callback to log GRPO training metrics to MLRun."""
+class MLRunXGRPOCallback(TrainerCallback):
+    """Callback to log GRPO training metrics to MLRunX."""
 
-    def __init__(self, run: mlrun.Run):
+    def __init__(self, run: mlrunx.Run):
         self.run = run
         self.step = 0
         self.rewards_history: list[float] = []
@@ -205,7 +205,7 @@ class MLRunGRPOCallback(TrainerCallback):
         metrics_to_log = {}
         for key, value in logs.items():
             if isinstance(value, (int, float)):
-                # Clean up metric names for MLRun
+                # Clean up metric names for MLRunX
                 clean_key = key.replace("/", "_")
                 metrics_to_log[clean_key] = value
 
@@ -364,7 +364,7 @@ def create_reward_function(train_data: list[dict]):
 # =============================================================================
 
 def main():
-    """Run GRPO training with MLRun tracking."""
+    """Run GRPO training with MLRunX tracking."""
 
     parser = argparse.ArgumentParser(description="GRPO Math Training with TRL")
     parser.add_argument("--quick", action="store_true", help="Quick test run")
@@ -390,15 +390,15 @@ def main():
         config.max_steps = args.max_steps
 
     print("=" * 60)
-    print("GRPO Math Training with TRL and MLRun")
+    print("GRPO Math Training with TRL and MLRunX")
     print("=" * 60)
     print(f"\nConfiguration:")
     for key, value in config.to_dict().items():
         print(f"  {key}: {value}")
     print()
 
-    # Initialize MLRun
-    run = mlrun.init(
+    # Initialize MLRunX
+    run = mlrunx.init(
         project="grpo-math",
         name=f"grpo-trl-{config.model_name.split('/')[-1]}",
         tags={
@@ -408,7 +408,7 @@ def main():
             "model_family": "qwen3",
         },
     )
-    print(f"MLRun Run ID: {run.run_id}")
+    print(f"MLRunX Run ID: {run.run_id}")
     print(f"Offline mode: {run.is_offline}")
     print()
 
@@ -431,8 +431,8 @@ def main():
     # Create reward function
     reward_fn = create_reward_function(train_data)
 
-    # Create MLRun callback
-    mlrun_callback = MLRunGRPOCallback(run=run)
+    # Create MLRunX callback
+    mlrunx_callback = MLRunXGRPOCallback(run=run)
 
     # Configure GRPO
     grpo_config = GRPOConfig(
@@ -463,7 +463,7 @@ def main():
 
         # Logging
         logging_steps=1,
-        report_to="none",  # We use MLRun instead
+        report_to="none",  # We use MLRunX instead
 
         # Misc
         seed=42,
@@ -483,7 +483,7 @@ def main():
         train_dataset=train_dataset,
         processing_class=tokenizer,
         reward_funcs=reward_fn,
-        callbacks=[mlrun_callback],
+        callbacks=[mlrunx_callback],
     )
 
     # Train

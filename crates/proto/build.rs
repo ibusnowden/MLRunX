@@ -1,6 +1,6 @@
-//! Build script for `MLRun` protobuf code generation.
+//! Build script for `MLRunX` protobuf code generation.
 //!
-//! This generates Rust code from the proto files in /proto/mlrun/v1/.
+//! This generates Rust code from the proto files in /proto/mlrunx/v1/.
 //! The generated code is placed in `OUT_DIR` and included via `include!` macro.
 
 use std::path::PathBuf;
@@ -11,9 +11,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Proto files to compile
     let protos = &[
-        proto_dir.join("mlrun/v1/common.proto"),
-        proto_dir.join("mlrun/v1/ingest.proto"),
-        proto_dir.join("mlrun/v1/query.proto"),
+        proto_dir.join("mlrunx/v1/common.proto"),
+        proto_dir.join("mlrunx/v1/ingest.proto"),
+        proto_dir.join("mlrunx/v1/query.proto"),
     ];
 
     // Include paths

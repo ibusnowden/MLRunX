@@ -1,7 +1,7 @@
 /**
- * MLRun API Client
+ * MLRunX API Client
  *
- * Provides type-safe API calls to the MLRun backend.
+ * Provides type-safe API calls to the MLRunX backend.
  */
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
@@ -86,8 +86,8 @@ async function fetchApi<T>(
 
   // Add API key if available
   const apiKey = typeof window !== 'undefined'
-    ? localStorage.getItem('mlrun_api_key')
-    : process.env.MLRUN_API_KEY;
+    ? localStorage.getItem('mlrunx_api_key')
+    : process.env.MLRUNX_API_KEY;
 
   if (apiKey) {
     (headers as Record<string, string>)['X-API-Key'] = apiKey;

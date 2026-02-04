@@ -1,6 +1,6 @@
-# Contributing to MLRun
+# Contributing to MLRunX
 
-Thank you for your interest in contributing to MLRun! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to MLRunX! This document provides guidelines and information for contributors.
 
 ## Table of Contents
 
@@ -37,8 +37,8 @@ We are committed to providing a welcoming and inclusive environment. Please be r
 
 ```bash
 # Clone the repository
-git clone https://github.com/ibusnowden/MLRun.git
-cd mlrun
+git clone https://github.com/ibusnowden/MLRunX.git
+cd mlrunx
 
 # Build all components
 make build
@@ -61,7 +61,7 @@ make dev
 cargo build
 
 # Run API service
-cargo run --bin mlrun-api
+cargo run --bin mlrunx-api
 
 # Run tests
 cargo test
@@ -229,7 +229,7 @@ fn calc(d: &[MetricPoint]) -> Result<Stats, Error> {
 ```python
 # Good
 def log_metrics(self, metrics: dict[str, float], step: int | None = None) -> None:
-    """Log metrics to MLRun."""
+    """Log metrics to MLRunX."""
     pass
 
 # Avoid
@@ -377,8 +377,8 @@ Use the appropriate template:
 
 ## Questions?
 
-- Open a [Discussion](https://github.com/ibusnowden/MLRun/discussions)
-- Check existing [Issues](https://github.com/ibusnowden/MLRun/issues)
+- Open a [Discussion](https://github.com/ibusnowden/MLRunX/discussions)
+- Check existing [Issues](https://github.com/ibusnowden/MLRunX/issues)
 - Read the [Documentation](docs/)
 
-Thank you for contributing to MLRun!
+Thank you for contributing to MLRunX!

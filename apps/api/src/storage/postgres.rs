@@ -27,7 +27,7 @@ pub enum PostgresError {
 /// Configuration for PostgreSQL connection.
 #[derive(Debug, Clone)]
 pub struct PostgresConfig {
-    /// Connection URL (e.g., "postgres://user:pass@localhost:5432/mlrun")
+    /// Connection URL (e.g., "postgres://user:pass@localhost:5432/mlrunx")
     pub url: String,
     /// Maximum connections in pool
     pub max_connections: u32,
@@ -38,7 +38,7 @@ pub struct PostgresConfig {
 impl Default for PostgresConfig {
     fn default() -> Self {
         Self {
-            url: "postgres://mlrun:mlrun_dev@localhost:5432/mlrun".to_string(),
+            url: "postgres://mlrunx:mlrunx_dev@localhost:5432/mlrunx".to_string(),
             max_connections: 10,
             min_connections: 2,
         }
@@ -50,7 +50,7 @@ impl PostgresConfig {
     pub fn from_env() -> Self {
         Self {
             url: std::env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgres://mlrun:mlrun_dev@localhost:5432/mlrun".to_string()),
+                .unwrap_or_else(|_| "postgres://mlrunx:mlrunx_dev@localhost:5432/mlrunx".to_string()),
             max_connections: std::env::var("PG_MAX_CONNECTIONS")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -434,7 +434,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = PostgresConfig::default();
-        assert!(config.url.contains("mlrun"));
+        assert!(config.url.contains("mlrunx"));
         assert_eq!(config.max_connections, 10);
     }
 

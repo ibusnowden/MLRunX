@@ -10,7 +10,7 @@ async fn main() {
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    info!("Starting MLRun Processor v0.1.0");
+    info!("Starting MLRunX Processor v0.1.0");
     info!("Background processor for rollups, downsampling, and cardinality guards");
 
     // Main processing loop (placeholder)

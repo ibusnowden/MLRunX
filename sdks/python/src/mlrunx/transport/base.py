@@ -1,4 +1,4 @@
-"""Base transport protocol for MLRun SDK."""
+"""Base transport protocol for MLRunX SDK."""
 
 from __future__ import annotations
 

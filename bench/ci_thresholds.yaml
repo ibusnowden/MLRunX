@@ -1,4 +1,4 @@
-# MLRun Benchmark CI Thresholds
+# MLRunX Benchmark CI Thresholds
 # See: BENCH-000 specification
 #
 # This file defines performance thresholds for CI benchmarks.
@@ -109,8 +109,8 @@ alerts:
     enabled: false
     webhook_env_var: SLACK_BENCHMARK_WEBHOOK
     channels:
-      regression: "#mlrun-alerts"
-      weekly_report: "#mlrun-perf"
+      regression: "#mlrunx-alerts"
+      weekly_report: "#mlrunx-perf"
 
 # Output configuration
 output:

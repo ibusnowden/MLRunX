@@ -1,4 +1,4 @@
-# MLRun Integration Test Stack
+# MLRunX Integration Test Stack
 # Ephemeral services for running integration tests.
 # See: TEST-002 for specification.
 #
@@ -11,16 +11,16 @@ services:
   # ClickHouse - Time-series metrics storage
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
-    container_name: mlrun-test-clickhouse
+    container_name: mlrunx-test-clickhouse
     ports:
       - "18123:8123"  # HTTP (offset to avoid conflicts)
       - "19000:9000"  # Native TCP
     environment:
-      CLICKHOUSE_DB: mlrun_test
-      CLICKHOUSE_USER: mlrun
+      CLICKHOUSE_DB: mlrunx_test
+      CLICKHOUSE_USER: mlrunx
       CLICKHOUSE_PASSWORD: test_password
     healthcheck:
-      test: ["CMD", "clickhouse-client", "--user", "mlrun", "--password", "test_password", "--query", "SELECT 1"]
+      test: ["CMD", "clickhouse-client", "--user", "mlrunx", "--password", "test_password", "--query", "SELECT 1"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -30,15 +30,15 @@ services:
   # PostgreSQL - Metadata storage
   postgres:
     image: postgres:16-alpine
-    container_name: mlrun-test-postgres
+    container_name: mlrunx-test-postgres
     ports:
       - "15432:5432"  # Offset to avoid conflicts
     environment:
-      POSTGRES_DB: mlrun_test
-      POSTGRES_USER: mlrun
+      POSTGRES_DB: mlrunx_test
+      POSTGRES_USER: mlrunx
       POSTGRES_PASSWORD: test_password
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U mlrun -d mlrun_test"]
+      test: ["CMD-SHELL", "pg_isready -U mlrunx -d mlrunx_test"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -48,12 +48,12 @@ services:
   # MinIO - Object storage for artifacts
   minio:
     image: minio/minio:latest
-    container_name: mlrun-test-minio
+    container_name: mlrunx-test-minio
     ports:
       - "19001:9000"  # API (offset to avoid conflicts)
       - "19002:9001"  # Console
     environment:
-      MINIO_ROOT_USER: mlrun
+      MINIO_ROOT_USER: mlrunx
       MINIO_ROOT_PASSWORD: test_password_secret
     command: server /data --console-address ":9001"
     healthcheck:
@@ -67,7 +67,7 @@ services:
   # Redis - Caching and rate limiting (optional for alpha)
   redis:
     image: redis:7-alpine
-    container_name: mlrun-test-redis
+    container_name: mlrunx-test-redis
     ports:
       - "16379:6379"  # Offset to avoid conflicts
     healthcheck:
@@ -76,21 +76,21 @@ services:
       timeout: 3s
       retries: 10
 
-  # MLRun API Server (built from source)
+  # MLRunX API Server (built from source)
   api:
     build:
       context: ../..
       dockerfile: tests/integration/Dockerfile.api
-    container_name: mlrun-test-api
+    container_name: mlrunx-test-api
     ports:
       - "13001:3001"  # HTTP API
       - "15051:50051" # gRPC
     environment:
-      RUST_LOG: info,mlrun_api=debug
-      MLRUN_HTTP_PORT: "3001"
-      MLRUN_GRPC_PORT: "50051"
-      MLRUN_AUTH_DISABLED: "true"  # Disable auth for tests
-      DATABASE_URL: postgres://mlrun:test_password@postgres:5432/mlrun_test
+      RUST_LOG: info,mlrunx_api=debug
+      MLRUNX_HTTP_PORT: "3001"
+      MLRUNX_GRPC_PORT: "50051"
+      MLRUNX_AUTH_DISABLED: "true"  # Disable auth for tests
+      DATABASE_URL: postgres://mlrunx:test_password@postgres:5432/mlrunx_test
       CLICKHOUSE_URL: http://clickhouse:8123
       REDIS_URL: redis://redis:6379
     depends_on:
@@ -109,4 +109,4 @@ services:
 
 networks:
   default:
-    name: mlrun-test-network
+    name: mlrunx-test-network

@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: mlrun
+  name: mlrunx
   labels:
-    app.kubernetes.io/name: mlrun
-    app.kubernetes.io/part-of: mlrun
+    app.kubernetes.io/name: mlrunx
+    app.kubernetes.io/part-of: mlrunx

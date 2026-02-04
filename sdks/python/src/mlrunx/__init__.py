@@ -1,11 +1,11 @@
 """
-MLRun Python SDK - async, non-blocking ML experiment tracking.
+MLRunX Python SDK - async, non-blocking ML experiment tracking.
 
 Example usage:
-    import mlrun
+    import mlrunx
 
     # Initialize a run
-    run = mlrun.init(
+    run = mlrunx.init(
         project="my-project",
         name="training-run-1",
         tags={"model": "resnet50"},
@@ -24,7 +24,7 @@ Example usage:
     run.finish()
 
     # Or use as context manager:
-    with mlrun.init(project="my-project") as run:
+    with mlrunx.init(project="my-project") as run:
         for step in range(1000):
             run.log({"loss": loss}, step=step)
         # Auto-finishes on exit
@@ -32,8 +32,8 @@ Example usage:
 
 __version__ = "0.1.0"
 
-from mlrun.config import Config, configure, get_config
-from mlrun.run import Run
+from mlrunx.config import Config, configure, get_config
+from mlrunx.run import Run
 
 __all__ = [
     "__version__",
@@ -57,7 +57,7 @@ def init(
 ) -> Run:
     """Initialize a new run.
 
-    This is the main entry point for the MLRun SDK. It creates a new Run
+    This is the main entry point for the MLRunX SDK. It creates a new Run
     instance that can be used to log metrics, parameters, and artifacts.
 
     Args:
@@ -72,10 +72,10 @@ def init(
 
     Example:
         # Basic usage
-        run = mlrun.init(project="my-project")
+        run = mlrunx.init(project="my-project")
 
         # With all options
-        run = mlrun.init(
+        run = mlrunx.init(
             project="my-project",
             name="experiment-v2",
             tags={"model": "resnet50", "dataset": "imagenet"},
@@ -83,7 +83,7 @@ def init(
         )
 
         # As context manager
-        with mlrun.init(project="my-project") as run:
+        with mlrunx.init(project="my-project") as run:
             run.log({"loss": 0.5})
     """
     global _active_run
@@ -114,7 +114,7 @@ def log(data: dict[str, float | int], step: int | None = None) -> None:
         RuntimeError: If no active run exists
     """
     if _active_run is None:
-        raise RuntimeError("No active run. Call mlrun.init() first.")
+        raise RuntimeError("No active run. Call mlrunx.init() first.")
     _active_run.log(data, step=step)
 
 
@@ -128,7 +128,7 @@ def log_params(params: dict) -> None:
         RuntimeError: If no active run exists
     """
     if _active_run is None:
-        raise RuntimeError("No active run. Call mlrun.init() first.")
+        raise RuntimeError("No active run. Call mlrunx.init() first.")
     _active_run.log_params(params)
 
 
@@ -140,7 +140,7 @@ def finish() -> None:
     """
     global _active_run
     if _active_run is None:
-        raise RuntimeError("No active run. Call mlrun.init() first.")
+        raise RuntimeError("No active run. Call mlrunx.init() first.")
     _active_run.finish()
     _active_run = None
 

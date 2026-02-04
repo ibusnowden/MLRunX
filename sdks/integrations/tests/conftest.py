@@ -1,4 +1,4 @@
-"""Pytest configuration for MLRun integrations tests."""
+"""Pytest configuration for MLRunX integrations tests."""
 
 import sys
 from pathlib import Path

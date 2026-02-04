@@ -93,7 +93,7 @@ class NightlyRunner:
         return False
 
     def spin_up_stack(self, wait_timeout: int = 120) -> bool:
-        """Start the MLRun infrastructure stack.
+        """Start the MLRunX infrastructure stack.
 
         Args:
             wait_timeout: Seconds to wait for services to be healthy
@@ -101,7 +101,7 @@ class NightlyRunner:
         Returns:
             True if stack started successfully
         """
-        logger.info("Starting MLRun infrastructure...")
+        logger.info("Starting MLRunX infrastructure...")
 
         compose_file = Path("infra/docker/docker-compose.yml")
         if not compose_file.exists():
@@ -251,7 +251,7 @@ class NightlyRunner:
             Markdown report string
         """
         lines = [
-            "# MLRun Benchmark Report",
+            "# MLRunX Benchmark Report",
             "",
             f"**Date:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
             "",
@@ -337,7 +337,7 @@ class NightlyRunner:
             True if all checks passed
         """
         logger.info("=" * 60)
-        logger.info("MLRun Nightly Benchmark Suite")
+        logger.info("MLRunX Nightly Benchmark Suite")
         logger.info("=" * 60)
         logger.info(f"Scale: {scale}")
 
@@ -402,7 +402,7 @@ class NightlyRunner:
 def main():
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="MLRun Nightly Benchmark Runner",
+        description="MLRunX Nightly Benchmark Runner",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -426,7 +426,7 @@ def main():
     run_parser.add_argument(
         "--server-url",
         default="http://localhost:3001",
-        help="MLRun API server URL",
+        help="MLRunX API server URL",
     )
     run_parser.add_argument(
         "--api-key",

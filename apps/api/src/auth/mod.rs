@@ -1,4 +1,4 @@
-//! Authentication and authorization module for MLRun API.
+//! Authentication and authorization module for MLRunX API.
 //!
 //! Provides API key authentication middleware and key management.
 
@@ -100,14 +100,14 @@ impl ApiKeyStore {
     /// Initialize the store with bootstrap keys from environment.
     pub async fn init_from_env(&self) {
         // Check for dev mode (no auth required)
-        if std::env::var("MLRUN_AUTH_DISABLED").map_or(false, |v| v == "true" || v == "1") {
+        if std::env::var("MLRUNX_AUTH_DISABLED").map_or(false, |v| v == "true" || v == "1") {
             self.auth_disabled
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             info!("Authentication disabled (dev mode)");
         }
 
         // Check for bootstrap key
-        if let Ok(bootstrap_key) = std::env::var("MLRUN_API_KEY") {
+        if let Ok(bootstrap_key) = std::env::var("MLRUNX_API_KEY") {
             if !bootstrap_key.is_empty() {
                 let key = self.create_key_from_raw(
                     &bootstrap_key,
@@ -222,7 +222,7 @@ pub fn generate_api_key() -> String {
     use rand::Rng;
     let mut rng = rand::rng();
     let bytes: Vec<u8> = (0..32).map(|_| rng.random()).collect();
-    format!("mlrun_{}", hex::encode(bytes))
+    format!("mlrunx_{}", hex::encode(bytes))
 }
 
 /// Authenticated user context extracted from request.
@@ -374,14 +374,14 @@ mod tests {
 
     #[test]
     fn test_hash_api_key() {
-        let key = "mlrun_test123";
+        let key = "mlrunx_test123";
         let hash = hash_api_key(key);
 
         // Same key should produce same hash
         assert_eq!(hash, hash_api_key(key));
 
         // Different key should produce different hash
-        assert_ne!(hash, hash_api_key("mlrun_test456"));
+        assert_ne!(hash, hash_api_key("mlrunx_test456"));
     }
 
     #[test]
@@ -393,8 +393,8 @@ mod tests {
         assert_ne!(key1, key2);
 
         // Keys should start with prefix
-        assert!(key1.starts_with("mlrun_"));
-        assert!(key2.starts_with("mlrun_"));
+        assert!(key1.starts_with("mlrunx_"));
+        assert!(key2.starts_with("mlrunx_"));
 
         // Keys should be reasonable length
         assert!(key1.len() > 40);
@@ -413,7 +413,7 @@ mod tests {
             )
             .await;
 
-        assert!(raw_key.starts_with("mlrun_"));
+        assert!(raw_key.starts_with("mlrunx_"));
         assert_eq!(key.project_id, Some("project-123".to_string()));
 
         // Validate the key
@@ -453,7 +453,7 @@ mod tests {
         let key = ApiKey {
             id: "test".to_string(),
             key_hash: "hash".to_string(),
-            key_prefix: "mlrun_te".to_string(),
+            key_prefix: "mlrunx_te".to_string(),
             project_id: Some("project-123".to_string()),
             name: Some("test".to_string()),
             scopes: vec!["ingest".to_string(), "query".to_string()],
@@ -470,7 +470,7 @@ mod tests {
         let admin_key = ApiKey {
             id: "admin".to_string(),
             key_hash: "hash".to_string(),
-            key_prefix: "mlrun_ad".to_string(),
+            key_prefix: "mlrunx_ad".to_string(),
             project_id: None,
             name: Some("admin".to_string()),
             scopes: vec!["admin".to_string()],
@@ -489,7 +489,7 @@ mod tests {
         let project_key = ApiKey {
             id: "test".to_string(),
             key_hash: "hash".to_string(),
-            key_prefix: "mlrun_te".to_string(),
+            key_prefix: "mlrunx_te".to_string(),
             project_id: Some("project-123".to_string()),
             name: None,
             scopes: vec!["ingest".to_string()],
@@ -505,7 +505,7 @@ mod tests {
         let admin_key = ApiKey {
             id: "admin".to_string(),
             key_hash: "hash".to_string(),
-            key_prefix: "mlrun_ad".to_string(),
+            key_prefix: "mlrunx_ad".to_string(),
             project_id: None,
             name: None,
             scopes: vec!["admin".to_string()],

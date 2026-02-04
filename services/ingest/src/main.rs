@@ -8,7 +8,7 @@ async fn health() -> &'static str {
 }
 
 async fn root() -> &'static str {
-    "MLRun Ingest Service v0.1.0"
+    "MLRunX Ingest Service v0.1.0"
 }
 
 #[tokio::main]
@@ -26,7 +26,7 @@ async fn main() {
 
     // Start HTTP server
     let http_addr = SocketAddr::from(([0, 0, 0, 0], 3002));
-    info!("Starting MLRun Ingest HTTP on {}", http_addr);
+    info!("Starting MLRunX Ingest HTTP on {}", http_addr);
     info!("gRPC endpoint will be available on port 50051");
 
     let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();

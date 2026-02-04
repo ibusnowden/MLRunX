@@ -1,5 +1,5 @@
 # =============================================================================
-# MLRun Rust Services - Multi-stage Dockerfile
+# MLRunX Rust Services - Multi-stage Dockerfile
 # Supports building: api, ingest, processor
 # =============================================================================
 
@@ -61,12 +61,12 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/mlrun-api /usr/local/bin/
+COPY --from=builder /app/target/release/mlrunx-api /usr/local/bin/
 
 EXPOSE 3001 50051
 ENV RUST_LOG=info
 
-CMD ["mlrun-api"]
+CMD ["mlrunx-api"]
 
 # -----------------------------------------------------------------------------
 # Stage 3: Ingest service runtime
@@ -77,12 +77,12 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/mlrun-ingest /usr/local/bin/
+COPY --from=builder /app/target/release/mlrunx-ingest /usr/local/bin/
 
 EXPOSE 3002 50051
 ENV RUST_LOG=info
 
-CMD ["mlrun-ingest"]
+CMD ["mlrunx-ingest"]
 
 # -----------------------------------------------------------------------------
 # Stage 4: Processor service runtime
@@ -93,8 +93,8 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/mlrun-processor /usr/local/bin/
+COPY --from=builder /app/target/release/mlrunx-processor /usr/local/bin/
 
 ENV RUST_LOG=info
 
-CMD ["mlrun-processor"]
+CMD ["mlrunx-processor"]

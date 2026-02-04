@@ -1,4 +1,4 @@
-"""Custom GRPO Implementation for Math Training with MLRun SDK.
+"""Custom GRPO Implementation for Math Training with MLRunX SDK.
 
 This example implements Group Relative Policy Optimization (GRPO) from scratch,
 providing full control over all training aspects.
@@ -22,7 +22,7 @@ Usage:
     # Full run
     python grpo_math_custom.py --max-steps 100
 
-Note: Works in offline mode if MLRun server is not running.
+Note: Works in offline mode if MLRunX server is not running.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-import mlrun
+import mlrunx
 from system_metrics import get_system_metrics, get_device_info
 
 # Check dependencies
@@ -199,7 +199,7 @@ class CustomGRPOTrainer:
         tokenizer: AutoTokenizer,
         config: GRPOConfig,
         train_data: list[dict],
-        run: mlrun.Run,
+        run: mlrunx.Run,
     ):
         self.model = model
         self.ref_model = None  # For KL computation if needed
@@ -665,7 +665,7 @@ class CustomGRPOTrainer:
 
             all_metrics.append(metrics)
 
-            # Log to MLRun
+            # Log to MLRunX
             self.run.log(metrics, step=step)
 
             # Print progress
@@ -802,15 +802,15 @@ def main():
         config.max_steps = args.max_steps
 
     print("=" * 60)
-    print("Custom GRPO Math Training with MLRun")
+    print("Custom GRPO Math Training with MLRunX")
     print("=" * 60)
     print("\nConfiguration:")
     for key, value in config.to_dict().items():
         print(f"  {key}: {value}")
     print()
 
-    # Initialize MLRun
-    run = mlrun.init(
+    # Initialize MLRunX
+    run = mlrunx.init(
         project="grpo-math",
         name=f"grpo-custom-{config.model_name.split('/')[-1]}",
         tags={
@@ -820,7 +820,7 @@ def main():
             "features": "zero-grad,token-loss,dapo-clip",
         },
     )
-    print(f"MLRun Run ID: {run.run_id}")
+    print(f"MLRunX Run ID: {run.run_id}")
     print(f"Offline mode: {run.is_offline}")
     print()
 

@@ -1,4 +1,4 @@
-"""MLRun doctor command - Check setup and connectivity."""
+"""MLRunX doctor command - Check setup and connectivity."""
 
 import os
 import urllib.error
@@ -14,7 +14,7 @@ def check_mark(passed: bool) -> str:
 
 
 def doctor(verbose: bool = False) -> bool:
-    """Check MLRun setup and connectivity.
+    """Check MLRunX setup and connectivity.
 
     Performs the following checks:
     1. Configuration file exists
@@ -28,7 +28,7 @@ def doctor(verbose: bool = False) -> bool:
     Returns:
         True if all checks pass, False otherwise
     """
-    print("MLRun Doctor - Checking your setup...")
+    print("MLRunX Doctor - Checking your setup...")
     print("=" * 50)
     print()
 
@@ -44,7 +44,7 @@ def doctor(verbose: bool = False) -> bool:
         print(f"   API URL: {config.get('api_url', 'N/A')}")
 
     if not config_exists:
-        print("   Run 'mlrun init' to create a configuration file.")
+        print("   Run 'mlrunx init' to create a configuration file.")
         all_passed = False
 
     # Check 2: API server connectivity
@@ -56,7 +56,7 @@ def doctor(verbose: bool = False) -> bool:
         print(f"   Version: {api_version}")
 
     if not api_reachable:
-        print("   Make sure the MLRun server is running:")
+        print("   Make sure the MLRunX server is running:")
         print("   docker-compose up -d")
         all_passed = False
 
@@ -74,11 +74,11 @@ def doctor(verbose: bool = False) -> bool:
 
     if not packages_ok:
         print(f"   Missing: {', '.join(missing)}")
-        print("   Install with: pip install mlrun")
+        print("   Install with: pip install mlrunx")
         all_passed = False
 
     # Check 5: Spool directory
-    spool_dir = Path((config or {}).get("sdk", {}).get("spool_dir", ".mlrun/spool"))
+    spool_dir = Path((config or {}).get("sdk", {}).get("spool_dir", ".mlrunx/spool"))
     spool_ok = check_spool_directory(spool_dir)
     print(f"{check_mark(spool_ok)} Spool directory ({spool_dir})")
 
@@ -101,7 +101,7 @@ def doctor(verbose: bool = False) -> bool:
     print("=" * 50)
 
     if all_passed:
-        print("All checks passed! MLRun is ready to use.")
+        print("All checks passed! MLRunX is ready to use.")
         return True
     else:
         print("Some checks failed. Please fix the issues above.")
@@ -112,7 +112,7 @@ def check_api_connectivity(api_url: str) -> tuple[bool, str | None]:
     """Check if the API server is reachable.
 
     Args:
-        api_url: URL of the MLRun API
+        api_url: URL of the MLRunX API
 
     Returns:
         Tuple of (is_reachable, version_string)
@@ -131,7 +131,7 @@ def check_health_endpoint(api_url: str) -> bool:
     """Check if the health endpoint is responding.
 
     Args:
-        api_url: URL of the MLRun API
+        api_url: URL of the MLRunX API
 
     Returns:
         True if health check passes
@@ -182,13 +182,13 @@ def check_spool_directory(spool_dir: Path) -> bool:
 
 
 def check_environment_variables() -> dict[str, str]:
-    """Check for MLRun-related environment variables.
+    """Check for MLRunX-related environment variables.
 
     Returns:
-        Dictionary of MLRUN_ prefixed environment variables
+        Dictionary of MLRUNX_ prefixed environment variables
     """
     return {
         key: value
         for key, value in os.environ.items()
-        if key.startswith("MLRUN_")
+        if key.startswith("MLRUNX_")
     }

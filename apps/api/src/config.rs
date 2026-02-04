@@ -1,4 +1,4 @@
-//! Configuration for MLRun API server.
+//! Configuration for MLRunX API server.
 //!
 //! Supports configuration via environment variables.
 
@@ -63,7 +63,7 @@ impl Default for ServerConfig {
             http_addr: "0.0.0.0:3001".parse().unwrap(),
             grpc_addr: "0.0.0.0:50051".parse().unwrap(),
             ingest_mode: IngestMode::Direct,
-            log_level: "info,mlrun_api=debug".to_string(),
+            log_level: "info,mlrunx_api=debug".to_string(),
         }
     }
 }
@@ -88,13 +88,13 @@ impl ServerConfig {
             grpc_addr: format!("{}:{}", host, grpc_port).parse().unwrap(),
             ingest_mode: IngestMode::from_env(),
             log_level: std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "info,mlrun_api=debug".to_string()),
+                .unwrap_or_else(|_| "info,mlrunx_api=debug".to_string()),
         }
     }
 
     /// Log the configuration at startup.
     pub fn log_startup(&self) {
-        info!("MLRun API Configuration:");
+        info!("MLRunX API Configuration:");
         info!("  HTTP Server: {}", self.http_addr);
         info!("  gRPC Server: {}", self.grpc_addr);
         info!(

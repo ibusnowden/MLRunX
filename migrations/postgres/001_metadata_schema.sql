@@ -1,5 +1,5 @@
 -- ============================================================================
--- MLRun PostgreSQL Schema: Metadata
+-- MLRunX PostgreSQL Schema: Metadata
 -- Migration: 001_metadata_schema.sql
 -- ============================================================================
 -- Stores structured metadata for projects, runs, artifacts, and parameters.

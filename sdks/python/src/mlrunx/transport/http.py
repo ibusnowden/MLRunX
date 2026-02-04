@@ -1,4 +1,4 @@
-"""HTTP transport implementation for MLRun SDK.
+"""HTTP transport implementation for MLRunX SDK.
 
 Uses httpx for async-friendly HTTP requests.
 This is the default transport for alpha releases.
@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from mlrun.transport.base import Transport, TransportError
+from mlrunx.transport.base import Transport, TransportError
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class HttpTransport(Transport):
     """HTTP transport using httpx.
 
-    Sends batches to the MLRun API server via HTTP POST requests.
+    Sends batches to the MLRunX API server via HTTP POST requests.
     """
 
     def __init__(
@@ -31,7 +31,7 @@ class HttpTransport(Transport):
         """Initialize the HTTP transport.
 
         Args:
-            base_url: Base URL of the MLRun API server
+            base_url: Base URL of the MLRunX API server
             api_key: Optional API key for authentication
             timeout: Request timeout in seconds
         """

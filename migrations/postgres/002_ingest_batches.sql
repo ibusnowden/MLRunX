@@ -1,5 +1,5 @@
 -- ============================================================================
--- MLRun PostgreSQL Schema: Ingest Batches (Idempotency)
+-- MLRunX PostgreSQL Schema: Ingest Batches (Idempotency)
 -- Migration: 002_ingest_batches.sql
 -- ============================================================================
 -- Tracks ingested batches for idempotency and deduplication.

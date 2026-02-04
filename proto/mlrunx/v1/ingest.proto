@@ -1,4 +1,4 @@
-// MLRun Ingest Service
+// MLRunX Ingest Service
 // See: /docs/spec/ingest.md for full semantics
 //
 // The Ingest service handles high-throughput data ingestion from SDKs.
@@ -6,12 +6,12 @@
 
 syntax = "proto3";
 
-package mlrun.v1;
+package mlrunx.v1;
 
-option go_package = "github.com/mlrun/mlrun/gen/go/mlrun/v1;mlrunv1";
+option go_package = "github.com/mlrunx/mlrunx/gen/go/mlrunx/v1;mlrunv1";
 
 import "google/protobuf/timestamp.proto";
-import "mlrun/v1/common.proto";
+import "mlrunx/v1/common.proto";
 
 // =============================================================================
 // Ingest Service

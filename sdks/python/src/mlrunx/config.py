@@ -1,8 +1,8 @@
-"""MLRun SDK Configuration.
+"""MLRunX SDK Configuration.
 
 Configuration can be set via:
-1. Environment variables (MLRUN_*)
-2. Config file (~/.mlrun/config.toml)
+1. Environment variables (MLRUNX_*)
+2. Config file (~/.mlrunx/config.toml)
 3. Programmatic initialization
 """
 
@@ -47,7 +47,7 @@ class Config:
     # Offline mode and spool settings
     offline_mode: bool = False
     spool_enabled: bool = True  # Enable disk spooling when offline
-    spool_dir: Path = field(default_factory=lambda: Path.home() / ".mlrun" / "spool")
+    spool_dir: Path = field(default_factory=lambda: Path.home() / ".mlrunx" / "spool")
     spool_max_size_bytes: int = 100_000_000  # 100MB max spool size
     spool_max_file_size_bytes: int = 10_000_000  # 10MB per spool file
     spool_sync_interval_ms: int = 5000  # Sync check interval (5s)
@@ -65,46 +65,46 @@ class Config:
         """Load configuration from environment variables."""
         truthy = ("true", "1", "yes")
         return cls(
-            server_url=os.getenv("MLRUN_SERVER_URL", "http://localhost:3001"),
-            api_key=os.getenv("MLRUN_API_KEY"),
-            batch_size=int(os.getenv("MLRUN_BATCH_SIZE", "1000")),
-            batch_max_bytes=int(os.getenv("MLRUN_BATCH_MAX_BYTES", "1000000")),
-            batch_timeout_ms=int(os.getenv("MLRUN_BATCH_TIMEOUT_MS", "1000")),
-            queue_size=int(os.getenv("MLRUN_QUEUE_SIZE", "10000")),
-            coalesce_metrics=os.getenv("MLRUN_COALESCE_METRICS", "true").lower()
+            server_url=os.getenv("MLRUNX_SERVER_URL", "http://localhost:3001"),
+            api_key=os.getenv("MLRUNX_API_KEY"),
+            batch_size=int(os.getenv("MLRUNX_BATCH_SIZE", "1000")),
+            batch_max_bytes=int(os.getenv("MLRUNX_BATCH_MAX_BYTES", "1000000")),
+            batch_timeout_ms=int(os.getenv("MLRUNX_BATCH_TIMEOUT_MS", "1000")),
+            queue_size=int(os.getenv("MLRUNX_QUEUE_SIZE", "10000")),
+            coalesce_metrics=os.getenv("MLRUNX_COALESCE_METRICS", "true").lower()
             in truthy,
-            dedupe_params=os.getenv("MLRUN_DEDUPE_PARAMS", "true").lower() in truthy,
-            dedupe_tags=os.getenv("MLRUN_DEDUPE_TAGS", "true").lower() in truthy,
-            compression_enabled=os.getenv("MLRUN_COMPRESSION", "true").lower()
+            dedupe_params=os.getenv("MLRUNX_DEDUPE_PARAMS", "true").lower() in truthy,
+            dedupe_tags=os.getenv("MLRUNX_DEDUPE_TAGS", "true").lower() in truthy,
+            compression_enabled=os.getenv("MLRUNX_COMPRESSION", "true").lower()
             in truthy,
-            compression_level=int(os.getenv("MLRUN_COMPRESSION_LEVEL", "6")),
-            compression_min_bytes=int(os.getenv("MLRUN_COMPRESSION_MIN_BYTES", "1000")),
-            max_retries=int(os.getenv("MLRUN_MAX_RETRIES", "3")),
-            retry_delay_ms=int(os.getenv("MLRUN_RETRY_DELAY_MS", "1000")),
-            retry_max_delay_ms=int(os.getenv("MLRUN_RETRY_MAX_DELAY_MS", "30000")),
-            offline_mode=os.getenv("MLRUN_OFFLINE", "").lower() in truthy,
-            spool_enabled=os.getenv("MLRUN_SPOOL_ENABLED", "true").lower()
+            compression_level=int(os.getenv("MLRUNX_COMPRESSION_LEVEL", "6")),
+            compression_min_bytes=int(os.getenv("MLRUNX_COMPRESSION_MIN_BYTES", "1000")),
+            max_retries=int(os.getenv("MLRUNX_MAX_RETRIES", "3")),
+            retry_delay_ms=int(os.getenv("MLRUNX_RETRY_DELAY_MS", "1000")),
+            retry_max_delay_ms=int(os.getenv("MLRUNX_RETRY_MAX_DELAY_MS", "30000")),
+            offline_mode=os.getenv("MLRUNX_OFFLINE", "").lower() in truthy,
+            spool_enabled=os.getenv("MLRUNX_SPOOL_ENABLED", "true").lower()
             in truthy,
             spool_dir=Path(
-                os.getenv("MLRUN_SPOOL_DIR", str(Path.home() / ".mlrun" / "spool"))
+                os.getenv("MLRUNX_SPOOL_DIR", str(Path.home() / ".mlrunx" / "spool"))
             ),
-            spool_max_size_bytes=int(os.getenv("MLRUN_SPOOL_MAX_SIZE", "100000000")),
+            spool_max_size_bytes=int(os.getenv("MLRUNX_SPOOL_MAX_SIZE", "100000000")),
             spool_max_file_size_bytes=int(
-                os.getenv("MLRUN_SPOOL_MAX_FILE_SIZE", "10000000")
+                os.getenv("MLRUNX_SPOOL_MAX_FILE_SIZE", "10000000")
             ),
             spool_sync_interval_ms=int(
-                os.getenv("MLRUN_SPOOL_SYNC_INTERVAL_MS", "5000")
+                os.getenv("MLRUNX_SPOOL_SYNC_INTERVAL_MS", "5000")
             ),
             spool_retention_hours=int(
-                os.getenv("MLRUN_SPOOL_RETENTION_HOURS", "72")
+                os.getenv("MLRUNX_SPOOL_RETENTION_HOURS", "72")
             ),
             health_check_interval_ms=int(
-                os.getenv("MLRUN_HEALTH_CHECK_INTERVAL_MS", "10000")
+                os.getenv("MLRUNX_HEALTH_CHECK_INTERVAL_MS", "10000")
             ),
             connection_timeout_ms=int(
-                os.getenv("MLRUN_CONNECTION_TIMEOUT_MS", "5000")
+                os.getenv("MLRUNX_CONNECTION_TIMEOUT_MS", "5000")
             ),
-            debug=os.getenv("MLRUN_DEBUG", "").lower() in truthy,
+            debug=os.getenv("MLRUNX_DEBUG", "").lower() in truthy,
         )
 
 

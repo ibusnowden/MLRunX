@@ -1,5 +1,5 @@
 # =============================================================================
-# MLRun Docker Compose Stack
+# MLRunX Docker Compose Stack
 # Complete local development environment.
 #
 # Usage:
@@ -22,7 +22,7 @@ services:
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
-    container_name: mlrun-clickhouse
+    container_name: mlrunx-clickhouse
     ports:
       - "8123:8123"  # HTTP
       - "9000:9000"  # Native TCP
@@ -32,9 +32,9 @@ services:
       - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/users.xml:ro
       - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
     environment:
-      CLICKHOUSE_DB: mlrun
-      CLICKHOUSE_USER: mlrun
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-mlrun_dev}
+      CLICKHOUSE_DB: mlrunx
+      CLICKHOUSE_USER: mlrunx
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-mlrunx_dev}
     healthcheck:
       # Use default user for healthcheck (always exists, no password required)
       test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
@@ -43,40 +43,40 @@ services:
       retries: 10
     restart: unless-stopped
     networks:
-      - mlrun-network
+      - mlrunx-network
 
   postgres:
     image: postgres:16-alpine
-    container_name: mlrun-postgres
+    container_name: mlrunx-postgres
     ports:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     environment:
-      POSTGRES_DB: mlrun
-      POSTGRES_USER: mlrun
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mlrun_dev}
+      POSTGRES_DB: mlrunx
+      POSTGRES_USER: mlrunx
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mlrunx_dev}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U mlrun -d mlrun"]
+      test: ["CMD-SHELL", "pg_isready -U mlrunx -d mlrunx"]
       interval: 10s
       timeout: 5s
       retries: 10
     restart: unless-stopped
     networks:
-      - mlrun-network
+      - mlrunx-network
 
   minio:
     image: minio/minio:latest
-    container_name: mlrun-minio
+    container_name: mlrunx-minio
     ports:
       - "9001:9000"  # API
       - "9002:9001"  # Console
     volumes:
       - minio-data:/data
     environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-mlrun}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-mlrun_dev_secret}
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-mlrunx}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-mlrunx_dev_secret}
     command: server /data --console-address ":9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
@@ -85,12 +85,12 @@ services:
       retries: 10
     restart: unless-stopped
     networks:
-      - mlrun-network
+      - mlrunx-network
 
   # MinIO init container - creates bucket on startup
   minio-init:
     image: minio/mc:latest
-    container_name: mlrun-minio-init
+    container_name: mlrunx-minio-init
     depends_on:
       minio:
         condition: service_healthy
@@ -99,16 +99,16 @@ services:
     environment:
       MINIO_HOST: minio
       MINIO_PORT: "9000"
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-mlrun}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-mlrun_dev_secret}
-      MINIO_BUCKET: ${MINIO_BUCKET:-mlrun-artifacts}
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-mlrunx}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-mlrunx_dev_secret}
+      MINIO_BUCKET: ${MINIO_BUCKET:-mlrunx-artifacts}
     entrypoint: ["/bin/sh", "/scripts/create_bucket.sh"]
     networks:
-      - mlrun-network
+      - mlrunx-network
 
   redis:
     image: redis:7-alpine
-    container_name: mlrun-redis
+    container_name: mlrunx-redis
     ports:
       - "6379:6379"
     volumes:
@@ -120,7 +120,7 @@ services:
       retries: 5
     restart: unless-stopped
     networks:
-      - mlrun-network
+      - mlrunx-network
 
   # =============================================================================
   # Observability (optional)
@@ -128,7 +128,7 @@ services:
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.96.0
-    container_name: mlrun-otel
+    container_name: mlrunx-otel
     profiles: ["observability"]
     ports:
       - "4317:4317"  # OTLP gRPC
@@ -139,7 +139,7 @@ services:
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     restart: unless-stopped
     networks:
-      - mlrun-network
+      - mlrunx-network
 
   # =============================================================================
   # Application Services
@@ -152,25 +152,25 @@ services:
       target: api
       args:
         RUST_VERSION: ${RUST_VERSION:-1.88}
-    container_name: mlrun-api
+    container_name: mlrunx-api
     ports:
       - "3001:3001"   # HTTP API
       - "50051:50051" # gRPC
     environment:
-      RUST_LOG: ${RUST_LOG:-info,mlrun_api=debug}
-      MLRUN_HTTP_PORT: "3001"
-      MLRUN_GRPC_PORT: "50051"
-      MLRUN_AUTH_DISABLED: ${MLRUN_AUTH_DISABLED:-false}
-      MLRUN_API_KEY: ${MLRUN_API_KEY:-}
-      DATABASE_URL: postgres://mlrun:${POSTGRES_PASSWORD:-mlrun_dev}@postgres:5432/mlrun
+      RUST_LOG: ${RUST_LOG:-info,mlrunx_api=debug}
+      MLRUNX_HTTP_PORT: "3001"
+      MLRUNX_GRPC_PORT: "50051"
+      MLRUNX_AUTH_DISABLED: ${MLRUNX_AUTH_DISABLED:-false}
+      MLRUNX_API_KEY: ${MLRUNX_API_KEY:-}
+      DATABASE_URL: postgres://mlrunx:${POSTGRES_PASSWORD:-mlrunx_dev}@postgres:5432/mlrunx
       CLICKHOUSE_URL: http://clickhouse:8123
-      CLICKHOUSE_USER: mlrun
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-mlrun_dev}
+      CLICKHOUSE_USER: mlrunx
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-mlrunx_dev}
       REDIS_URL: redis://redis:6379
       MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-mlrun}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-mlrun_dev_secret}
-      MINIO_BUCKET: ${MINIO_BUCKET:-mlrun-artifacts}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-mlrunx}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-mlrunx_dev_secret}
+      MINIO_BUCKET: ${MINIO_BUCKET:-mlrunx-artifacts}
     depends_on:
       postgres:
         condition: service_healthy
@@ -187,13 +187,13 @@ services:
       retries: 10
     restart: unless-stopped
     networks:
-      - mlrun-network
+      - mlrunx-network
 
   ui:
     build:
       context: ../..
       dockerfile: infra/docker/Dockerfile.ui
-    container_name: mlrun-ui
+    container_name: mlrunx-ui
     ports:
       - "3000:3000"
     environment:
@@ -208,15 +208,15 @@ services:
       retries: 10
     restart: unless-stopped
     networks:
-      - mlrun-network
+      - mlrunx-network
 
 # =============================================================================
 # Networks
 # =============================================================================
 
 networks:
-  mlrun-network:
-    name: mlrun-network
+  mlrunx-network:
+    name: mlrunx-network
     driver: bridge
 
 # =============================================================================

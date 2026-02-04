@@ -6,7 +6,7 @@ managed:
   enabled: true
   override:
     - file_option: go_package_prefix
-      value: github.com/mlrun/mlrun/gen/go
+      value: github.com/mlrunx/mlrunx/gen/go
 
 plugins:
   # Rust generation via prost (handled separately by build.rs)
@@ -14,10 +14,10 @@ plugins:
 
   # Python protobuf stubs
   - remote: buf.build/protocolbuffers/python
-    out: sdks/python/src/mlrun/proto
+    out: sdks/python/src/mlrunx/proto
     opt:
-      - pyi_out=sdks/python/src/mlrun/proto
+      - pyi_out=sdks/python/src/mlrunx/proto
 
   # Python gRPC stubs
   - remote: buf.build/grpc/python
-    out: sdks/python/src/mlrun/proto
+    out: sdks/python/src/mlrunx/proto

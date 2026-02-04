@@ -1,4 +1,4 @@
-# MLRun API - Integration Test Build
+# MLRunX API - Integration Test Build
 # Builds the API server for integration testing.
 
 ARG RUST_VERSION=1.88
@@ -32,7 +32,7 @@ RUN mkdir -p apps/api/src crates/proto/src services/ingest/src services/processo
     echo "fn main() {}" > services/processor/src/main.rs
 
 # Build dependencies (cached layer)
-RUN cargo build --release --package mlrun-api 2>/dev/null || true
+RUN cargo build --release --package mlrunx-api 2>/dev/null || true
 
 # Copy actual source
 COPY apps/api/src apps/api/src
@@ -42,7 +42,7 @@ COPY crates/proto/src crates/proto/src
 RUN touch apps/api/src/main.rs crates/proto/src/lib.rs
 
 # Build the API
-RUN cargo build --release --package mlrun-api
+RUN cargo build --release --package mlrunx-api
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -52,8 +52,8 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/mlrun-api /usr/local/bin/mlrun-api
+COPY --from=builder /app/target/release/mlrunx-api /usr/local/bin/mlrunx-api
 
 EXPOSE 3001 50051
 
-CMD ["mlrun-api"]
+CMD ["mlrunx-api"]

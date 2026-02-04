@@ -1,10 +1,10 @@
 [package]
-name = "mlrun-proto"
+name = "mlrunx-proto"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "MLRun protobuf definitions and generated Rust code"
+description = "MLRunX protobuf definitions and generated Rust code"
 
 [dependencies]
 prost.workspace = true

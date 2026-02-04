@@ -1,4 +1,4 @@
-# MLRun CI Pipeline
+# MLRunX CI Pipeline
 # Runs on PRs and pushes to main
 # See: docs/testing.md for test strategy
 
@@ -185,12 +185,12 @@ jobs:
 
       - name: Generate Python protos
         run: |
-          mkdir -p sdks/python/src/mlrun/proto
+          mkdir -p sdks/python/src/mlrunx/proto
           buf generate --template buf.gen.yaml
 
       - name: Check for drift
         run: |
-          if git diff --exit-code sdks/python/src/mlrun/proto/; then
+          if git diff --exit-code sdks/python/src/mlrunx/proto/; then
             echo "Proto codegen is up to date"
           else
             echo "ERROR: Generated proto files have drifted!"
@@ -213,7 +213,7 @@ jobs:
           version: "25.x"
 
       - name: Verify Rust proto crate builds
-        run: cargo build -p mlrun-proto
+        run: cargo build -p mlrunx-proto
 
   # ===========================================================================
   # Integration Tests
@@ -250,11 +250,11 @@ jobs:
         run: pip install -r tests/integration/requirements.txt
 
       - name: Build API binary
-        run: cargo build --release --package mlrun-api
+        run: cargo build --release --package mlrunx-api
 
       - name: Start API server
         run: |
-          MLRUN_DEV_MODE=true RUST_LOG=info ./target/release/mlrun-api &
+          MLRUNX_DEV_MODE=true RUST_LOG=info ./target/release/mlrunx-api &
           echo "Waiting for API to start..."
           for i in {1..30}; do
             if curl -s http://localhost:3001/health > /dev/null; then
@@ -269,7 +269,7 @@ jobs:
 
       - name: Stop API server
         if: always()
-        run: pkill mlrun-api || true
+        run: pkill mlrunx-api || true
 
   # ===========================================================================
   # UI (placeholder)

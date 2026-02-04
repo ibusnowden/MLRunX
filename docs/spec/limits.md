@@ -3,7 +3,7 @@
 > **Status**: Alpha
 > **Last Updated**: 2026-01
 
-This document defines the authoritative limits and constraints for MLRun. These limits apply to the Alpha release and may change in future versions.
+This document defines the authoritative limits and constraints for MLRunX. These limits apply to the Alpha release and may change in future versions.
 
 ## Table of Contents
 
@@ -51,7 +51,7 @@ Most limits in Alpha are soft—we prefer degraded operation over hard failures.
 | Allowed chars | `a-z`, `0-9`, `-`, `_` |
 | Case | Lowercase only |
 | First char | Must be letter |
-| Reserved | Cannot start with `mlrun-` or `system-` |
+| Reserved | Cannot start with `mlrunx-` or `system-` |
 
 **Regex**: `^[a-z][a-z0-9_-]{0,127}$`
 
@@ -102,7 +102,7 @@ Most limits in Alpha are soft—we prefer degraded operation over hard failures.
 | Max length | 128 |
 | Allowed chars | `a-z`, `A-Z`, `0-9`, `.`, `-`, `_` |
 | Case | Case-sensitive |
-| Reserved prefixes | `mlrun.` (system tags) |
+| Reserved prefixes | `mlrunx.` (system tags) |
 
 ### Parameter Names
 
@@ -429,7 +429,7 @@ run.log({"loss": 0.4})  # Buffered
 # SDK logs warnings but doesn't fail
 response = client.log_metrics(batch)
 for warning in response.warnings:
-    logger.warning(f"MLRun: {warning.message}")
+    logger.warning(f"MLRunX: {warning.message}")
 ```
 
 ### Error Handling
@@ -449,4 +449,4 @@ except InvalidArgumentError as e:
 
 - [Ingest Service Specification](ingest.md)
 - [Query Service Specification](query.md)
-- [Proto Definitions](/proto/mlrun/v1/common.proto)
+- [Proto Definitions](/proto/mlrunx/v1/common.proto)

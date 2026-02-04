@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# MLRun MinIO Bucket Initialization
+# MLRunX MinIO Bucket Initialization
 # Creates the artifacts bucket on startup.
 # ============================================================================
 
@@ -8,9 +8,9 @@ set -e
 
 MINIO_HOST="${MINIO_HOST:-minio}"
 MINIO_PORT="${MINIO_PORT:-9000}"
-MINIO_ROOT_USER="${MINIO_ROOT_USER:-mlrun}"
-MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-mlrun_dev_secret}"
-BUCKET_NAME="${MINIO_BUCKET:-mlrun-artifacts}"
+MINIO_ROOT_USER="${MINIO_ROOT_USER:-mlrunx}"
+MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-mlrunx_dev_secret}"
+BUCKET_NAME="${MINIO_BUCKET:-mlrunx-artifacts}"
 
 echo "Waiting for MinIO to be ready..."
 until mc alias set local http://${MINIO_HOST}:${MINIO_PORT} ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} 2>/dev/null; do

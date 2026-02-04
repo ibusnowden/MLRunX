@@ -1,6 +1,6 @@
-From github.com:ibusnowden/MLRun
+From github.com:ibusnowden/MLRunX
  * [new branch]      1-core-001-repo-monorepo-scaffold                      -> origin/1-core-001-repo-monorepo-scaffold
- * [new branch]      10-cli-002-mlrun-doctor                                -> origin/10-cli-002-mlrun-doctor
+ * [new branch]      10-cli-002-mlrunx-doctor                                -> origin/10-cli-002-mlrunx-doctor
  * [new branch]      11-ing-001-ingest-batch-endpoint                       -> origin/11-ing-001-ingest-batch-endpoint
  * [new branch]      12-ing-002-auth-api-keys                               -> origin/12-ing-002-auth-api-keys
  * [new branch]      13-sto-001-clickhouse-metrics-schema-v0                -> origin/13-sto-001-clickhouse-metrics-schema-v0
@@ -64,7 +64,7 @@ From github.com:ibusnowden/MLRun
  * [new branch]      69-ops-000-data-backuprestore-for-local-stack          -> origin/69-ops-000-data-backuprestore-for-local-stack
  * [new branch]      7-sdk-003-offline-spool-and-retry                      -> origin/7-sdk-003-offline-spool-and-retry
  * [new branch]      8-sdk-004-minimal-training-loop-examples               -> origin/8-sdk-004-minimal-training-loop-examples
- * [new branch]      9-cli-001-mlrun-init                                   -> origin/9-cli-001-mlrun-init
+ * [new branch]      9-cli-001-mlrunx-init                                   -> origin/9-cli-001-mlrunx-init
 
 
 

@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "MLRun",
+  title: "MLRunX",
   description: "ML Experiment Tracking Dashboard",
 };
 

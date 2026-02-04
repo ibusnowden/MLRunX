@@ -1,10 +1,10 @@
-# MLRun Local Backup & Restore
+# MLRunX Local Backup & Restore
 
-Guide for backing up and restoring MLRun data when running the local Docker Compose stack.
+Guide for backing up and restoring MLRunX data when running the local Docker Compose stack.
 
 ## Overview
 
-MLRun stores data in three main systems:
+MLRunX stores data in three main systems:
 
 | System | Data | Backup Method |
 |--------|------|---------------|
@@ -77,7 +77,7 @@ Backups are stored in `infra/docker/backups/` by default.
 Specify a custom backup directory:
 
 ```bash
-./scripts/backup.sh /mnt/external-drive/mlrun-backups
+./scripts/backup.sh /mnt/external-drive/mlrunx-backups
 ```
 
 ## Automated Backups
@@ -88,31 +88,31 @@ Add to your crontab (`crontab -e`):
 
 ```bash
 # Daily backup at 2 AM
-0 2 * * * /path/to/mlrun/infra/docker/scripts/backup.sh /path/to/backups
+0 2 * * * /path/to/mlrunx/infra/docker/scripts/backup.sh /path/to/backups
 
 # Weekly backup on Sunday at 3 AM
-0 3 * * 0 /path/to/mlrun/infra/docker/scripts/backup.sh /path/to/backups/weekly
+0 3 * * 0 /path/to/mlrunx/infra/docker/scripts/backup.sh /path/to/backups/weekly
 ```
 
 ### Using systemd Timer
 
-Create `/etc/systemd/system/mlrun-backup.service`:
+Create `/etc/systemd/system/mlrunx-backup.service`:
 
 ```ini
 [Unit]
-Description=MLRun Backup
+Description=MLRunX Backup
 
 [Service]
 Type=oneshot
-ExecStart=/path/to/mlrun/infra/docker/scripts/backup.sh /path/to/backups
+ExecStart=/path/to/mlrunx/infra/docker/scripts/backup.sh /path/to/backups
 User=your-user
 ```
 
-Create `/etc/systemd/system/mlrun-backup.timer`:
+Create `/etc/systemd/system/mlrunx-backup.timer`:
 
 ```ini
 [Unit]
-Description=Daily MLRun Backup
+Description=Daily MLRunX Backup
 
 [Timer]
 OnCalendar=*-*-* 02:00:00
@@ -125,7 +125,7 @@ WantedBy=timers.target
 Enable:
 
 ```bash
-sudo systemctl enable --now mlrun-backup.timer
+sudo systemctl enable --now mlrunx-backup.timer
 ```
 
 ## Retention Policy
@@ -188,43 +188,43 @@ If you prefer manual control:
 
 ```bash
 # Backup
-docker exec mlrun-postgres pg_dump -U mlrun mlrun > backup.sql
+docker exec mlrunx-postgres pg_dump -U mlrunx mlrunx > backup.sql
 
 # Restore
-cat backup.sql | docker exec -i mlrun-postgres psql -U mlrun mlrun
+cat backup.sql | docker exec -i mlrunx-postgres psql -U mlrunx mlrunx
 ```
 
 ### ClickHouse
 
 ```bash
 # Backup (JSON format for readability)
-docker exec mlrun-clickhouse clickhouse-client \
-  --user mlrun --password mlrun_dev \
-  --query "SELECT * FROM mlrun.metrics FORMAT JSONEachRow" > metrics.json
+docker exec mlrunx-clickhouse clickhouse-client \
+  --user mlrunx --password mlrunx_dev \
+  --query "SELECT * FROM mlrunx.metrics FORMAT JSONEachRow" > metrics.json
 
 # Backup (Native format for efficiency)
-docker exec mlrun-clickhouse clickhouse-client \
-  --user mlrun --password mlrun_dev \
-  --query "SELECT * FROM mlrun.metrics FORMAT Native" > metrics.native
+docker exec mlrunx-clickhouse clickhouse-client \
+  --user mlrunx --password mlrunx_dev \
+  --query "SELECT * FROM mlrunx.metrics FORMAT Native" > metrics.native
 
 # Restore
-cat metrics.native | docker exec -i mlrun-clickhouse clickhouse-client \
-  --user mlrun --password mlrun_dev \
-  --query "INSERT INTO mlrun.metrics FORMAT Native"
+cat metrics.native | docker exec -i mlrunx-clickhouse clickhouse-client \
+  --user mlrunx --password mlrunx_dev \
+  --query "INSERT INTO mlrunx.metrics FORMAT Native"
 ```
 
 ### MinIO
 
 ```bash
 # Backup using mc
-docker run --rm --network mlrun-network \
+docker run --rm --network mlrunx-network \
   -v $(pwd)/backup:/backup \
-  minio/mc mc mirror minio/mlrun-artifacts /backup/
+  minio/mc mc mirror minio/mlrunx-artifacts /backup/
 
 # Restore using mc
-docker run --rm --network mlrun-network \
+docker run --rm --network mlrunx-network \
   -v $(pwd)/backup:/backup:ro \
-  minio/mc mc mirror /backup/ minio/mlrun-artifacts/
+  minio/mc mc mirror /backup/ minio/mlrunx-artifacts/
 ```
 
 ## Troubleshooting
@@ -267,7 +267,7 @@ docker compose up -d
 
 ### Complete Data Loss
 
-1. Install fresh MLRun stack
+1. Install fresh MLRunX stack
 2. Start data stores only:
    ```bash
    docker compose up -d postgres clickhouse minio redis
@@ -288,7 +288,7 @@ To restore only specific components:
 
 ```bash
 # PostgreSQL only
-gunzip -c backup/postgres.sql.gz | docker exec -i mlrun-postgres psql -U mlrun mlrun
+gunzip -c backup/postgres.sql.gz | docker exec -i mlrunx-postgres psql -U mlrunx mlrunx
 
 # ClickHouse only
 # (see manual commands above)

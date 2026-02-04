@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MLRun Integration Test Runner
+MLRunX Integration Test Runner
 
 Runs end-to-end scenarios against the ephemeral test stack.
 See: TEST-002 for specification.
@@ -31,8 +31,8 @@ from typing import Any
 import requests
 
 # Test configuration
-API_URL = os.environ.get("MLRUN_TEST_API_URL", "http://localhost:13001")
-GRPC_URL = os.environ.get("MLRUN_TEST_GRPC_URL", "localhost:15051")
+API_URL = os.environ.get("MLRUNX_TEST_API_URL", "http://localhost:13001")
+GRPC_URL = os.environ.get("MLRUNX_TEST_GRPC_URL", "localhost:15051")
 TIMEOUT = 30  # seconds
 
 
@@ -47,7 +47,7 @@ class TestResult:
 
 
 class MLRunTestClient:
-    """HTTP client for MLRun API testing."""
+    """HTTP client for MLRunX API testing."""
 
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
@@ -455,7 +455,7 @@ def print_summary(results: list[TestResult]) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="MLRun Integration Test Runner")
+    parser = argparse.ArgumentParser(description="MLRunX Integration Test Runner")
     parser.add_argument(
         "--api-url",
         default=API_URL,

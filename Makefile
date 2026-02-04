@@ -7,7 +7,7 @@
 
 # Default target
 help:
-	@echo "MLRun Development Commands"
+	@echo "MLRunX Development Commands"
 	@echo ""
 	@echo "Build:"
 	@echo "  make build        - Build all components"
@@ -102,26 +102,26 @@ proto-gen: proto-gen-python
 proto-gen-python:
 	@echo "Generating Python proto stubs..."
 	@command -v buf >/dev/null 2>&1 || { echo "buf not found. Install with: brew install bufbuild/buf/buf"; exit 1; }
-	@mkdir -p sdks/python/src/mlrun/proto
+	@mkdir -p sdks/python/src/mlrunx/proto
 	buf generate --template buf.gen.yaml
 
 # Verify generated code is up to date (for CI)
 proto-check: proto-lint
 	@echo "Verifying proto generation is reproducible..."
 	@# Save current state
-	@cp -r sdks/python/src/mlrun/proto /tmp/proto-backup 2>/dev/null || true
+	@cp -r sdks/python/src/mlrunx/proto /tmp/proto-backup 2>/dev/null || true
 	@# Regenerate
 	@$(MAKE) proto-gen-python
 	@# Compare (if backup exists)
 	@if [ -d /tmp/proto-backup ]; then \
-		diff -r sdks/python/src/mlrun/proto /tmp/proto-backup && \
+		diff -r sdks/python/src/mlrunx/proto /tmp/proto-backup && \
 		echo "Proto generation is reproducible" || \
 		(echo "ERROR: Generated proto files have drifted. Run 'make proto' and commit." && exit 1); \
 		rm -rf /tmp/proto-backup; \
 	fi
 	@# Also verify Rust proto crate builds
 	@echo "Verifying Rust proto crate builds..."
-	cargo build -p mlrun-proto
+	cargo build -p mlrunx-proto
 
 # =============================================================================
 # Development targets
@@ -137,13 +137,13 @@ dev-ui:
 	cd apps/ui && npm run dev
 
 dev-api:
-	cargo run --bin mlrun-api
+	cargo run --bin mlrunx-api
 
 dev-ingest:
-	cargo run --bin mlrun-ingest
+	cargo run --bin mlrunx-ingest
 
 dev-processor:
-	cargo run --bin mlrun-processor
+	cargo run --bin mlrunx-processor
 
 # =============================================================================
 # Quality targets

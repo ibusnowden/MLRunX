@@ -1,4 +1,4 @@
-"""MLRun CLI - Command-line interface for MLRun."""
+"""MLRunX CLI - Command-line interface for MLRunX."""
 
 import argparse
 import sys
@@ -8,15 +8,15 @@ from .init import init_project
 
 
 def main():
-    """Main entry point for the mlrun CLI."""
+    """Main entry point for the mlrunx CLI."""
     parser = argparse.ArgumentParser(
-        prog="mlrun",
-        description="MLRun - ML Experiment Tracking CLI",
+        prog="mlrunx",
+        description="MLRunX - ML Experiment Tracking CLI",
     )
     parser.add_argument(
         "--version",
         action="version",
-        version="mlrun 0.1.0",
+        version="mlrunx 0.1.0",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -24,7 +24,7 @@ def main():
     # init command
     init_parser = subparsers.add_parser(
         "init",
-        help="Initialize MLRun in the current directory",
+        help="Initialize MLRunX in the current directory",
     )
     init_parser.add_argument(
         "--project",
@@ -36,7 +36,7 @@ def main():
         "--api-url",
         type=str,
         default="http://localhost:3001",
-        help="MLRun API URL (default: http://localhost:3001)",
+        help="MLRunX API URL (default: http://localhost:3001)",
     )
     init_parser.add_argument(
         "--force",
@@ -48,7 +48,7 @@ def main():
     # doctor command
     doctor_parser = subparsers.add_parser(
         "doctor",
-        help="Check MLRun setup and connectivity",
+        help="Check MLRunX setup and connectivity",
     )
     doctor_parser.add_argument(
         "--verbose",

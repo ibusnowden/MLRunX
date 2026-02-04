@@ -48,19 +48,19 @@ impl LimitsConfig {
     pub fn from_env() -> Self {
         let mut config = Self::default();
 
-        if let Ok(val) = std::env::var("MLRUN_MAX_TAG_KEYS_PER_RUN") {
+        if let Ok(val) = std::env::var("MLRUNX_MAX_TAG_KEYS_PER_RUN") {
             if let Ok(n) = val.parse() {
                 config.max_tag_keys_per_run = n;
             }
         }
 
-        if let Ok(val) = std::env::var("MLRUN_MAX_METRIC_NAMES_PER_RUN") {
+        if let Ok(val) = std::env::var("MLRUNX_MAX_METRIC_NAMES_PER_RUN") {
             if let Ok(n) = val.parse() {
                 config.max_metric_names_per_run = n;
             }
         }
 
-        if let Ok(val) = std::env::var("MLRUN_MAX_TAGS_PER_PROJECT") {
+        if let Ok(val) = std::env::var("MLRUNX_MAX_TAGS_PER_PROJECT") {
             if let Ok(n) = val.parse() {
                 config.max_tags_per_project = n;
             }

@@ -1,10 +1,10 @@
-# buf.yaml - Buf configuration for MLRun protobuf management
+# buf.yaml - Buf configuration for MLRunX protobuf management
 # See: https://buf.build/docs/configuration/v2/buf-yaml
 version: v2
 
 modules:
   - path: proto
-    name: buf.build/mlrun/mlrun
+    name: buf.build/mlrunx/mlrunx
 
 lint:
   use:

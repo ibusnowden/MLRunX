@@ -1,14 +1,14 @@
-# MLRun Architecture
+# MLRunX Architecture
 
 ## Overview
 
-MLRun is designed as a monolith-first architecture, running as a single binary that serves both HTTP and gRPC protocols. This approach simplifies deployment and debugging while maintaining clear internal boundaries for future microservice decomposition.
+MLRunX is designed as a monolith-first architecture, running as a single binary that serves both HTTP and gRPC protocols. This approach simplifies deployment and debugging while maintaining clear internal boundaries for future microservice decomposition.
 
 ## Components
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                      MLRun API Server                         │
+│                      MLRunX API Server                         │
 │                                                               │
 │  ┌─────────────────┐     ┌─────────────────┐                 │
 │  │  HTTP (axum)    │     │  gRPC (tonic)   │                 │
@@ -38,7 +38,7 @@ MLRun is designed as a monolith-first architecture, running as a single binary t
 
 ## Ingest Modes
 
-MLRun supports different ingest modes to accommodate various deployment scenarios:
+MLRunX supports different ingest modes to accommodate various deployment scenarios:
 
 ### Direct Mode (Alpha - Default)
 
@@ -147,37 +147,37 @@ All configuration is via environment variables:
 API_HOST=0.0.0.0
 API_HTTP_PORT=3001
 API_GRPC_PORT=50051
-RUST_LOG=info,mlrun_api=debug
+RUST_LOG=info,mlrunx_api=debug
 ```
 
 ### Authentication
 ```bash
-MLRUN_API_KEY=mlrun_<random>  # Bootstrap key
-MLRUN_AUTH_DISABLED=false     # Dev mode only!
+MLRUNX_API_KEY=mlrunx_<random>  # Bootstrap key
+MLRUNX_AUTH_DISABLED=false     # Dev mode only!
 ```
 
 ### Cardinality Limits
 ```bash
-MLRUN_MAX_TAG_KEYS_PER_RUN=100
-MLRUN_MAX_METRIC_NAMES_PER_RUN=1000
-MLRUN_MAX_TAGS_PER_PROJECT=10000
+MLRUNX_MAX_TAG_KEYS_PER_RUN=100
+MLRUNX_MAX_METRIC_NAMES_PER_RUN=1000
+MLRUNX_MAX_TAGS_PER_PROJECT=10000
 ```
 
 ### Storage Backends
 ```bash
 # PostgreSQL
-DATABASE_URL=postgres://user:pass@host:5432/mlrun
+DATABASE_URL=postgres://user:pass@host:5432/mlrunx
 
 # ClickHouse
 CLICKHOUSE_HOST=localhost
 CLICKHOUSE_PORT=8123
-CLICKHOUSE_USER=mlrun
-CLICKHOUSE_PASSWORD=mlrun_dev
+CLICKHOUSE_USER=mlrunx
+CLICKHOUSE_PASSWORD=mlrunx_dev
 
 # MinIO
 MINIO_ENDPOINT=http://localhost:9000
-MINIO_ACCESS_KEY=mlrun
-MINIO_SECRET_KEY=mlrun_dev_secret
+MINIO_ACCESS_KEY=mlrunx
+MINIO_SECRET_KEY=mlrunx_dev_secret
 ```
 
 ## Scaling Guidelines

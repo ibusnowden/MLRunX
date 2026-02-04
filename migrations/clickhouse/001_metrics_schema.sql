@@ -1,13 +1,13 @@
 -- ============================================================================
--- MLRun ClickHouse Schema: Metrics
+-- MLRunX ClickHouse Schema: Metrics
 -- Migration: 001_metrics_schema.sql
 -- ============================================================================
 -- Designed for high-throughput metric ingestion from ML training jobs.
 -- Uses MergeTree for efficient time-series storage with automatic TTL cleanup.
 -- ============================================================================
 
--- Create the mlrun database if it doesn't exist
-CREATE DATABASE IF NOT EXISTS mlrun;
+-- Create the mlrunx database if it doesn't exist
+CREATE DATABASE IF NOT EXISTS mlrunx;
 
 -- ============================================================================
 -- Metrics Table
@@ -21,7 +21,7 @@ CREATE DATABASE IF NOT EXISTS mlrun;
 -- Partition by month for efficient data lifecycle management.
 -- Order by (run_id, name, step) for fast metric-specific queries.
 
-CREATE TABLE IF NOT EXISTS mlrun.metrics
+CREATE TABLE IF NOT EXISTS mlrunx.metrics
 (
     -- Run identification
     run_id       String,
@@ -55,7 +55,7 @@ SETTINGS index_granularity = 8192;
 -- Pre-aggregated summary statistics per metric per run.
 -- Used for quick dashboard queries without scanning full metrics table.
 
-CREATE TABLE IF NOT EXISTS mlrun.metrics_summary
+CREATE TABLE IF NOT EXISTS mlrunx.metrics_summary
 (
     run_id       String,
     project_id   String,
@@ -80,8 +80,8 @@ ORDER BY (run_id, name)
 SETTINGS index_granularity = 8192;
 
 -- Materialized view to auto-populate summary
-CREATE MATERIALIZED VIEW IF NOT EXISTS mlrun.metrics_summary_mv
-TO mlrun.metrics_summary
+CREATE MATERIALIZED VIEW IF NOT EXISTS mlrunx.metrics_summary_mv
+TO mlrunx.metrics_summary
 AS SELECT
     run_id,
     project_id,
@@ -94,7 +94,7 @@ AS SELECT
     min(timestamp) AS first_at,
     max(timestamp) AS last_at,
     now64(3) AS updated_at
-FROM mlrun.metrics
+FROM mlrunx.metrics
 GROUP BY run_id, project_id, name;
 
 -- ============================================================================
@@ -103,7 +103,7 @@ GROUP BY run_id, project_id, name;
 -- Quick lookup for total metrics per run.
 -- Updated via materialized view on insert.
 
-CREATE TABLE IF NOT EXISTS mlrun.run_metrics_count
+CREATE TABLE IF NOT EXISTS mlrunx.run_metrics_count
 (
     run_id       String,
     count        UInt64,
@@ -113,13 +113,13 @@ ENGINE = SummingMergeTree(count)
 ORDER BY run_id
 SETTINGS index_granularity = 8192;
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS mlrun.run_metrics_count_mv
-TO mlrun.run_metrics_count
+CREATE MATERIALIZED VIEW IF NOT EXISTS mlrunx.run_metrics_count_mv
+TO mlrunx.run_metrics_count
 AS SELECT
     run_id,
     count() AS count,
     now64(3) AS updated_at
-FROM mlrun.metrics
+FROM mlrunx.metrics
 GROUP BY run_id;
 
 -- ============================================================================
@@ -128,7 +128,7 @@ GROUP BY run_id;
 -- For GPU utilization, memory usage, etc. collected by SDK.
 -- Separate from training metrics for different query patterns.
 
-CREATE TABLE IF NOT EXISTS mlrun.system_metrics
+CREATE TABLE IF NOT EXISTS mlrunx.system_metrics
 (
     run_id       String,
 

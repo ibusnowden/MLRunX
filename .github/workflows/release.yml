@@ -1,4 +1,4 @@
-# MLRun Release Workflow
+# MLRunX Release Workflow
 # Triggered on version tags (v*)
 # Builds and publishes release artifacts
 
@@ -94,7 +94,7 @@ jobs:
 
       - name: Run contract tests
         run: |
-          protoc --proto_path=proto -o /dev/null proto/mlrun/v1/*.proto
+          protoc --proto_path=proto -o /dev/null proto/mlrunx/v1/*.proto
 
   # ===========================================================================
   # Build Docker Images
@@ -289,9 +289,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: MLRun v${{ needs.validate.outputs.version }}
+          name: MLRunX v${{ needs.validate.outputs.version }}
           body: |
-            ## MLRun v${{ needs.validate.outputs.version }}
+            ## MLRunX v${{ needs.validate.outputs.version }}
 
             ${{ steps.changelog.outputs.notes }}
 
@@ -308,8 +308,8 @@ jobs:
             ### Python Packages
 
             ```bash
-            pip install mlrun==${{ needs.validate.outputs.version }}
-            pip install mlrun-integrations==${{ needs.validate.outputs.version }}
+            pip install mlrunx==${{ needs.validate.outputs.version }}
+            pip install mlrunx-integrations==${{ needs.validate.outputs.version }}
             ```
 
             (Note: PyPI publishing will be enabled in a future release)

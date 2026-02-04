@@ -1,20 +1,20 @@
-# MLRun Python SDK
+# MLRunX Python SDK
 
 Async, non-blocking ML experiment tracking SDK for Python.
 
 ## Installation
 
 ```bash
-pip install mlrun
+pip install mlrunx
 ```
 
 ## Quick Start
 
 ```python
-import mlrun
+import mlrunx
 
 # Initialize a run (works offline if server unavailable)
-run = mlrun.init(
+run = mlrunx.init(
     project="my-project",
     name="training-run-1",
     tags={"model": "resnet50", "dataset": "imagenet"},
@@ -39,9 +39,9 @@ run.finish()
 ### Using Context Manager
 
 ```python
-import mlrun
+import mlrunx
 
-with mlrun.init(project="my-project") as run:
+with mlrunx.init(project="my-project") as run:
     run.log_params({"lr": 0.001})
 
     for step in range(1000):
@@ -73,9 +73,9 @@ Events are batched intelligently before being sent:
 
 Configure via environment variables:
 ```bash
-export MLRUN_BATCH_SIZE=500
-export MLRUN_BATCH_MAX_BYTES=500000
-export MLRUN_BATCH_TIMEOUT_MS=2000
+export MLRUNX_BATCH_SIZE=500
+export MLRUNX_BATCH_MAX_BYTES=500000
+export MLRUNX_BATCH_TIMEOUT_MS=2000
 ```
 
 ### Metric Coalescing
@@ -91,7 +91,7 @@ run.log({"loss": 0.3}, step=0)
 
 Disable with:
 ```bash
-export MLRUN_COALESCE_METRICS=false
+export MLRUNX_COALESCE_METRICS=false
 ```
 
 ### Offline Mode & Disk Spool
@@ -100,10 +100,10 @@ If the server is unavailable, events are automatically spooled to disk and synce
 
 ```python
 # Works even if server is down!
-run = mlrun.init(project="my-project")
+run = mlrunx.init(project="my-project")
 print(run.is_offline)  # True if server unavailable
 
-# Events are saved to ~/.mlrun/spool/
+# Events are saved to ~/.mlrunx/spool/
 for step in range(1000):
     run.log({"loss": loss}, step=step)
 
@@ -112,9 +112,9 @@ for step in range(1000):
 
 Configure spool settings:
 ```bash
-export MLRUN_SPOOL_ENABLED=true
-export MLRUN_SPOOL_DIR=~/.mlrun/spool
-export MLRUN_SPOOL_MAX_SIZE=100000000  # 100MB
+export MLRUNX_SPOOL_ENABLED=true
+export MLRUNX_SPOOL_DIR=~/.mlrunx/spool
+export MLRUNX_SPOOL_MAX_SIZE=100000000  # 100MB
 ```
 
 ### Compression
@@ -122,19 +122,19 @@ export MLRUN_SPOOL_MAX_SIZE=100000000  # 100MB
 Large batches are automatically compressed with gzip:
 
 ```bash
-export MLRUN_COMPRESSION=true
-export MLRUN_COMPRESSION_LEVEL=6  # 1-9
-export MLRUN_COMPRESSION_MIN_BYTES=1000  # Only compress if > 1KB
+export MLRUNX_COMPRESSION=true
+export MLRUNX_COMPRESSION_LEVEL=6  # 1-9
+export MLRUNX_COMPRESSION_MIN_BYTES=1000  # Only compress if > 1KB
 ```
 
 ## API Reference
 
-### `mlrun.init()`
+### `mlrunx.init()`
 
 Initialize a new run.
 
 ```python
-run = mlrun.init(
+run = mlrunx.init(
     project="my-project",       # Required: project name
     name="experiment-1",        # Optional: run name (auto-generated if not provided)
     tags={"key": "value"},      # Optional: initial tags
@@ -190,9 +190,9 @@ run.finish(status="finished")  # or "failed", "killed"
 ### Simple Training Loop
 
 ```python
-import mlrun
+import mlrunx
 
-run = mlrun.init(project="demo")
+run = mlrunx.init(project="demo")
 run.log_params({"lr": 0.001, "epochs": 10})
 
 for epoch in range(10):
@@ -211,10 +211,10 @@ run.finish()
 See [examples/pytorch_mnist.py](examples/pytorch_mnist.py) for a complete example.
 
 ```python
-import mlrun
+import mlrunx
 import torch
 
-with mlrun.init(project="mnist", tags={"framework": "pytorch"}) as run:
+with mlrunx.init(project="mnist", tags={"framework": "pytorch"}) as run:
     run.log_params({"lr": 0.01, "epochs": 10})
 
     for epoch in range(10):
@@ -231,7 +231,7 @@ with mlrun.init(project="mnist", tags={"framework": "pytorch"}) as run:
 See [examples/huggingface_text_classification.py](examples/huggingface_text_classification.py) for a complete example.
 
 ```python
-import mlrun
+import mlrunx
 from transformers import Trainer, TrainerCallback
 
 class MLRunCallback(TrainerCallback):
@@ -242,7 +242,7 @@ class MLRunCallback(TrainerCallback):
         if logs:
             self.run.log(logs, step=state.global_step)
 
-with mlrun.init(project="nlp", tags={"framework": "transformers"}) as run:
+with mlrunx.init(project="nlp", tags={"framework": "transformers"}) as run:
     callback = MLRunCallback(run)
     trainer = Trainer(..., callbacks=[callback])
     trainer.train()
@@ -254,25 +254,25 @@ All settings can be configured via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MLRUN_SERVER_URL` | `http://localhost:3001` | Server URL |
-| `MLRUN_API_KEY` | None | API key for authentication |
-| `MLRUN_BATCH_SIZE` | `1000` | Max events per batch |
-| `MLRUN_BATCH_MAX_BYTES` | `1000000` | Max batch size in bytes |
-| `MLRUN_BATCH_TIMEOUT_MS` | `1000` | Max time before flush (ms) |
-| `MLRUN_COALESCE_METRICS` | `true` | Merge same metric at same step |
-| `MLRUN_DEDUPE_PARAMS` | `true` | Keep only last value for params |
-| `MLRUN_COMPRESSION` | `true` | Enable gzip compression |
-| `MLRUN_SPOOL_ENABLED` | `true` | Enable disk spooling |
-| `MLRUN_SPOOL_DIR` | `~/.mlrun/spool` | Spool directory |
-| `MLRUN_OFFLINE` | `false` | Force offline mode |
-| `MLRUN_DEBUG` | `false` | Enable debug logging |
+| `MLRUNX_SERVER_URL` | `http://localhost:3001` | Server URL |
+| `MLRUNX_API_KEY` | None | API key for authentication |
+| `MLRUNX_BATCH_SIZE` | `1000` | Max events per batch |
+| `MLRUNX_BATCH_MAX_BYTES` | `1000000` | Max batch size in bytes |
+| `MLRUNX_BATCH_TIMEOUT_MS` | `1000` | Max time before flush (ms) |
+| `MLRUNX_COALESCE_METRICS` | `true` | Merge same metric at same step |
+| `MLRUNX_DEDUPE_PARAMS` | `true` | Keep only last value for params |
+| `MLRUNX_COMPRESSION` | `true` | Enable gzip compression |
+| `MLRUNX_SPOOL_ENABLED` | `true` | Enable disk spooling |
+| `MLRUNX_SPOOL_DIR` | `~/.mlrunx/spool` | Spool directory |
+| `MLRUNX_OFFLINE` | `false` | Force offline mode |
+| `MLRUNX_DEBUG` | `false` | Enable debug logging |
 
 ## Development
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/mlrun.git
-cd mlrun/sdks/python
+git clone https://github.com/your-org/mlrunx.git
+cd mlrunx/sdks/python
 
 # Create virtual environment
 python -m venv .venv
