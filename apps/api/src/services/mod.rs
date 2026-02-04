@@ -1,4 +1,4 @@
-//! Service implementations for MLRun API.
+//! Service implementations for MLRunX API.
 //!
 //! This module contains the gRPC and HTTP service implementations.
 

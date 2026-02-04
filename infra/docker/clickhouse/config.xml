@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <!--
-    MLRun ClickHouse Configuration
+    MLRunX ClickHouse Configuration
 
     Optimized for local development with safe resource defaults.
     For production, review and adjust these settings based on your hardware.
@@ -55,7 +55,7 @@
     <format_schema_path>/var/lib/clickhouse/format_schemas/</format_schema_path>
 
     <!-- Default database -->
-    <default_database>mlrun</default_database>
+    <default_database>mlrunx</default_database>
 
     <!-- Merge tree settings for local dev -->
     <merge_tree>

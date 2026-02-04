@@ -1,9 +1,9 @@
-# MLRun Testing Strategy
+# MLRunX Testing Strategy
 
 > **Status**: Alpha
 > **Last Updated**: 2026-01
 
-This document defines the testing strategy, test layers, and CI gates for MLRun.
+This document defines the testing strategy, test layers, and CI gates for MLRunX.
 
 ## Table of Contents
 
@@ -19,7 +19,7 @@ This document defines the testing strategy, test layers, and CI gates for MLRun.
 
 ## Overview
 
-MLRun uses a layered testing strategy that balances fast feedback with thorough validation:
+MLRunX uses a layered testing strategy that balances fast feedback with thorough validation:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -186,7 +186,7 @@ Nightly:
   - bench-w3        # Scaled-down W3
 ```
 
-**Alerting**: Failures notify #mlrun-ci Slack channel.
+**Alerting**: Failures notify #mlrunx-ci Slack channel.
 
 ### Release Gate
 
@@ -209,7 +209,7 @@ Release:
 ## Test Locations
 
 ```
-mlrun/
+mlrunx/
 ├── tests/
 │   ├── unit/           # Unit tests (all languages)
 │   │   ├── rust/       # Rust unit tests (also in-crate)

@@ -1,10 +1,10 @@
 # Storage Defaults and Resource Caps
 
-This document describes the default storage configuration for MLRun and how to tune it for different environments.
+This document describes the default storage configuration for MLRunX and how to tune it for different environments.
 
 ## Overview
 
-MLRun uses three storage backends:
+MLRunX uses three storage backends:
 - **ClickHouse**: Time-series metrics
 - **PostgreSQL**: Relational metadata
 - **MinIO/S3**: Binary artifacts
@@ -44,7 +44,7 @@ Default TTL in metrics schema: **90 days**
 To change retention, modify the `metrics` table:
 
 ```sql
-ALTER TABLE mlrun.metrics
+ALTER TABLE mlrunx.metrics
     MODIFY TTL timestamp + INTERVAL 30 DAY;
 ```
 
@@ -73,14 +73,14 @@ POSTGRES_MAX_CONNECTIONS=200
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `MINIO_BUCKET` | mlrun-artifacts | Default bucket name |
+| `MINIO_BUCKET` | mlrunx-artifacts | Default bucket name |
 | `MINIO_PRESIGN_EXPIRY` | 3600 | Presigned URL expiry (seconds) |
 
 ### Storage Organization
 
 Artifacts are stored as:
 ```
-mlrun-artifacts/
+mlrunx-artifacts/
   runs/{run_id}/
     {artifact_name}
 ```
@@ -138,9 +138,9 @@ POSTGRES_WORK_MEM=8MB
 ### API Server Cardinality Limits
 
 ```bash
-MLRUN_MAX_TAG_KEYS_PER_RUN=100
-MLRUN_MAX_METRIC_NAMES_PER_RUN=1000
-MLRUN_MAX_TAGS_PER_PROJECT=10000
+MLRUNX_MAX_TAG_KEYS_PER_RUN=100
+MLRUNX_MAX_METRIC_NAMES_PER_RUN=1000
+MLRUNX_MAX_TAGS_PER_PROJECT=10000
 ```
 
 ## Tuning for Production
@@ -183,7 +183,7 @@ SELECT
     formatReadableSize(sum(data_compressed_bytes)) as compressed,
     formatReadableSize(sum(data_uncompressed_bytes)) as uncompressed
 FROM system.parts
-WHERE database = 'mlrun'
+WHERE database = 'mlrunx'
 GROUP BY database, table
 ORDER BY sum(data_compressed_bytes) DESC;
 ```
@@ -192,7 +192,7 @@ ORDER BY sum(data_compressed_bytes) DESC;
 
 ```sql
 -- Check database size
-SELECT pg_size_pretty(pg_database_size('mlrun'));
+SELECT pg_size_pretty(pg_database_size('mlrunx'));
 
 -- Check table sizes
 SELECT

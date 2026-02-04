@@ -1,12 +1,12 @@
-# MLRun Protocol Buffers
+# MLRunX Protocol Buffers
 
-This directory contains the gRPC protocol buffer definitions for MLRun services.
+This directory contains the gRPC protocol buffer definitions for MLRunX services.
 
 ## Structure
 
 ```
 proto/
-└── mlrun/v1/
+└── mlrunx/v1/
     ├── common.proto   # Shared types (identifiers, metrics, errors)
     ├── ingest.proto   # Ingest service (data ingestion from SDKs)
     └── query.proto    # Query service (read access for UI/clients)
@@ -39,7 +39,7 @@ Proto definitions must match the docs, not vice versa.
 protoc --proto_path=proto \
        --proto_path=/opt/homebrew/include \
        -o /dev/null \
-       proto/mlrun/v1/*.proto
+       proto/mlrunx/v1/*.proto
 
 # Generate Rust code (requires prost)
 # (integrated into cargo build via build.rs)
@@ -49,13 +49,13 @@ python -m grpc_tools.protoc \
        --proto_path=proto \
        --python_out=sdks/python/src \
        --grpc_python_out=sdks/python/src \
-       proto/mlrun/v1/*.proto
+       proto/mlrunx/v1/*.proto
 ```
 
 ## Versioning
 
 - Current version: `v1`
-- Package: `mlrun.v1`
-- Go package: `github.com/mlrun/mlrun/gen/go/mlrun/v1`
+- Package: `mlrunx.v1`
+- Go package: `github.com/mlrunx/mlrunx/gen/go/mlrunx/v1`
 
 Breaking changes require a new version (e.g., `v2`).

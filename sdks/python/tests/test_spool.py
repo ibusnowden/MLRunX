@@ -10,8 +10,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mlrun.queue import Event, EventType
-from mlrun.spool import (
+from mlrunx.queue import Event, EventType
+from mlrunx.spool import (
     COMPLETED_EXT,
     SPOOL_EXT,
     DiskSpool,

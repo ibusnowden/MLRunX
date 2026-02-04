@@ -1,6 +1,6 @@
-"""Simple training loop example with MLRun SDK.
+"""Simple training loop example with MLRunX SDK.
 
-This example demonstrates the basic usage of MLRun for logging
+This example demonstrates the basic usage of MLRunX for logging
 metrics during a training loop. The logging is non-blocking,
 so it won't slow down your training.
 
@@ -14,7 +14,7 @@ import math
 import random
 import time
 
-import mlrun
+import mlrunx
 from system_metrics import get_system_metrics, get_device_info
 
 
@@ -37,11 +37,11 @@ def simulate_training_step(step: int) -> tuple[float, float]:
 
 
 def main() -> None:
-    """Run a simulated training loop with MLRun logging."""
-    print("Starting training with MLRun...")
+    """Run a simulated training loop with MLRunX logging."""
+    print("Starting training with MLRunX...")
 
     # Initialize a run
-    run = mlrun.init(
+    run = mlrunx.init(
         project="example-project",
         name="simple-training",
         tags={"framework": "pytorch", "task": "classification"},

@@ -1,6 +1,6 @@
-"""PyTorch MNIST training example with MLRun SDK.
+"""PyTorch MNIST training example with MLRunX SDK.
 
-This example demonstrates how to integrate MLRun with a real PyTorch
+This example demonstrates how to integrate MLRunX with a real PyTorch
 training loop for MNIST classification.
 
 Features demonstrated:
@@ -16,7 +16,7 @@ Requirements:
 Usage:
     python pytorch_mnist.py
 
-Note: Works in offline mode if MLRun server is not running.
+Note: Works in offline mode if MLRunX server is not running.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-import mlrun
+import mlrunx
 from system_metrics import get_system_metrics, get_device_info
 
 # Check for PyTorch availability
@@ -74,10 +74,10 @@ def train_epoch(
     train_loader: DataLoader,
     optimizer: optim.Optimizer,
     epoch: int,
-    run: mlrun.Run,
+    run: mlrunx.Run,
     log_interval: int = 100,
 ) -> float:
-    """Train for one epoch and log metrics to MLRun."""
+    """Train for one epoch and log metrics to MLRunX."""
     model.train()
     total_loss = 0.0
     correct = 0
@@ -99,7 +99,7 @@ def train_epoch(
         correct += pred.eq(target.view_as(pred)).sum().item()
         total += len(data)
 
-        # Log to MLRun (non-blocking)
+        # Log to MLRunX (non-blocking)
         step = global_step + batch_idx
         metrics = {
             "train/loss": loss.item(),
@@ -125,9 +125,9 @@ def validate(
     device: torch.device,
     val_loader: DataLoader,
     epoch: int,
-    run: mlrun.Run,
+    run: mlrunx.Run,
 ) -> tuple[float, float]:
-    """Validate and log metrics to MLRun."""
+    """Validate and log metrics to MLRunX."""
     model.eval()
     val_loss = 0.0
     correct = 0
@@ -157,8 +157,8 @@ def validate(
 
 
 def main() -> None:
-    """Run MNIST training with MLRun logging."""
-    parser = argparse.ArgumentParser(description="PyTorch MNIST with MLRun")
+    """Run MNIST training with MLRunX logging."""
+    parser = argparse.ArgumentParser(description="PyTorch MNIST with MLRunX")
     parser.add_argument("--epochs", type=int, default=3, help="number of epochs")
     parser.add_argument("--batch-size", type=int, default=64, help="batch size")
     parser.add_argument("--lr", type=float, default=1.0, help="learning rate")
@@ -198,13 +198,13 @@ def main() -> None:
         num_workers=2,
     )
 
-    # Initialize MLRun run using context manager
-    with mlrun.init(
+    # Initialize MLRunX run using context manager
+    with mlrunx.init(
         project="mnist-example",
         name="pytorch-cnn",
         tags={"framework": "pytorch", "model": "cnn", "dataset": "mnist"},
     ) as run:
-        print(f"\nMLRun Run ID: {run.run_id}")
+        print(f"\nMLRunX Run ID: {run.run_id}")
         print(f"Offline mode: {run.is_offline}\n")
 
         # Log hyperparameters

@@ -1,13 +1,13 @@
-"""MLRun init command - Initialize a project."""
+"""MLRunX init command - Initialize a project."""
 
 from pathlib import Path
 
 import yaml
 
-CONFIG_FILE = ".mlrun.yaml"
+CONFIG_FILE = ".mlrunx.yaml"
 CONFIG_TEMPLATE = """\
-# MLRun Configuration
-# Documentation: https://mlrun.dev/docs/configuration
+# MLRunX Configuration
+# Documentation: https://mlrunx.dev/docs/configuration
 
 project: {project_name}
 api_url: {api_url}
@@ -23,7 +23,7 @@ sdk:
 
   # Offline mode settings
   spool_enabled: true
-  spool_dir: .mlrun/spool
+  spool_dir: .mlrunx/spool
 
 # Optional: Default tags for all runs
 # tags:
@@ -37,13 +37,13 @@ def init_project(
     api_url: str = "http://localhost:3001",
     force: bool = False,
 ) -> bool:
-    """Initialize MLRun in the current directory.
+    """Initialize MLRunX in the current directory.
 
-    Creates a .mlrun.yaml configuration file with project settings.
+    Creates a .mlrunx.yaml configuration file with project settings.
 
     Args:
         project_name: Project name (defaults to current directory name)
-        api_url: MLRun API URL
+        api_url: MLRunX API URL
         force: Overwrite existing configuration
 
     Returns:
@@ -81,30 +81,30 @@ def init_project(
         return False
 
     # Create spool directory
-    spool_dir = Path(".mlrun/spool")
+    spool_dir = Path(".mlrunx/spool")
     try:
         spool_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         print(f"Warning: Failed to create spool directory: {e}")
 
-    # Create .gitignore for .mlrun directory
-    gitignore_path = Path(".mlrun/.gitignore")
+    # Create .gitignore for .mlrunx directory
+    gitignore_path = Path(".mlrunx/.gitignore")
     try:
         gitignore_path.parent.mkdir(parents=True, exist_ok=True)
         gitignore_path.write_text("# Ignore spool files (local offline data)\nspool/\n")
     except OSError:
         pass  # Not critical
 
-    print(f"Initialized MLRun project: {project_name}")
+    print(f"Initialized MLRunX project: {project_name}")
     print(f"Configuration: {config_path.absolute()}")
     print()
     print("Next steps:")
-    print("  1. Start the MLRun server (if not running):")
+    print("  1. Start the MLRunX server (if not running):")
     print("     docker-compose up -d")
     print()
     print("  2. Add tracking to your training script:")
-    print("     import mlrun")
-    print(f'     with mlrun.start_run(project="{project_name}") as run:')
+    print("     import mlrunx")
+    print(f'     with mlrunx.start_run(project="{project_name}") as run:')
     print('         run.log({"loss": 0.5, "accuracy": 0.9})')
     print()
     print("  3. View your runs:")
@@ -114,7 +114,7 @@ def init_project(
 
 
 def load_config() -> dict | None:
-    """Load MLRun configuration from .mlrun.yaml.
+    """Load MLRunX configuration from .mlrunx.yaml.
 
     Returns:
         Configuration dictionary, or None if not found

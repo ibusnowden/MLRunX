@@ -1,4 +1,4 @@
-// MLRun Query Service
+// MLRunX Query Service
 // See: /docs/spec/query.md for full semantics
 //
 // The Query service provides read access to runs, metrics, and artifacts.
@@ -6,13 +6,13 @@
 
 syntax = "proto3";
 
-package mlrun.v1;
+package mlrunx.v1;
 
-option go_package = "github.com/mlrun/mlrun/gen/go/mlrun/v1;mlrunv1";
+option go_package = "github.com/mlrunx/mlrunx/gen/go/mlrunx/v1;mlrunv1";
 
 import "google/protobuf/timestamp.proto";
-import "mlrun/v1/common.proto";
-import "mlrun/v1/ingest.proto";
+import "mlrunx/v1/common.proto";
+import "mlrunx/v1/ingest.proto";
 
 // =============================================================================
 // Query Service

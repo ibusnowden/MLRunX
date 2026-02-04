@@ -16,11 +16,11 @@ vi.mock('@/lib/api', () => ({
 import Page from '../src/app/page'
 
 describe('Home Page', () => {
-  it('renders the MLRun heading', async () => {
+  it('renders the MLRunX heading', async () => {
     render(<Page />)
     const heading = screen.getByRole('heading', { level: 1 })
     expect(heading).toBeDefined()
-    expect(heading.textContent).toContain('MLRun')
+    expect(heading.textContent).toContain('MLRunX')
     await screen.findByText(/no runs found/i)
   })
 

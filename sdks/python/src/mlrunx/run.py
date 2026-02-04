@@ -11,11 +11,11 @@ import time
 import uuid
 from typing import Any
 
-from mlrun.config import Config, get_config
-from mlrun.queue import Event, EventQueue, EventType
-from mlrun.transport.base import Transport
-from mlrun.transport.http import HttpTransport
-from mlrun.worker import FlushWorker
+from mlrunx.config import Config, get_config
+from mlrunx.queue import Event, EventQueue, EventType
+from mlrunx.transport.base import Transport
+from mlrunx.transport.http import HttpTransport
+from mlrunx.worker import FlushWorker
 
 logger = logging.getLogger(__name__)
 

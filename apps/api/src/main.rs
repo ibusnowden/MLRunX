@@ -1,4 +1,4 @@
-//! MLRun API Server
+//! MLRunX API Server
 //!
 //! This is the monolith API server that handles:
 //! - HTTP REST API for queries and SDK HTTP transport
@@ -44,7 +44,7 @@ use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use auth::{ApiKeyStore, auth_middleware};
-use mlrun_proto::mlrun::v1::ingest_service_server::IngestServiceServer;
+use mlrunx_proto::mlrunx::v1::ingest_service_server::IngestServiceServer;
 use services::{
     CardinalityTracker, IdempotencyResult, IdempotencyStore, IngestServiceImpl, MetricPayload,
     ParamPayload, TagPayload, compute_payload_hash, ingest::InMemoryStore,
@@ -68,7 +68,7 @@ async fn health() -> &'static str {
 }
 
 async fn root() -> &'static str {
-    "MLRun API v0.1.0"
+    "MLRunX API v0.1.0"
 }
 
 /// Request to initialize a run via HTTP.
@@ -113,7 +113,7 @@ async fn http_init_run(
         run_id: run_id.clone(),
         project_id: req.project.clone(),
         name: req.name.clone(),
-        status: mlrun_proto::mlrun::v1::RunStatus::Running,
+        status: mlrunx_proto::mlrunx::v1::RunStatus::Running,
         created_at: now,
         updated_at: now,
         metrics_count: 0,
@@ -336,7 +336,7 @@ async fn http_ingest_batch(
         )
     })?;
 
-    if run.status != mlrun_proto::mlrun::v1::RunStatus::Running {
+    if run.status != mlrunx_proto::mlrunx::v1::RunStatus::Running {
         return Err((
             StatusCode::PRECONDITION_FAILED,
             format!("Run {} is not running", req.run_id),
@@ -423,10 +423,10 @@ async fn http_finish_run(
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)))?;
 
     run.status = match req.status.as_str() {
-        "finished" => mlrun_proto::mlrun::v1::RunStatus::Finished,
-        "failed" => mlrun_proto::mlrun::v1::RunStatus::Failed,
-        "killed" => mlrun_proto::mlrun::v1::RunStatus::Killed,
-        _ => mlrun_proto::mlrun::v1::RunStatus::Finished,
+        "finished" => mlrunx_proto::mlrunx::v1::RunStatus::Finished,
+        "failed" => mlrunx_proto::mlrunx::v1::RunStatus::Failed,
+        "killed" => mlrunx_proto::mlrunx::v1::RunStatus::Killed,
+        _ => mlrunx_proto::mlrunx::v1::RunStatus::Finished,
     };
     run.updated_at = std::time::SystemTime::now();
 
@@ -530,10 +530,10 @@ async fn http_list_runs(
             if let Some(ref status) = query.status {
                 let status = status.to_lowercase();
                 let run_status = match run.status {
-                    mlrun_proto::mlrun::v1::RunStatus::Running => "running",
-                    mlrun_proto::mlrun::v1::RunStatus::Finished => "finished",
-                    mlrun_proto::mlrun::v1::RunStatus::Failed => "failed",
-                    mlrun_proto::mlrun::v1::RunStatus::Killed => "killed",
+                    mlrunx_proto::mlrunx::v1::RunStatus::Running => "running",
+                    mlrunx_proto::mlrunx::v1::RunStatus::Finished => "finished",
+                    mlrunx_proto::mlrunx::v1::RunStatus::Failed => "failed",
+                    mlrunx_proto::mlrunx::v1::RunStatus::Killed => "killed",
                     _ => "pending",
                 };
                 if run_status != status {
@@ -611,10 +611,10 @@ async fn http_list_runs(
                 project_id: run.project_id.clone(),
                 name: run.name.clone(),
                 status: match run.status {
-                    mlrun_proto::mlrun::v1::RunStatus::Running => "running".to_string(),
-                    mlrun_proto::mlrun::v1::RunStatus::Finished => "finished".to_string(),
-                    mlrun_proto::mlrun::v1::RunStatus::Failed => "failed".to_string(),
-                    mlrun_proto::mlrun::v1::RunStatus::Killed => "killed".to_string(),
+                    mlrunx_proto::mlrunx::v1::RunStatus::Running => "running".to_string(),
+                    mlrunx_proto::mlrunx::v1::RunStatus::Finished => "finished".to_string(),
+                    mlrunx_proto::mlrunx::v1::RunStatus::Failed => "failed".to_string(),
+                    mlrunx_proto::mlrunx::v1::RunStatus::Killed => "killed".to_string(),
                     _ => "pending".to_string(),
                 },
                 metrics_count: run.metrics_count,
@@ -685,10 +685,10 @@ async fn http_get_run(
         project_id: run.project_id.clone(),
         name: run.name.clone(),
         status: match run.status {
-            mlrun_proto::mlrun::v1::RunStatus::Running => "running".to_string(),
-            mlrun_proto::mlrun::v1::RunStatus::Finished => "finished".to_string(),
-            mlrun_proto::mlrun::v1::RunStatus::Failed => "failed".to_string(),
-            mlrun_proto::mlrun::v1::RunStatus::Killed => "killed".to_string(),
+            mlrunx_proto::mlrunx::v1::RunStatus::Running => "running".to_string(),
+            mlrunx_proto::mlrunx::v1::RunStatus::Finished => "finished".to_string(),
+            mlrunx_proto::mlrunx::v1::RunStatus::Failed => "failed".to_string(),
+            mlrunx_proto::mlrunx::v1::RunStatus::Killed => "killed".to_string(),
             _ => "pending".to_string(),
         },
         metrics_count: run.metrics_count,
@@ -869,10 +869,10 @@ async fn http_compare_runs(
             run_id: run_id.clone(),
             run_name: run.name.clone(),
             status: match run.status {
-                mlrun_proto::mlrun::v1::RunStatus::Running => "running".to_string(),
-                mlrun_proto::mlrun::v1::RunStatus::Finished => "finished".to_string(),
-                mlrun_proto::mlrun::v1::RunStatus::Failed => "failed".to_string(),
-                mlrun_proto::mlrun::v1::RunStatus::Killed => "killed".to_string(),
+                mlrunx_proto::mlrunx::v1::RunStatus::Running => "running".to_string(),
+                mlrunx_proto::mlrunx::v1::RunStatus::Finished => "finished".to_string(),
+                mlrunx_proto::mlrunx::v1::RunStatus::Failed => "failed".to_string(),
+                mlrunx_proto::mlrunx::v1::RunStatus::Killed => "killed".to_string(),
                 _ => "pending".to_string(),
             },
             series,
@@ -990,7 +990,7 @@ async fn main() {
     let ingest_service = IngestServiceImpl::new(store);
     let grpc_service = IngestServiceServer::new(ingest_service);
 
-    info!("Starting MLRun API server");
+    info!("Starting MLRunX API server");
     info!("  HTTP: http://{}", http_addr);
     info!("  gRPC: grpc://{}", grpc_addr);
 

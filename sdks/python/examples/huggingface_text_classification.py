@@ -1,6 +1,6 @@
-"""HuggingFace Transformers text classification example with MLRun SDK.
+"""HuggingFace Transformers text classification example with MLRunX SDK.
 
-This example demonstrates how to integrate MLRun with HuggingFace Transformers
+This example demonstrates how to integrate MLRunX with HuggingFace Transformers
 for fine-tuning a text classification model.
 
 Features demonstrated:
@@ -15,7 +15,7 @@ Requirements:
 Usage:
     python huggingface_text_classification.py
 
-Note: Works in offline mode if MLRun server is not running.
+Note: Works in offline mode if MLRunX server is not running.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-import mlrun
+import mlrunx
 from system_metrics import get_system_metrics, get_device_info
 
 # Check for HuggingFace availability
@@ -49,10 +49,10 @@ except ImportError:
 
 
 @dataclass
-class MLRunCallback(TrainerCallback):
-    """HuggingFace Trainer callback for logging to MLRun."""
+class MLRunXCallback(TrainerCallback):
+    """HuggingFace Trainer callback for logging to MLRunX."""
 
-    run: mlrun.Run
+    run: mlrunx.Run
 
     def on_log(
         self,
@@ -62,7 +62,7 @@ class MLRunCallback(TrainerCallback):
         logs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        """Log training metrics to MLRun."""
+        """Log training metrics to MLRunX."""
         if logs is None:
             return
 
@@ -149,8 +149,8 @@ def compute_metrics(eval_pred: tuple) -> dict[str, float]:
 
 
 def main() -> None:
-    """Run text classification fine-tuning with MLRun logging."""
-    print("HuggingFace Text Classification with MLRun")
+    """Run text classification fine-tuning with MLRunX logging."""
+    print("HuggingFace Text Classification with MLRunX")
     print("=" * 50)
 
     # Configuration
@@ -162,8 +162,8 @@ def main() -> None:
     batch_size = 16
     learning_rate = 2e-5
 
-    # Initialize MLRun
-    with mlrun.init(
+    # Initialize MLRunX
+    with mlrunx.init(
         project="huggingface-example",
         name="text-classification",
         tags={
@@ -173,7 +173,7 @@ def main() -> None:
             "task": "text-classification",
         },
     ) as run:
-        print(f"\nMLRun Run ID: {run.run_id}")
+        print(f"\nMLRunX Run ID: {run.run_id}")
         print(f"Offline mode: {run.is_offline}\n")
 
         # Log configuration
@@ -257,8 +257,8 @@ def main() -> None:
             report_to="none",  # Disable default integrations
         )
 
-        # Create MLRun callback
-        mlrun_callback = MLRunCallback(run=run)
+        # Create MLRunX callback
+        mlrunx_callback = MLRunXCallback(run=run)
 
         # Create Trainer
         trainer = Trainer(
@@ -268,7 +268,7 @@ def main() -> None:
             eval_dataset=eval_dataset,
             processing_class=tokenizer,  # Renamed from 'tokenizer' in newer versions
             compute_metrics=compute_metrics,
-            callbacks=[mlrun_callback],
+            callbacks=[mlrunx_callback],
         )
 
         # Train

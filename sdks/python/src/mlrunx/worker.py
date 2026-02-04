@@ -1,7 +1,7 @@
 """Background worker for flushing events to the server.
 
 The worker runs in a daemon thread and periodically flushes
-batched events to the MLRun server with adaptive batching,
+batched events to the MLRunX server with adaptive batching,
 optional compression, and offline spooling.
 """
 
@@ -14,13 +14,13 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from mlrun.batching import AdaptiveBatcher, BatchConfig, BatchStats, FlushMetrics
-from mlrun.queue import Event, EventQueue, EventType
-from mlrun.spool import DiskSpool, SpoolConfig, SpoolSyncer
-from mlrun.transport.base import Transport, TransportError
+from mlrunx.batching import AdaptiveBatcher, BatchConfig, BatchStats, FlushMetrics
+from mlrunx.queue import Event, EventQueue, EventType
+from mlrunx.spool import DiskSpool, SpoolConfig, SpoolSyncer
+from mlrunx.transport.base import Transport, TransportError
 
 if TYPE_CHECKING:
-    from mlrun.config import Config
+    from mlrunx.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +160,7 @@ class FlushWorker:
             self._stop_event.clear()
             self._thread = threading.Thread(
                 target=self._run,
-                name="mlrun-flush-worker",
+                name="mlrunx-flush-worker",
                 daemon=True,
             )
             self._thread.start()

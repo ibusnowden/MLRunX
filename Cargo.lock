@@ -1141,7 +1141,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mlrun-api"
+name = "mlrunx-api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1152,7 +1152,7 @@ dependencies = [
  "futures",
  "hex",
  "http-body-util",
- "mlrun-proto",
+ "mlrunx-proto",
  "opentelemetry",
  "opentelemetry-otlp",
  "prost",
@@ -1174,7 +1174,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mlrun-ingest"
+name = "mlrunx-ingest"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1183,7 +1183,7 @@ dependencies = [
  "chrono",
  "clickhouse",
  "config",
- "mlrun-proto",
+ "mlrunx-proto",
  "opentelemetry",
  "opentelemetry-otlp",
  "prost",
@@ -1201,14 +1201,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "mlrun-processor"
+name = "mlrunx-processor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
  "clickhouse",
  "config",
- "mlrun-proto",
+ "mlrunx-proto",
  "opentelemetry",
  "opentelemetry-otlp",
  "serde",
@@ -1222,7 +1222,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mlrun-proto"
+name = "mlrunx-proto"
 version = "0.1.0"
 dependencies = [
  "prost",
@@ -2237,6 +2237,7 @@ dependencies = [
  "futures-core",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
  "tokio",
  "tokio-util",

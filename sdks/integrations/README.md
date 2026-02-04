@@ -1,25 +1,25 @@
-# MLRun Integrations
+# MLRunX Integrations
 
-Framework integrations for MLRun.
+Framework integrations for MLRunX.
 
 ## Supported Frameworks
 
-- **PyTorch Lightning** - `MLRunLogger`
-- **HuggingFace Transformers** - `MLRunCallback`
-- **Optuna** - `MLRunOptunaCallback`
-- **Hydra** - `MLRunHydraCallback`
+- **PyTorch Lightning** - `MLRunXLogger`
+- **HuggingFace Transformers** - `MLRunXCallback`
+- **Optuna** - `MLRunXOptunaCallback`
+- **Hydra** - `MLRunXHydraCallback`
 
 ## Installation
 
 ```bash
 # Install with all integrations
-pip install "mlrun-integrations[all]"
+pip install "mlrunx-integrations[all]"
 
 # Or install specific integrations
-pip install "mlrun-integrations[lightning]"
-pip install "mlrun-integrations[transformers]"
-pip install "mlrun-integrations[optuna]"
-pip install "mlrun-integrations[hydra]"
+pip install "mlrunx-integrations[lightning]"
+pip install "mlrunx-integrations[transformers]"
+pip install "mlrunx-integrations[optuna]"
+pip install "mlrunx-integrations[hydra]"
 ```
 
 ## Usage
@@ -27,33 +27,33 @@ pip install "mlrun-integrations[hydra]"
 ### PyTorch Lightning
 
 ```python
-from mlrun_integrations import MLRunLogger
+from mlrunx_integrations import MLRunXLogger
 from pytorch_lightning import Trainer
 
-trainer = Trainer(logger=MLRunLogger(project="my-project"))
+trainer = Trainer(logger=MLRunXLogger(project="my-project"))
 trainer.fit(model)
 ```
 
 ### HuggingFace Transformers
 
 ```python
-from mlrun_integrations import MLRunCallback
+from mlrunx_integrations import MLRunXCallback
 from transformers import Trainer
 
 trainer = Trainer(...)
-trainer.add_callback(MLRunCallback(project="my-project"))
+trainer.add_callback(MLRunXCallback(project="my-project"))
 trainer.train()
 ```
 
 ### Optuna
 
 ```python
-from mlrun_integrations import MLRunOptunaCallback
+from mlrunx_integrations import MLRunXOptunaCallback
 import optuna
 
 study = optuna.create_study()
 study.optimize(
     objective,
-    callbacks=[MLRunOptunaCallback(project="my-project")]
+    callbacks=[MLRunXOptunaCallback(project="my-project")]
 )
 ```

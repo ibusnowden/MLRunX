@@ -28,7 +28,7 @@ prost = "0.13"
 prost-types = "0.13"
 
 # Internal crates
-mlrun-proto = { path = "crates/proto" }
+mlrunx-proto = { path = "crates/proto" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

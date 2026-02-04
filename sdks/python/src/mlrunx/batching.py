@@ -1,4 +1,4 @@
-"""Adaptive batching for MLRun SDK.
+"""Adaptive batching for MLRunX SDK.
 
 This module provides intelligent batching with:
 - Multiple flush triggers (size, bytes, time)
@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from mlrun.queue import Event, EventType
+from mlrunx.queue import Event, EventType
 
 
 @dataclass

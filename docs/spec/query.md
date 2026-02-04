@@ -1,10 +1,10 @@
 # Query Service Specification
 
 > **Status**: Alpha
-> **Proto**: `/proto/mlrun/v1/query.proto`
+> **Proto**: `/proto/mlrunx/v1/query.proto`
 > **Last Updated**: 2026-01
 
-This document defines the authoritative semantics for the MLRun Query Service. The protobuf definitions must match this specification. Any changes to the proto require updating this document first.
+This document defines the authoritative semantics for the MLRunX Query Service. The protobuf definitions must match this specification. Any changes to the proto require updating this document first.
 
 ## Table of Contents
 
@@ -461,4 +461,4 @@ The following features are **not implemented in Alpha**:
 
 - [Ingest Service Specification](ingest.md)
 - [System Limits](limits.md)
-- [Proto Definitions](/proto/mlrun/v1/query.proto)
+- [Proto Definitions](/proto/mlrunx/v1/query.proto)

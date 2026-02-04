@@ -1,4 +1,4 @@
-"""Thread-safe event queue for MLRun SDK.
+"""Thread-safe event queue for MLRunX SDK.
 
 Events are queued for batch processing by the background worker.
 The queue is bounded to prevent unbounded memory growth.

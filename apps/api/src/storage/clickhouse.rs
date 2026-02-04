@@ -35,9 +35,9 @@ impl Default for ClickHouseConfig {
     fn default() -> Self {
         Self {
             url: "http://localhost:8123".to_string(),
-            database: "mlrun".to_string(),
-            user: "mlrun".to_string(),
-            password: "mlrun_dev".to_string(),
+            database: "mlrunx".to_string(),
+            user: "mlrunx".to_string(),
+            password: "mlrunx_dev".to_string(),
         }
     }
 }
@@ -48,10 +48,10 @@ impl ClickHouseConfig {
         Self {
             url: std::env::var("CLICKHOUSE_URL")
                 .unwrap_or_else(|_| "http://localhost:8123".to_string()),
-            database: std::env::var("CLICKHOUSE_DATABASE").unwrap_or_else(|_| "mlrun".to_string()),
-            user: std::env::var("CLICKHOUSE_USER").unwrap_or_else(|_| "mlrun".to_string()),
+            database: std::env::var("CLICKHOUSE_DATABASE").unwrap_or_else(|_| "mlrunx".to_string()),
+            user: std::env::var("CLICKHOUSE_USER").unwrap_or_else(|_| "mlrunx".to_string()),
             password: std::env::var("CLICKHOUSE_PASSWORD")
-                .unwrap_or_else(|_| "mlrun_dev".to_string()),
+                .unwrap_or_else(|_| "mlrunx_dev".to_string()),
         }
     }
 }
@@ -306,8 +306,8 @@ mod tests {
     fn test_default_config() {
         let config = ClickHouseConfig::default();
         assert_eq!(config.url, "http://localhost:8123");
-        assert_eq!(config.database, "mlrun");
-        assert_eq!(config.user, "mlrun");
+        assert_eq!(config.database, "mlrunx");
+        assert_eq!(config.user, "mlrunx");
     }
 
     #[test]

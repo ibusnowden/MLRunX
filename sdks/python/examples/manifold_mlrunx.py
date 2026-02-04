@@ -1,9 +1,9 @@
 """
-Manifold Optimization Example with MLRun Integration
+Manifold Optimization Example with MLRunX Integration
 
 This example trains a 3-layer MLP on CIFAR-10 using manifold optimization
 techniques (Manifold Muon, Hyperspherical Descent) and logs comprehensive
-metrics to MLRun for visualization.
+metrics to MLRunX for visualization.
 
 Metrics logged:
 - Gradient Norm (global)
@@ -14,9 +14,9 @@ Metrics logged:
 - Weight norms and singular values
 
 Usage:
-    python manifold_mlrun.py --update manifold_muon --epochs 10
-    python manifold_mlrun.py --update hyperspherical_descent --epochs 10
-    python manifold_mlrun.py --update adam --epochs 10 --wd 0.01
+    python manifold_mlrunx.py --update manifold_muon --epochs 10
+    python manifold_mlrunx.py --update hyperspherical_descent --epochs 10
+    python manifold_mlrunx.py --update adam --epochs 10 --wd 0.01
 """
 
 import argparse
@@ -39,8 +39,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'manifold_src'))
 from manifold_muon import manifold_muon
 from hyperspherical import hyperspherical_descent
 
-# Import MLRun
-import mlrun
+# Import MLRunX
+import mlrunx
 from system_metrics import get_system_metrics, get_device_info
 
 
@@ -182,7 +182,7 @@ def compute_entropy(logits):
 
 
 def train(args, run):
-    """Main training loop with MLRun logging."""
+    """Main training loop with MLRunX logging."""
     device = get_device()
     print(f"Using device: {device}")
 
@@ -298,7 +298,7 @@ def train(args, run):
                 # System metrics (GPU, CPU, memory)
                 metrics.update(get_system_metrics())
 
-                # Log to MLRun
+                # Log to MLRunX
                 run.log(metrics, step=global_step)
 
             global_step += 1
@@ -347,7 +347,7 @@ def evaluate(model, test_loader, criterion, device):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Manifold Optimization with MLRun")
+    parser = argparse.ArgumentParser(description="Manifold Optimization with MLRunX")
     parser.add_argument("--epochs", type=int, default=5, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=0.1, help="Initial learning rate")
     parser.add_argument("--batch_size", type=int, default=512, help="Batch size")
@@ -366,8 +366,8 @@ def main():
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-    # Initialize MLRun
-    run = mlrun.init(
+    # Initialize MLRunX
+    run = mlrunx.init(
         project="manifold-optimization",
         name=f"{args.update}-lr{args.lr}-bs{args.batch_size}",
         tags={

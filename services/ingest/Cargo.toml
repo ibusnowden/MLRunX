@@ -1,14 +1,14 @@
 [package]
-name = "mlrun-ingest"
+name = "mlrunx-ingest"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "MLRun ingest service - gRPC/HTTP ingestion to queue and ClickHouse"
+description = "MLRunX ingest service - gRPC/HTTP ingestion to queue and ClickHouse"
 
 [dependencies]
 # Internal crates
-mlrun-proto.workspace = true
+mlrunx-proto.workspace = true
 
 # Async runtime
 tokio.workspace = true

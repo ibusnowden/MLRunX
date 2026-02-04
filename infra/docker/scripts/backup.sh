@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# MLRun Backup Script
+# MLRunX Backup Script
 # Creates backups of PostgreSQL, ClickHouse, and MinIO data.
 #
 # Usage:
@@ -20,22 +20,22 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BACKUP_DIR="${BACKUP_BASE}/${TIMESTAMP}"
 
 # Container names (from docker-compose.yml)
-POSTGRES_CONTAINER="mlrun-postgres"
-CLICKHOUSE_CONTAINER="mlrun-clickhouse"
-MINIO_CONTAINER="mlrun-minio"
+POSTGRES_CONTAINER="mlrunx-postgres"
+CLICKHOUSE_CONTAINER="mlrunx-clickhouse"
+MINIO_CONTAINER="mlrunx-minio"
 
 # Credentials (read from .env or use defaults)
 if [ -f "${DOCKER_DIR}/.env" ]; then
     source "${DOCKER_DIR}/.env"
 fi
-POSTGRES_USER="${POSTGRES_USER:-mlrun}"
-POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-mlrun_dev}"
-POSTGRES_DB="${POSTGRES_DATABASE:-mlrun}"
-CLICKHOUSE_USER="${CLICKHOUSE_USER:-mlrun}"
-CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-mlrun_dev}"
-MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-mlrun}"
-MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-mlrun_dev_secret}"
-MINIO_BUCKET="${MINIO_BUCKET:-mlrun-artifacts}"
+POSTGRES_USER="${POSTGRES_USER:-mlrunx}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-mlrunx_dev}"
+POSTGRES_DB="${POSTGRES_DATABASE:-mlrunx}"
+CLICKHOUSE_USER="${CLICKHOUSE_USER:-mlrunx}"
+CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-mlrunx_dev}"
+MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-mlrunx}"
+MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-mlrunx_dev_secret}"
+MINIO_BUCKET="${MINIO_BUCKET:-mlrunx-artifacts}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -96,14 +96,14 @@ if check_container "${CLICKHOUSE_CONTAINER}"; then
     docker exec "${CLICKHOUSE_CONTAINER}" clickhouse-client \
         --user "${CLICKHOUSE_USER}" \
         --password "${CLICKHOUSE_PASSWORD}" \
-        --query "SELECT * FROM mlrun.metrics FORMAT Native" \
+        --query "SELECT * FROM mlrunx.metrics FORMAT Native" \
         > "${BACKUP_DIR}/clickhouse_metrics.native" 2>/dev/null || true
 
     # Export system_metrics table (optional)
     docker exec "${CLICKHOUSE_CONTAINER}" clickhouse-client \
         --user "${CLICKHOUSE_USER}" \
         --password "${CLICKHOUSE_PASSWORD}" \
-        --query "SELECT * FROM mlrun.system_metrics FORMAT Native" \
+        --query "SELECT * FROM mlrunx.system_metrics FORMAT Native" \
         > "${BACKUP_DIR}/clickhouse_system_metrics.native" 2>/dev/null || true
 
     # Export schema (prefer repo migration file for full schema)
@@ -114,7 +114,7 @@ if check_container "${CLICKHOUSE_CONTAINER}"; then
         docker exec "${CLICKHOUSE_CONTAINER}" clickhouse-client \
             --user "${CLICKHOUSE_USER}" \
             --password "${CLICKHOUSE_PASSWORD}" \
-            --query "SHOW CREATE TABLE mlrun.metrics" \
+            --query "SHOW CREATE TABLE mlrunx.metrics" \
             > "${BACKUP_DIR}/clickhouse_schema.sql" 2>/dev/null || true
     fi
 
@@ -137,7 +137,7 @@ if check_container "${MINIO_CONTAINER}"; then
 
     # Use mc (MinIO client) to mirror the bucket
     docker run --rm \
-        --network mlrun-network \
+        --network mlrunx-network \
         -v "${MINIO_BACKUP_DIR}:/backup" \
         minio/mc:latest \
         sh -c "mc alias set backup http://minio:9000 ${MINIO_ACCESS_KEY} ${MINIO_SECRET_KEY} && \

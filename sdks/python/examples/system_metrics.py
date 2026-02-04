@@ -1,4 +1,4 @@
-"""System metrics collection utility for MLRun examples.
+"""System metrics collection utility for MLRunX examples.
 
 This module provides functions to collect and log system metrics including:
 - GPU metrics (memory, utilization, temperature)
@@ -22,7 +22,7 @@ import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import mlrun
+    import mlrunx
 
 # Try to import optional dependencies
 try:
@@ -268,16 +268,16 @@ def get_system_metrics() -> dict[str, float]:
     metrics.update(get_disk_io_metrics())
     metrics.update(get_network_io_metrics())
 
-    # Filter to only numeric values (MLRun metrics must be numeric)
+    # Filter to only numeric values (MLRunX metrics must be numeric)
     return {k: v for k, v in metrics.items() if isinstance(v, (int, float))}
 
 
 
-def log_system_metrics(run: "mlrun.Run", step: int) -> dict[str, float]:
-    """Collect and log system metrics to MLRun.
+def log_system_metrics(run: "mlrunx.Run", step: int) -> dict[str, float]:
+    """Collect and log system metrics to MLRunX.
 
     Args:
-        run: MLRun run instance
+        run: MLRunX run instance
         step: Current training step
 
     Returns:

@@ -1,4 +1,4 @@
-"""Tests for MLRun SDK client."""
+"""Tests for MLRunX SDK client."""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import mlrun
-from mlrun.config import Config
-from mlrun.queue import Event, EventQueue, EventType
-from mlrun.run import Run
+import mlrunx
+from mlrunx.config import Config
+from mlrunx.queue import Event, EventQueue, EventType
+from mlrunx.run import Run
 
 
 class TestConfig:
@@ -31,8 +31,8 @@ class TestConfig:
         with patch.dict(
             "os.environ",
             {
-                "MLRUN_SERVER_URL": "http://custom:8080",
-                "MLRUN_BATCH_SIZE": "500",
+                "MLRUNX_SERVER_URL": "http://custom:8080",
+                "MLRUNX_BATCH_SIZE": "500",
             },
         ):
             config = Config.from_env()
@@ -101,7 +101,7 @@ class TestRun:
     """Tests for the Run class."""
 
     @pytest.mark.unit
-    @patch("mlrun.run.HttpTransport")
+    @patch("mlrunx.run.HttpTransport")
     def test_run_init(self, mock_transport_cls: MagicMock) -> None:
         """Test run initialization."""
         mock_transport = MagicMock()
@@ -117,7 +117,7 @@ class TestRun:
         run.finish()
 
     @pytest.mark.unit
-    @patch("mlrun.run.HttpTransport")
+    @patch("mlrunx.run.HttpTransport")
     def test_run_log_metrics(self, mock_transport_cls: MagicMock) -> None:
         """Test logging metrics."""
         mock_transport = MagicMock()
@@ -136,7 +136,7 @@ class TestRun:
         run.finish()
 
     @pytest.mark.unit
-    @patch("mlrun.run.HttpTransport")
+    @patch("mlrunx.run.HttpTransport")
     def test_run_context_manager(self, mock_transport_cls: MagicMock) -> None:
         """Test run as context manager."""
         mock_transport = MagicMock()
@@ -150,7 +150,7 @@ class TestRun:
         assert run.is_finished
 
     @pytest.mark.unit
-    @patch("mlrun.run.HttpTransport")
+    @patch("mlrunx.run.HttpTransport")
     def test_run_offline_mode(self, mock_transport_cls: MagicMock) -> None:
         """Test offline mode when server is unavailable."""
         mock_transport = MagicMock()
@@ -167,37 +167,37 @@ class TestModuleAPI:
     """Tests for the module-level API."""
 
     @pytest.mark.unit
-    @patch("mlrun.run.HttpTransport")
+    @patch("mlrunx.run.HttpTransport")
     def test_init_and_log(self, mock_transport_cls: MagicMock) -> None:
         """Test module-level init and log."""
         mock_transport = MagicMock()
         mock_transport.init_run.return_value = {"run_id": "test-123"}
         mock_transport_cls.return_value = mock_transport
 
-        run = mlrun.init(project="test-project")
+        run = mlrunx.init(project="test-project")
         assert run is not None
 
         # Should work via module-level API
-        mlrun.log({"loss": 0.5})
-        mlrun.log_params({"lr": 0.001})
+        mlrunx.log({"loss": 0.5})
+        mlrunx.log_params({"lr": 0.001})
 
-        mlrun.finish()
+        mlrunx.finish()
 
     @pytest.mark.unit
     def test_log_without_init_raises(self) -> None:
         """Test that logging without init raises an error."""
         # Reset any active run
-        mlrun._active_run = None
+        mlrunx._active_run = None
 
         with pytest.raises(RuntimeError, match="No active run"):
-            mlrun.log({"loss": 0.5})
+            mlrunx.log({"loss": 0.5})
 
 
 class TestNonBlocking:
     """Tests for non-blocking behavior."""
 
     @pytest.mark.unit
-    @patch("mlrun.run.HttpTransport")
+    @patch("mlrunx.run.HttpTransport")
     def test_log_is_fast(self, mock_transport_cls: MagicMock) -> None:
         """Test that logging is non-blocking."""
         mock_transport = MagicMock()
@@ -236,9 +236,9 @@ class TestCompression:
         with patch.dict(
             "os.environ",
             {
-                "MLRUN_COMPRESSION": "false",
-                "MLRUN_COMPRESSION_LEVEL": "9",
-                "MLRUN_COMPRESSION_MIN_BYTES": "5000",
+                "MLRUNX_COMPRESSION": "false",
+                "MLRUNX_COMPRESSION_LEVEL": "9",
+                "MLRUNX_COMPRESSION_MIN_BYTES": "5000",
             },
         ):
             config = Config.from_env()
@@ -260,9 +260,9 @@ class TestCompression:
         with patch.dict(
             "os.environ",
             {
-                "MLRUN_COALESCE_METRICS": "false",
-                "MLRUN_DEDUPE_PARAMS": "0",
-                "MLRUN_DEDUPE_TAGS": "no",
+                "MLRUNX_COALESCE_METRICS": "false",
+                "MLRUNX_DEDUPE_PARAMS": "0",
+                "MLRUNX_DEDUPE_TAGS": "no",
             },
         ):
             config = Config.from_env()

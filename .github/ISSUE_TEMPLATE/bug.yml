@@ -75,7 +75,7 @@ body:
       description: Relevant environment details
       placeholder: |
         - OS: [e.g., macOS 14.0, Ubuntu 22.04]
-        - MLRun version: [e.g., 0.1.0]
+        - MLRunX version: [e.g., 0.1.0]
         - Python version: [e.g., 3.11]
         - Browser (if UI): [e.g., Chrome 120]
     validations:

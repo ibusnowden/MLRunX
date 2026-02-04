@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# MLRun Restore Script
+# MLRunX Restore Script
 # Restores PostgreSQL, ClickHouse, and MinIO data from backup.
 #
 # Usage:
@@ -19,22 +19,22 @@ DOCKER_DIR="$(dirname "$SCRIPT_DIR")"
 BACKUP_DIR="${1:-}"
 
 # Container names (from docker-compose.yml)
-POSTGRES_CONTAINER="mlrun-postgres"
-CLICKHOUSE_CONTAINER="mlrun-clickhouse"
-MINIO_CONTAINER="mlrun-minio"
+POSTGRES_CONTAINER="mlrunx-postgres"
+CLICKHOUSE_CONTAINER="mlrunx-clickhouse"
+MINIO_CONTAINER="mlrunx-minio"
 
 # Credentials (read from .env or use defaults)
 if [ -f "${DOCKER_DIR}/.env" ]; then
     source "${DOCKER_DIR}/.env"
 fi
-POSTGRES_USER="${POSTGRES_USER:-mlrun}"
-POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-mlrun_dev}"
-POSTGRES_DB="${POSTGRES_DATABASE:-mlrun}"
-CLICKHOUSE_USER="${CLICKHOUSE_USER:-mlrun}"
-CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-mlrun_dev}"
-MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-mlrun}"
-MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-mlrun_dev_secret}"
-MINIO_BUCKET="${MINIO_BUCKET:-mlrun-artifacts}"
+POSTGRES_USER="${POSTGRES_USER:-mlrunx}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-mlrunx_dev}"
+POSTGRES_DB="${POSTGRES_DATABASE:-mlrunx}"
+CLICKHOUSE_USER="${CLICKHOUSE_USER:-mlrunx}"
+CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-mlrunx_dev}"
+MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-mlrunx}"
+MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-mlrunx_dev_secret}"
+MINIO_BUCKET="${MINIO_BUCKET:-mlrunx-artifacts}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -82,7 +82,7 @@ fi
 
 echo ""
 echo "╔═══════════════════════════════════════════════════════════════╗"
-echo "║                     MLRun Restore                             ║"
+echo "║                     MLRunX Restore                             ║"
 echo "╠═══════════════════════════════════════════════════════════════╣"
 echo "║  WARNING: This will OVERWRITE existing data!                  ║"
 echo "║                                                               ║"
@@ -148,29 +148,29 @@ if [ -f "${BACKUP_DIR}/clickhouse_metrics.native.gz" ]; then
         docker exec "${CLICKHOUSE_CONTAINER}" clickhouse-client \
             --user "${CLICKHOUSE_USER}" \
             --password "${CLICKHOUSE_PASSWORD}" \
-            --query "TRUNCATE TABLE IF EXISTS mlrun.metrics" 2>/dev/null || true
+            --query "TRUNCATE TABLE IF EXISTS mlrunx.metrics" 2>/dev/null || true
 
         docker exec "${CLICKHOUSE_CONTAINER}" clickhouse-client \
             --user "${CLICKHOUSE_USER}" \
             --password "${CLICKHOUSE_PASSWORD}" \
-            --query "TRUNCATE TABLE IF EXISTS mlrun.metrics_summary" 2>/dev/null || true
+            --query "TRUNCATE TABLE IF EXISTS mlrunx.metrics_summary" 2>/dev/null || true
 
         docker exec "${CLICKHOUSE_CONTAINER}" clickhouse-client \
             --user "${CLICKHOUSE_USER}" \
             --password "${CLICKHOUSE_PASSWORD}" \
-            --query "TRUNCATE TABLE IF EXISTS mlrun.run_metrics_count" 2>/dev/null || true
+            --query "TRUNCATE TABLE IF EXISTS mlrunx.run_metrics_count" 2>/dev/null || true
 
         docker exec "${CLICKHOUSE_CONTAINER}" clickhouse-client \
             --user "${CLICKHOUSE_USER}" \
             --password "${CLICKHOUSE_PASSWORD}" \
-            --query "TRUNCATE TABLE IF EXISTS mlrun.system_metrics" 2>/dev/null || true
+            --query "TRUNCATE TABLE IF EXISTS mlrunx.system_metrics" 2>/dev/null || true
 
         # Restore metrics
         gunzip -c "${BACKUP_DIR}/clickhouse_metrics.native.gz" | \
             docker exec -i "${CLICKHOUSE_CONTAINER}" clickhouse-client \
                 --user "${CLICKHOUSE_USER}" \
                 --password "${CLICKHOUSE_PASSWORD}" \
-                --query "INSERT INTO mlrun.metrics FORMAT Native" 2>/dev/null || true
+                --query "INSERT INTO mlrunx.metrics FORMAT Native" 2>/dev/null || true
 
         # Restore system_metrics (optional)
         if [ -f "${BACKUP_DIR}/clickhouse_system_metrics.native.gz" ]; then
@@ -178,7 +178,7 @@ if [ -f "${BACKUP_DIR}/clickhouse_metrics.native.gz" ]; then
                 docker exec -i "${CLICKHOUSE_CONTAINER}" clickhouse-client \
                     --user "${CLICKHOUSE_USER}" \
                     --password "${CLICKHOUSE_PASSWORD}" \
-                    --query "INSERT INTO mlrun.system_metrics FORMAT Native" 2>/dev/null || true
+                    --query "INSERT INTO mlrunx.system_metrics FORMAT Native" 2>/dev/null || true
         fi
 
         log_info "ClickHouse restore complete"
@@ -204,7 +204,7 @@ if [ -f "${BACKUP_DIR}/minio.tar.gz" ]; then
 
         # Use mc to mirror back to MinIO
         docker run --rm \
-            --network mlrun-network \
+            --network mlrunx-network \
             -v "${MINIO_RESTORE_DIR}:/backup:ro" \
             minio/mc:latest \
             sh -c "mc alias set restore http://minio:9000 ${MINIO_ACCESS_KEY} ${MINIO_SECRET_KEY} && \

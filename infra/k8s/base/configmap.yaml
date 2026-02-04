@@ -1,61 +1,61 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: mlrun-config
-  namespace: mlrun
+  name: mlrunx-config
+  namespace: mlrunx
   labels:
-    app.kubernetes.io/name: mlrun
+    app.kubernetes.io/name: mlrunx
     app.kubernetes.io/component: config
 data:
   # Database configuration
   CLICKHOUSE_HOST: "clickhouse"
   CLICKHOUSE_PORT: "8123"
-  CLICKHOUSE_USER: "mlrun"
-  CLICKHOUSE_DATABASE: "mlrun"
+  CLICKHOUSE_USER: "mlrunx"
+  CLICKHOUSE_DATABASE: "mlrunx"
 
   POSTGRES_HOST: "postgres"
   POSTGRES_PORT: "5432"
-  POSTGRES_USER: "mlrun"
-  POSTGRES_DATABASE: "mlrun"
+  POSTGRES_USER: "mlrunx"
+  POSTGRES_DATABASE: "mlrunx"
 
   REDIS_HOST: "redis"
   REDIS_PORT: "6379"
 
   MINIO_ENDPOINT: "http://minio:9000"
-  MINIO_BUCKET: "mlrun-artifacts"
+  MINIO_BUCKET: "mlrunx-artifacts"
   MINIO_REGION: "us-east-1"
 
   # API configuration
   API_HOST: "0.0.0.0"
   API_HTTP_PORT: "3001"
   API_GRPC_PORT: "50051"
-  RUST_LOG: "info,mlrun_api=debug"
+  RUST_LOG: "info,mlrunx_api=debug"
   INGEST_MODE: "direct"
 
   # Privacy settings (all disabled by default)
-  MLRUN_TELEMETRY_DISABLED: "true"
-  MLRUN_CRASH_REPORTING_DISABLED: "true"
-  MLRUN_ANALYTICS_DISABLED: "true"
-  MLRUN_UPDATE_CHECK_DISABLED: "true"
+  MLRUNX_TELEMETRY_DISABLED: "true"
+  MLRUNX_CRASH_REPORTING_DISABLED: "true"
+  MLRUNX_ANALYTICS_DISABLED: "true"
+  MLRUNX_UPDATE_CHECK_DISABLED: "true"
 
   # Retention settings
-  MLRUN_METRICS_RETENTION_DAYS: "90"
-  MLRUN_ARTIFACTS_RETENTION_DAYS: "365"
-  MLRUN_LOGS_RETENTION_DAYS: "7"
+  MLRUNX_METRICS_RETENTION_DAYS: "90"
+  MLRUNX_ARTIFACTS_RETENTION_DAYS: "365"
+  MLRUNX_LOGS_RETENTION_DAYS: "7"
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: mlrun-secrets
-  namespace: mlrun
+  name: mlrunx-secrets
+  namespace: mlrunx
   labels:
-    app.kubernetes.io/name: mlrun
+    app.kubernetes.io/name: mlrunx
     app.kubernetes.io/component: secrets
 type: Opaque
 stringData:
   # Replace these with secure values in production!
-  CLICKHOUSE_PASSWORD: "mlrun_dev"
-  POSTGRES_PASSWORD: "mlrun_dev"
-  MINIO_ACCESS_KEY: "mlrun"
-  MINIO_SECRET_KEY: "mlrun_dev_secret"
-  MLRUN_API_KEY: ""  # Generate: openssl rand -hex 32
+  CLICKHOUSE_PASSWORD: "mlrunx_dev"
+  POSTGRES_PASSWORD: "mlrunx_dev"
+  MINIO_ACCESS_KEY: "mlrunx"
+  MINIO_SECRET_KEY: "mlrunx_dev_secret"
+  MLRUNX_API_KEY: ""  # Generate: openssl rand -hex 32

@@ -1,13 +1,13 @@
-// MLRun Common Types
+// MLRunX Common Types
 // See: /docs/spec/limits.md for constraints and limits
 //
 // This file defines shared message types used across ingest and query services.
 
 syntax = "proto3";
 
-package mlrun.v1;
+package mlrunx.v1;
 
-option go_package = "github.com/mlrun/mlrun/gen/go/mlrun/v1;mlrunv1";
+option go_package = "github.com/mlrunx/mlrunx/gen/go/mlrunx/v1;mlrunv1";
 
 import "google/protobuf/timestamp.proto";
 

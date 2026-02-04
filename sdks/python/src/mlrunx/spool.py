@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from mlrun.queue import Event, EventType
+from mlrunx.queue import Event, EventType
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ COMPLETED_EXT = ".done"
 class SpoolConfig:
     """Configuration for the disk spool."""
 
-    spool_dir: Path = field(default_factory=lambda: Path.home() / ".mlrun" / "spool")
+    spool_dir: Path = field(default_factory=lambda: Path.home() / ".mlrunx" / "spool")
     max_file_size_bytes: int = 10_000_000  # 10MB per spool file
     max_total_size_bytes: int = 100_000_000  # 100MB total spool size
     max_files: int = 100  # Max spool files to keep
@@ -359,7 +359,7 @@ class SpoolSyncer:
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._run,
-            name="mlrun-spool-syncer",
+            name="mlrunx-spool-syncer",
             daemon=True,
         )
         self._thread.start()
@@ -449,6 +449,6 @@ def get_spool_dir() -> Path:
     Returns:
         Path to spool directory
     """
-    spool_dir = Path.home() / ".mlrun" / "spool"
+    spool_dir = Path.home() / ".mlrunx" / "spool"
     spool_dir.mkdir(parents=True, exist_ok=True)
     return spool_dir

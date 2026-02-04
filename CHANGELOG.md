@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial project scaffold with monorepo structure
 - Rust services: API gateway, Ingest service, Processor
-- Python SDK (`mlrun`) with async-first design
-- Python integrations (`mlrun-integrations`) for Lightning, HuggingFace, Optuna, Hydra
+- Python SDK (`mlrunx`) with async-first design
+- Python integrations (`mlrunx-integrations`) for Lightning, HuggingFace, Optuna, Hydra
 - Next.js UI skeleton with TypeScript and Tailwind v4
 - gRPC protocol definitions (common, ingest, query protos)
 - Docker Compose infrastructure (ClickHouse, PostgreSQL, MinIO, Redis, OTEL)

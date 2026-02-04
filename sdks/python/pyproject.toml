@@ -1,11 +1,11 @@
 [project]
-name = "mlrun"
+name = "mlrunx"
 version = "0.1.0"
-description = "MLRun Python SDK - async, non-blocking ML experiment tracking"
+description = "MLRunX Python SDK - async, non-blocking ML experiment tracking"
 requires-python = ">=3.10"
 readme = "README.md"
 license = { text = "MIT" }
-authors = [{ name = "MLRun Team" }]
+authors = [{ name = "MLRunX Team" }]
 keywords = ["ml", "machine-learning", "experiment-tracking", "mlops"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -28,7 +28,7 @@ dependencies = [
 ]
 
 [project.scripts]
-mlrun = "mlrun.cli:main"
+mlrunx = "mlrunx.cli:main"
 
 [project.optional-dependencies]
 grpc = ["grpcio>=1.60", "grpcio-tools>=1.60"]
@@ -39,7 +39,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mlrun"]
+packages = ["src/mlrunx"]
 
 [tool.ruff]
 line-length = 100

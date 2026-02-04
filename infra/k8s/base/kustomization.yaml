@@ -1,7 +1,7 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: mlrun
+namespace: mlrunx
 
 resources:
   - namespace.yaml
@@ -20,11 +20,11 @@ commonLabels:
   app.kubernetes.io/version: "0.1.0"
 
 configMapGenerator:
-  - name: mlrun-postgres-migrations
+  - name: mlrunx-postgres-migrations
     files:
       - ../../migrations/postgres/001_metadata_schema.sql
       - ../../migrations/postgres/002_ingest_batches.sql
-  - name: mlrun-clickhouse-migrations
+  - name: mlrunx-clickhouse-migrations
     files:
       - ../../migrations/clickhouse/001_metrics_schema.sql
 

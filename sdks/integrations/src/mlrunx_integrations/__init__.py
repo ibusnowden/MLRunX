@@ -1,31 +1,31 @@
 """
-MLRun integrations for popular ML frameworks.
+MLRunX integrations for popular ML frameworks.
 
 Example usage:
     # PyTorch Lightning
-    from mlrun_integrations import MLRunLogger
-    trainer = Trainer(logger=MLRunLogger())
+    from mlrunx_integrations import MLRunXLogger
+    trainer = Trainer(logger=MLRunXLogger())
 
     # HuggingFace Transformers
-    from mlrun_integrations import MLRunCallback
-    trainer.add_callback(MLRunCallback())
+    from mlrunx_integrations import MLRunXCallback
+    trainer.add_callback(MLRunXCallback())
 
     # Optuna
-    from mlrun_integrations import MLRunOptunaCallback
-    study.optimize(objective, callbacks=[MLRunOptunaCallback()])
+    from mlrunx_integrations import MLRunXOptunaCallback
+    study.optimize(objective, callbacks=[MLRunXOptunaCallback()])
 """
 
 __version__ = "0.1.0"
 __all__ = [
-    "MLRunLogger",
-    "MLRunCallback",
-    "MLRunOptunaCallback",
-    "MLRunHydraCallback",
+    "MLRunXLogger",
+    "MLRunXCallback",
+    "MLRunXOptunaCallback",
+    "MLRunXHydraCallback",
     "__version__",
 ]
 
 
-class MLRunLogger:
+class MLRunXLogger:
     """PyTorch Lightning logger integration."""
 
     def __init__(self, project: str = "default") -> None:
@@ -33,15 +33,15 @@ class MLRunLogger:
         # TODO: Implement Lightning logger interface
 
     def log_metrics(self, metrics: dict, step: int | None = None) -> None:
-        """Log metrics to MLRun."""
+        """Log metrics to MLRunX."""
         pass  # TODO: Implement
 
     def log_hyperparams(self, params: dict) -> None:
-        """Log hyperparameters to MLRun."""
+        """Log hyperparameters to MLRunX."""
         pass  # TODO: Implement
 
 
-class MLRunCallback:
+class MLRunXCallback:
     """HuggingFace Transformers callback integration."""
 
     def __init__(self, project: str = "default") -> None:
@@ -49,7 +49,7 @@ class MLRunCallback:
         # TODO: Implement Transformers callback interface
 
 
-class MLRunOptunaCallback:
+class MLRunXOptunaCallback:
     """Optuna optimization callback integration."""
 
     def __init__(self, project: str = "default") -> None:
@@ -57,7 +57,7 @@ class MLRunOptunaCallback:
         # TODO: Implement Optuna callback interface
 
 
-class MLRunHydraCallback:
+class MLRunXHydraCallback:
     """Hydra config capture integration."""
 
     def __init__(self, project: str = "default") -> None:

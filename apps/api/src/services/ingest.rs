@@ -13,7 +13,7 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument};
 use uuid::Uuid;
 
-use mlrun_proto::mlrun::v1::{
+use mlrunx_proto::mlrunx::v1::{
     CreateArtifactUploadRequest, CreateArtifactUploadResponse, FinalizeArtifactUploadRequest,
     FinalizeArtifactUploadResponse, FinishRunRequest, FinishRunResponse, HeartbeatRequest,
     HeartbeatResponse, InitRunRequest, InitRunResponse, LogMetricsRequest, LogMetricsResponse,
@@ -449,7 +449,7 @@ mod tests {
         let service = IngestServiceImpl::new(store);
 
         let request = Request::new(InitRunRequest {
-            project_id: Some(mlrun_proto::mlrun::v1::ProjectId {
+            project_id: Some(mlrunx_proto::mlrunx::v1::ProjectId {
                 value: "test-project".to_string(),
             }),
             run_id: Some("test-run-123".to_string()),
@@ -471,7 +471,7 @@ mod tests {
 
         let make_request = || {
             Request::new(InitRunRequest {
-                project_id: Some(mlrun_proto::mlrun::v1::ProjectId {
+                project_id: Some(mlrunx_proto::mlrunx::v1::ProjectId {
                     value: "test-project".to_string(),
                 }),
                 run_id: Some("test-run-123".to_string()),
@@ -496,7 +496,7 @@ mod tests {
 
         // First create a run
         let init_request = Request::new(InitRunRequest {
-            project_id: Some(mlrun_proto::mlrun::v1::ProjectId {
+            project_id: Some(mlrunx_proto::mlrunx::v1::ProjectId {
                 value: "test-project".to_string(),
             }),
             run_id: Some("test-run".to_string()),
@@ -510,15 +510,15 @@ mod tests {
                 value: "test-run".to_string(),
             }),
             batch_id: "batch-1".to_string(),
-            metrics: Some(mlrun_proto::mlrun::v1::MetricBatch {
+            metrics: Some(mlrunx_proto::mlrunx::v1::MetricBatch {
                 points: vec![
-                    mlrun_proto::mlrun::v1::MetricPoint {
+                    mlrunx_proto::mlrunx::v1::MetricPoint {
                         name: "loss".to_string(),
                         step: 0,
                         value: 0.5,
                         timestamp: None,
                     },
-                    mlrun_proto::mlrun::v1::MetricPoint {
+                    mlrunx_proto::mlrunx::v1::MetricPoint {
                         name: "accuracy".to_string(),
                         step: 0,
                         value: 0.8,
@@ -542,7 +542,7 @@ mod tests {
 
         // Create a run
         let init_request = Request::new(InitRunRequest {
-            project_id: Some(mlrun_proto::mlrun::v1::ProjectId {
+            project_id: Some(mlrunx_proto::mlrunx::v1::ProjectId {
                 value: "test-project".to_string(),
             }),
             run_id: Some("test-run".to_string()),

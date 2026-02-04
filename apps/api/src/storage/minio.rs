@@ -46,9 +46,9 @@ impl Default for MinioConfig {
     fn default() -> Self {
         Self {
             endpoint: "http://localhost:9000".to_string(),
-            access_key: "mlrun".to_string(),
-            secret_key: "mlrun_dev".to_string(),
-            bucket: "mlrun-artifacts".to_string(),
+            access_key: "mlrunx".to_string(),
+            secret_key: "mlrunx_dev".to_string(),
+            bucket: "mlrunx-artifacts".to_string(),
             path_style: true,
             region: "us-east-1".to_string(),
             presign_expiry_secs: 3600, // 1 hour
@@ -64,11 +64,11 @@ impl MinioConfig {
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
             access_key: std::env::var("MINIO_ACCESS_KEY")
                 .or_else(|_| std::env::var("AWS_ACCESS_KEY_ID"))
-                .unwrap_or_else(|_| "mlrun".to_string()),
+                .unwrap_or_else(|_| "mlrunx".to_string()),
             secret_key: std::env::var("MINIO_SECRET_KEY")
                 .or_else(|_| std::env::var("AWS_SECRET_ACCESS_KEY"))
-                .unwrap_or_else(|_| "mlrun_dev".to_string()),
-            bucket: std::env::var("MINIO_BUCKET").unwrap_or_else(|_| "mlrun-artifacts".to_string()),
+                .unwrap_or_else(|_| "mlrunx_dev".to_string()),
+            bucket: std::env::var("MINIO_BUCKET").unwrap_or_else(|_| "mlrunx-artifacts".to_string()),
             path_style: std::env::var("MINIO_PATH_STYLE")
                 .map(|v| v.to_lowercase() == "true")
                 .unwrap_or(true),
@@ -291,18 +291,18 @@ mod tests {
     fn test_default_config() {
         let config = MinioConfig::default();
         assert_eq!(config.endpoint, "http://localhost:9000");
-        assert_eq!(config.bucket, "mlrun-artifacts");
+        assert_eq!(config.bucket, "mlrunx-artifacts");
         assert!(config.path_style);
     }
 
     #[test]
     fn test_artifact_location() {
-        let location = ArtifactLocation::new("mlrun-artifacts", "run-123", "model.pt");
-        assert_eq!(location.bucket, "mlrun-artifacts");
+        let location = ArtifactLocation::new("mlrunx-artifacts", "run-123", "model.pt");
+        assert_eq!(location.bucket, "mlrunx-artifacts");
         assert_eq!(location.key, "runs/run-123/model.pt");
         assert_eq!(
             location.storage_url,
-            "minio://mlrun-artifacts/runs/run-123/model.pt"
+            "minio://mlrunx-artifacts/runs/run-123/model.pt"
         );
     }
 
@@ -347,7 +347,7 @@ mod tests {
         assert!(result.is_ok());
 
         let (location, presigned) = result.unwrap();
-        assert_eq!(location.bucket, "mlrun-artifacts");
+        assert_eq!(location.bucket, "mlrunx-artifacts");
         assert_eq!(presigned.method, "PUT");
     }
 }

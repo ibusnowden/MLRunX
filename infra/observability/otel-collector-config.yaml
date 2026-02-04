@@ -22,7 +22,7 @@ exporters:
 
   prometheus:
     endpoint: "0.0.0.0:8889"
-    namespace: mlrun
+    namespace: mlrunx
 
 extensions:
   health_check:

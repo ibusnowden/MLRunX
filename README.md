@@ -1,19 +1,19 @@
-# MLRun
+# MLRunX
 
 A high-performance, open-source ML experiment tracking platform. Built for modern AI workflows with first-class support for LLM evals, agent tracing, and scale.
 
-## Why MLRun?
+## Why MLRunX?
 
 - **Performance-first**: Sub-200ms UI queries at 10k+ runs, high-throughput ingestion with server-side downsampling
 - **AI-native**: Built-in eval harness, agent/tool tracing, prompt versioning
 - **Local-first**: Full Docker Compose stack, privacy-first defaults, no vendor lock-in
 - **Open**: MIT licensed, OSS stack (ClickHouse + Postgres + MinIO)
 
-## How MLRun Differs from W&B
+## How MLRunX Differs from W&B
 
 ### Performance-First Architecture
 
-| Aspect | W&B | MLRun      |
+| Aspect | W&B | MLRunX      |
 |--------|-----|------------|
 | Backend | Python/Go, proprietary | Rust (Axum/Tonic) - lower latency |
 | Metrics DB | Proprietary | ClickHouse - built for analytics at scale |
@@ -22,14 +22,14 @@ A high-performance, open-source ML experiment tracking platform. Built for moder
 
 ### AI-Native from Day One
 
-W&B bolted on LLM features later. MLRun builds them in:
+W&B bolted on LLM features later. MLRunX builds them in:
 - **Eval harness**: First-class prompt sets, graders, regression detection
 - **Agent tracing**: Spans for tool calls, nested reasoning steps
 - **OTLP compatibility**: Bridge ML and infra observability
 
 ### Local-First / Privacy-First
 
-| W&B | MLRun      |
+| W&B | MLRunX      |
 |-----|------------|
 | Cloud-first, self-hosted is enterprise tier | Docker Compose works day one |
 | Telemetry on by default | No outbound telemetry by default |
@@ -37,7 +37,7 @@ W&B bolted on LLM features later. MLRun builds them in:
 
 ### SDK Design
 
-| W&B | MLRun      |
+| W&B | MLRunX      |
 |-----|------------|
 | Sync-heavy, can block training | Async-first, non-blocking |
 | Network failure = data loss risk | Offline spool with bounded disk |
@@ -45,7 +45,7 @@ W&B bolted on LLM features later. MLRun builds them in:
 
 ### Transparent Benchmarks
 
-W&B doesn't publish performance numbers. MLRun does:
+W&B doesn't publish performance numbers. MLRunX does:
 - **W1**: Run listing at scale (10k runs)
 - **W2**: Ingest throughput + latency
 - **W3**: Mixed workloads (metrics + traces + evals)
@@ -82,7 +82,7 @@ W&B doesn't publish performance numbers. MLRun does:
 ## Project Structure
 
 ```
-MLRun/
+MLRunX/
 ├── apps/
 │   ├── ui/                 # Next.js dashboard (TypeScript)
 │   └── api/                # Rust API gateway (Axum)
@@ -164,8 +164,8 @@ docker compose logs -f
 
 ```bash
 # Clone the repo
-git clone https://github.com/your-org/MLRun.git
-cd mlrun
+git clone https://github.com/your-org/MLRunX.git
+cd mlrunx
 
 # Python SDK development
 uv sync --all-packages
@@ -224,7 +224,7 @@ open http://localhost:9002
 
 ## Benchmarks
 
-MLRun targets measurable performance:
+MLRunX targets measurable performance:
 
 | Workload | Metric | Target |
 |----------|--------|--------|
@@ -235,10 +235,10 @@ MLRun targets measurable performance:
 ## SDK Usage (Preview)
 
 ```python
-import mlrun
+import mlrunx
 
 # Initialize a run
-run = mlrun.init(project="my-project", name="training-run-1")
+run = mlrunx.init(project="my-project", name="training-run-1")
 
 # Log metrics (async, batched automatically)
 for step in range(1000):
@@ -255,20 +255,20 @@ run.finish()
 
 ```python
 # PyTorch Lightning
-from mlrun.integrations import TrackLogger
+from mlrunx.integrations import TrackLogger
 trainer = Trainer(logger=TrackLogger())
 
 # HuggingFace Transformers
-from mlrun.integrations import TrackCallback
+from mlrunx.integrations import TrackCallback
 trainer.add_callback(TrackCallback())
 
 # Optuna
-from mlrun.integrations import TrackOptunaCallback
+from mlrunx.integrations import TrackOptunaCallback
 study.optimize(objective, callbacks=[TrackOptunaCallback()])
 ```
 ## Get to know about the repo more...
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ibusnowden/MLRun)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ibusnowden/MLRunX)
 
 ## Contributing
 

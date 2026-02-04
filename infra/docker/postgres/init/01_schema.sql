@@ -1,5 +1,5 @@
 -- ============================================================================
--- MLRun PostgreSQL Initialization
+-- MLRunX PostgreSQL Initialization
 -- This script runs on first container startup.
 -- ============================================================================
 

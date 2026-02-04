@@ -1,14 +1,14 @@
 [package]
-name = "mlrun-processor"
+name = "mlrunx-processor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "MLRun processor service - rollups, downsampling, cardinality guards"
+description = "MLRunX processor service - rollups, downsampling, cardinality guards"
 
 [dependencies]
 # Internal crates
-mlrun-proto.workspace = true
+mlrunx-proto.workspace = true
 
 # Async runtime
 tokio.workspace = true

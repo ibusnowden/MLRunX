@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Discussions
-    url: https://github.com/ibusnowden/MLRun/discussions
+    url: https://github.com/ibusnowden/MLRunX/discussions
     about: Ask questions and discuss ideas
   - name: Documentation
-    url: https://github.com/ibusnowden/MLRun/tree/main/docs
+    url: https://github.com/ibusnowden/MLRunX/tree/main/docs
     about: Check our documentation first

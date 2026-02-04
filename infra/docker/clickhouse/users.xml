@@ -12,16 +12,16 @@
             <quota>default</quota>
         </default>
 
-        <!-- MLRun application user -->
-        <mlrun>
-            <password>mlrun_dev</password>
+        <!-- MLRunX application user -->
+        <mlrunx>
+            <password>mlrunx_dev</password>
             <networks>
                 <ip>::/0</ip>
             </networks>
             <profile>default</profile>
             <quota>default</quota>
             <access_management>1</access_management>
-        </mlrun>
+        </mlrunx>
     </users>
 
     <profiles>

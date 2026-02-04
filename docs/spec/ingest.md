@@ -1,10 +1,10 @@
 # Ingest Service Specification
 
 > **Status**: Alpha
-> **Proto**: `/proto/mlrun/v1/ingest.proto`
+> **Proto**: `/proto/mlrunx/v1/ingest.proto`
 > **Last Updated**: 2026-01
 
-This document defines the authoritative semantics for the MLRun Ingest Service. The protobuf definitions must match this specification. Any changes to the proto require updating this document first.
+This document defines the authoritative semantics for the MLRunX Ingest Service. The protobuf definitions must match this specification. Any changes to the proto require updating this document first.
 
 ## Table of Contents
 
@@ -23,7 +23,7 @@ This document defines the authoritative semantics for the MLRun Ingest Service. 
 
 ## Overview
 
-The Ingest Service is the primary entry point for ML training jobs to send data to MLRun. It is designed for:
+The Ingest Service is the primary entry point for ML training jobs to send data to MLRunX. It is designed for:
 
 - **High throughput**: Handle 100k+ metrics/second per instance
 - **Non-blocking**: Never slow down training loops
@@ -227,7 +227,7 @@ If `sequence` is provided:
 
 ## Warnings vs Errors
 
-MLRun follows a **degrade gracefully** philosophy. We prefer accepting partial data over rejecting entire requests.
+MLRunX follows a **degrade gracefully** philosophy. We prefer accepting partial data over rejecting entire requests.
 
 ### Error Classification
 
@@ -399,4 +399,4 @@ The following features are **not implemented in Alpha**:
 
 - [Query Service Specification](query.md)
 - [System Limits](limits.md)
-- [Proto Definitions](/proto/mlrun/v1/ingest.proto)
+- [Proto Definitions](/proto/mlrunx/v1/ingest.proto)

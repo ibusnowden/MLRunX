@@ -1,6 +1,6 @@
-# MLRun Integration Tests
+# MLRunX Integration Tests
 
-End-to-end integration tests for the MLRun API.
+End-to-end integration tests for the MLRunX API.
 
 ## Quick Start
 
@@ -9,7 +9,7 @@ End-to-end integration tests for the MLRun API.
 1. Start the API server in dev mode:
    ```bash
    cd apps/api
-   MLRUN_AUTH_DISABLED=true cargo run
+   MLRUNX_AUTH_DISABLED=true cargo run
    ```
 
 2. Run the tests:

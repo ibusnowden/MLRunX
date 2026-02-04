@@ -2,16 +2,16 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: postgres-migrations
-  namespace: mlrun
+  namespace: mlrunx
   labels:
-    app.kubernetes.io/name: mlrun
+    app.kubernetes.io/name: mlrunx
     app.kubernetes.io/component: postgres-migrations
 spec:
   backoffLimit: 5
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: mlrun
+        app.kubernetes.io/name: mlrunx
         app.kubernetes.io/component: postgres-migrations
     spec:
       restartPolicy: OnFailure
@@ -32,12 +32,12 @@ spec:
               echo "PostgreSQL migrations complete."
           envFrom:
             - configMapRef:
-                name: mlrun-config
+                name: mlrunx-config
           env:
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: mlrun-secrets
+                  name: mlrunx-secrets
                   key: POSTGRES_PASSWORD
           volumeMounts:
             - name: migrations
@@ -46,4 +46,4 @@ spec:
       volumes:
         - name: migrations
           configMap:
-            name: mlrun-postgres-migrations
+            name: mlrunx-postgres-migrations
