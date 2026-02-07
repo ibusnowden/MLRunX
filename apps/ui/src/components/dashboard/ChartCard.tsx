@@ -54,7 +54,6 @@ export function ChartCard({
   title,
   subtitle,
   children,
-  darkTheme = true,
   onFullscreen,
   onDownload,
   onExportCSV,
@@ -62,19 +61,6 @@ export function ChartCard({
   const [showMenu, setShowMenu] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
-
-  // Theme classes
-  const cardBgClass = darkTheme ? 'bg-[#0d1117]' : 'bg-white';
-  const borderClass = darkTheme ? 'border-[#30363d]' : 'border-gray-200';
-  const textClass = darkTheme ? 'text-[#e6edf3]' : 'text-gray-900';
-  const mutedTextClass = darkTheme ? 'text-[#8b949e]' : 'text-gray-500';
-  const buttonClass = darkTheme
-    ? 'p-1.5 rounded hover:bg-[#30363d] text-[#8b949e] hover:text-[#e6edf3] transition-colors'
-    : 'p-1.5 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors';
-  const menuBgClass = darkTheme ? 'bg-[#161b22] border-[#30363d]' : 'bg-white border-gray-200';
-  const menuItemClass = darkTheme
-    ? 'hover:bg-[#30363d] text-[#e6edf3]'
-    : 'hover:bg-gray-100 text-gray-700';
 
   const handleFullscreen = useCallback(() => {
     if (!containerRef.current) return;
@@ -90,7 +76,6 @@ export function ChartCard({
   }, [onFullscreen]);
 
   const handleDownload = useCallback(() => {
-    // Find the canvas in the chart
     const canvas = containerRef.current?.querySelector('canvas');
     if (canvas) {
       const link = document.createElement('a');
@@ -110,53 +95,48 @@ export function ChartCard({
   return (
     <div
       ref={containerRef}
-      className={`${cardBgClass} rounded-lg border ${borderClass} overflow-hidden ${
+      className={`bg-chart-bg rounded-lg border border-border overflow-hidden ${
         isFullscreen ? 'fixed inset-0 z-50 rounded-none' : ''
       }`}
     >
       {/* Header */}
-      <div className={`flex items-center justify-between px-4 py-2 border-b ${borderClass}`}>
+      <div className="flex items-center justify-between px-4 py-2 border-b border-border">
         <div className="flex-1 min-w-0">
-          <h3 className={`text-sm font-medium truncate ${textClass}`}>{title}</h3>
+          <h3 className="text-sm font-medium truncate text-text-primary">{title}</h3>
           {subtitle && (
-            <p className={`text-xs truncate mt-0 ${mutedTextClass}`}>{subtitle}</p>
+            <p className="text-xs truncate mt-0 text-text-muted">{subtitle}</p>
           )}
         </div>
 
         {/* Controls */}
         <div className="flex items-center gap-1 ml-2">
-          {/* Fullscreen button */}
           <button
             onClick={handleFullscreen}
-            className={buttonClass}
+            className="p-1.5 rounded hover:bg-surface-hover text-text-muted hover:text-text-primary transition-colors"
             title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
           >
             {isFullscreen ? <ExitFullscreenIcon /> : <FullscreenIcon />}
           </button>
 
-          {/* Menu button */}
           <div className="relative">
             <button
               onClick={() => setShowMenu(!showMenu)}
-              className={buttonClass}
+              className="p-1.5 rounded hover:bg-surface-hover text-text-muted hover:text-text-primary transition-colors"
               title="More options"
             >
               <MenuIcon />
             </button>
 
-            {/* Dropdown menu */}
             {showMenu && (
               <>
                 <div
                   className="fixed inset-0 z-10"
                   onClick={() => setShowMenu(false)}
                 />
-                <div
-                  className={`absolute right-0 top-8 z-20 w-48 rounded-lg shadow-lg border ${menuBgClass} py-1`}
-                >
+                <div className="absolute right-0 top-8 z-20 w-48 rounded-lg shadow-lg border border-border bg-surface py-1">
                   <button
                     onClick={handleDownload}
-                    className={`w-full flex items-center gap-2 px-3 py-2 text-sm ${menuItemClass}`}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-text-primary hover:bg-surface-hover"
                   >
                     <DownloadIcon />
                     Download PNG
@@ -164,7 +144,7 @@ export function ChartCard({
                   {onExportCSV && (
                     <button
                       onClick={handleExportCSV}
-                      className={`w-full flex items-center gap-2 px-3 py-2 text-sm ${menuItemClass}`}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-text-primary hover:bg-surface-hover"
                     >
                       <CSVIcon />
                       Export CSV
@@ -177,7 +157,7 @@ export function ChartCard({
         </div>
       </div>
 
-      {/* Chart content - let the plot define height for tighter fit */}
+      {/* Chart content */}
       <div className={`${isFullscreen ? 'h-[calc(100%-48px)]' : ''}`}>
         {children}
       </div>

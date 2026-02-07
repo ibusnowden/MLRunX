@@ -4,13 +4,15 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api, MetricSeries } from '@/lib/api';
 import { UPlotChart } from '@/components/charts/UPlotChart';
 import { ChartControls } from '@/components/charts/ChartControls';
+import { useTheme } from '@/components/ThemeProvider';
 
 interface MetricChartPanelProps {
   runId: string;
   darkTheme?: boolean;
 }
 
-export function MetricChartPanel({ runId, darkTheme = true }: MetricChartPanelProps) {
+export function MetricChartPanel({ runId }: MetricChartPanelProps) {
+  const { isDark } = useTheme();
   const [series, setSeries] = useState<MetricSeries[]>([]);
   const [availableMetrics, setAvailableMetrics] = useState<string[]>([]);
   const [selectedMetrics, setSelectedMetrics] = useState<string[]>([]);
@@ -20,7 +22,6 @@ export function MetricChartPanel({ runId, darkTheme = true }: MetricChartPanelPr
   const [smoothing, setSmoothing] = useState(0);
   const chartRef = useRef<{ resetZoom?: () => void }>(null);
 
-  // Fetch metrics
   const fetchMetrics = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -32,7 +33,6 @@ export function MetricChartPanel({ runId, darkTheme = true }: MetricChartPanelPr
       setSeries(response.series);
       setAvailableMetrics(response.available_metrics);
 
-      // Auto-select first metric if none selected
       if (response.available_metrics.length > 0 && selectedMetrics.length === 0) {
         setSelectedMetrics([response.available_metrics[0]]);
       }
@@ -47,18 +47,14 @@ export function MetricChartPanel({ runId, darkTheme = true }: MetricChartPanelPr
     fetchMetrics();
   }, [fetchMetrics]);
 
-  // Toggle metric selection
   const toggleMetric = (name: string) => {
     setSelectedMetrics((prev) =>
       prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]
     );
   };
 
-  // Handle viewport change (zoom/pan)
   const handleViewportChange = useCallback((_min: number, _max: number) => {
     // Could implement viewport-driven fetching here
-    // For now, just log it
-    // console.log('Viewport:', min, max);
   }, []);
 
   // Prepare chart data
@@ -68,12 +64,10 @@ export function MetricChartPanel({ runId, darkTheme = true }: MetricChartPanelPr
   };
 
   if (series.length > 0) {
-    // Collect all unique steps
     const allSteps = new Set<number>();
     series.forEach((s) => s.points.forEach((p) => allSteps.add(p.step)));
     chartData.xData = Array.from(allSteps).sort((a, b) => a - b);
 
-    // Build series data aligned to steps
     const stepToIndex = new Map(chartData.xData.map((s, i) => [s, i]));
 
     series.forEach((s) => {
@@ -88,25 +82,16 @@ export function MetricChartPanel({ runId, darkTheme = true }: MetricChartPanelPr
     });
   }
 
-  // Theme classes
-  const bgClass = darkTheme ? 'bg-[#161b22]' : 'bg-white';
-  const borderClass = darkTheme ? 'border-gray-800' : 'border-gray-200';
-  const textClass = darkTheme ? 'text-gray-200' : 'text-gray-900';
-  const mutedTextClass = darkTheme ? 'text-gray-400' : 'text-gray-500';
-  const selectClass = darkTheme
-    ? 'bg-[#0d1117] border-gray-700 text-gray-300 focus:border-blue-500'
-    : 'bg-white border-gray-300 text-gray-700 focus:border-blue-500';
-
   return (
-    <div className={`${bgClass} rounded-xl shadow-sm border ${borderClass}`}>
+    <div className="bg-surface rounded-xl shadow-sm border border-border">
       {/* Header */}
-      <div className={`flex items-center justify-between px-6 py-4 border-b ${borderClass}`}>
-        <h2 className={`text-xl font-semibold ${textClass}`}>Metrics</h2>
+      <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+        <h2 className="text-xl font-semibold text-text-primary">Metrics</h2>
         <div className="flex items-center gap-3">
           <select
             value={maxPoints}
             onChange={(e) => setMaxPoints(parseInt(e.target.value, 10))}
-            className={`px-3 py-1.5 border rounded-lg text-sm ${selectClass} outline-none`}
+            className="px-3 py-1.5 border border-border rounded-lg text-sm bg-surface-secondary text-text-primary outline-none focus:ring-2 focus:ring-accent"
           >
             <option value={100}>100 points</option>
             <option value={500}>500 points</option>
@@ -118,7 +103,7 @@ export function MetricChartPanel({ runId, darkTheme = true }: MetricChartPanelPr
 
       {/* Metric selector */}
       {availableMetrics.length > 0 && (
-        <div className={`px-6 py-3 border-b ${borderClass} flex flex-wrap gap-2`}>
+        <div className="px-6 py-3 border-b border-border flex flex-wrap gap-2">
           {availableMetrics.map((name) => {
             const isSelected = selectedMetrics.includes(name);
             return (
@@ -127,10 +112,8 @@ export function MetricChartPanel({ runId, darkTheme = true }: MetricChartPanelPr
                 onClick={() => toggleMetric(name)}
                 className={`px-3 py-1 rounded-full text-sm transition-colors ${
                   isSelected
-                    ? 'bg-blue-600 text-white'
-                    : darkTheme
-                    ? 'bg-gray-800 text-gray-300 hover:bg-gray-700'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    ? 'bg-accent text-white'
+                    : 'bg-surface-secondary text-text-secondary hover:bg-surface-hover'
                 }`}
               >
                 {name}
@@ -143,17 +126,13 @@ export function MetricChartPanel({ runId, darkTheme = true }: MetricChartPanelPr
       {/* Content area */}
       <div className="p-4">
         {error && (
-          <div className={`p-4 rounded-lg ${
-            darkTheme
-              ? 'bg-red-900/30 border border-red-800 text-red-400'
-              : 'bg-red-50 border border-red-200 text-red-700'
-          }`}>
+          <div className="p-4 rounded-lg bg-danger-subtle border border-danger/20 text-danger">
             {error}
           </div>
         )}
 
         {loading ? (
-          <div className={`h-64 flex items-center justify-center ${mutedTextClass}`}>
+          <div className="h-64 flex items-center justify-center text-text-muted">
             <div className="flex items-center gap-2">
               <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"/>
@@ -163,18 +142,17 @@ export function MetricChartPanel({ runId, darkTheme = true }: MetricChartPanelPr
             </div>
           </div>
         ) : availableMetrics.length === 0 ? (
-          <div className={`h-64 flex items-center justify-center ${mutedTextClass}`}>
+          <div className="h-64 flex items-center justify-center text-text-muted">
             No metrics recorded for this run
           </div>
         ) : chartData.xData.length > 0 ? (
           <div>
-            {/* Chart with controls */}
             <ChartControls
               title={selectedMetrics.length === 1 ? selectedMetrics[0] : 'Metrics'}
               smoothing={smoothing}
               onSmoothingChange={setSmoothing}
               onResetZoom={() => chartRef.current?.resetZoom?.()}
-              darkTheme={darkTheme}
+              darkTheme={isDark}
             >
               <UPlotChart
                 xData={chartData.xData}
@@ -183,18 +161,18 @@ export function MetricChartPanel({ runId, darkTheme = true }: MetricChartPanelPr
                 yLabel="Value"
                 height={300}
                 interactive={true}
-                darkTheme={darkTheme}
+                darkTheme={isDark}
                 smoothing={smoothing}
                 onViewportChange={handleViewportChange}
               />
             </ChartControls>
 
             {/* Info bar */}
-            <div className={`mt-3 px-2 text-sm ${mutedTextClass} flex flex-wrap gap-x-4 gap-y-1`}>
+            <div className="mt-3 px-2 text-sm text-text-muted flex flex-wrap gap-x-4 gap-y-1">
               {series.map((s) => (
                 <span key={s.name}>
                   <span className="font-medium">{s.name}:</span> {s.total_points.toLocaleString()} points
-                  {s.downsampled && <span className="text-yellow-500 ml-1">(downsampled)</span>}
+                  {s.downsampled && <span className="text-warning ml-1">(downsampled)</span>}
                 </span>
               ))}
             </div>
@@ -203,27 +181,21 @@ export function MetricChartPanel({ runId, darkTheme = true }: MetricChartPanelPr
             <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
               {series.slice(0, 1).map((s) => (
                 <React.Fragment key={s.name}>
-                  <div className={`rounded-lg p-3 ${
-                    darkTheme ? 'bg-[#0d1117]' : 'bg-gray-50'
-                  }`}>
-                    <div className={mutedTextClass}>Min ({s.name})</div>
-                    <div className={`font-mono text-lg ${textClass}`}>
+                  <div className="rounded-lg p-3 bg-surface-secondary">
+                    <div className="text-text-muted">Min ({s.name})</div>
+                    <div className="font-mono text-lg text-text-primary">
                       {Math.min(...s.points.map((p) => p.min)).toFixed(4)}
                     </div>
                   </div>
-                  <div className={`rounded-lg p-3 ${
-                    darkTheme ? 'bg-[#0d1117]' : 'bg-gray-50'
-                  }`}>
-                    <div className={mutedTextClass}>Max ({s.name})</div>
-                    <div className={`font-mono text-lg ${textClass}`}>
+                  <div className="rounded-lg p-3 bg-surface-secondary">
+                    <div className="text-text-muted">Max ({s.name})</div>
+                    <div className="font-mono text-lg text-text-primary">
                       {Math.max(...s.points.map((p) => p.max)).toFixed(4)}
                     </div>
                   </div>
-                  <div className={`rounded-lg p-3 ${
-                    darkTheme ? 'bg-[#0d1117]' : 'bg-gray-50'
-                  }`}>
-                    <div className={mutedTextClass}>Last ({s.name})</div>
-                    <div className={`font-mono text-lg ${textClass}`}>
+                  <div className="rounded-lg p-3 bg-surface-secondary">
+                    <div className="text-text-muted">Last ({s.name})</div>
+                    <div className="font-mono text-lg text-text-primary">
                       {s.points.length > 0
                         ? s.points[s.points.length - 1].mean.toFixed(4)
                         : '-'}
