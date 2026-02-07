@@ -76,7 +76,7 @@ function ComparePageContent() {
             {selectedRunIds.length > 0 && (
               <button
                 onClick={clearSelection}
-                className="px-4 py-2 bg-gray-100 rounded-lg hover:bg-gray-200"
+                className="px-4 py-2 bg-gray-100 rounded-lg text-gray-800 font-medium hover:bg-gray-200"
               >
                 Clear Selection ({selectedRunIds.length})
               </button>
@@ -87,10 +87,10 @@ function ComparePageContent() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Run Selector */}
           <div className="lg:col-span-1">
-            <div className="bg-white rounded-xl shadow-sm p-4 sticky top-4">
-              <h2 className="font-semibold mb-3">Select Runs</h2>
+            <div className="bg-white rounded-xl shadow-sm p-4 sticky top-4 text-gray-900">
+              <h2 className="font-semibold text-gray-900 mb-3">Select Runs</h2>
               {loading ? (
-                <div className="text-gray-500 text-sm">Loading runs...</div>
+                <div className="text-gray-700 text-sm">Loading runs...</div>
               ) : (
                 <div className="space-y-2 max-h-96 overflow-y-auto">
                   {runs.map((run) => {
@@ -98,8 +98,8 @@ function ComparePageContent() {
                     return (
                       <label
                         key={run.run_id}
-                        className={`flex items-center gap-3 p-2 rounded cursor-pointer hover:bg-gray-50 ${
-                          isSelected ? 'bg-blue-50' : ''
+                        className={`flex items-center gap-3 p-2 rounded cursor-pointer text-gray-900 hover:bg-gray-50 ${
+                          isSelected ? 'bg-blue-50 ring-1 ring-blue-200' : ''
                         }`}
                       >
                         <input
@@ -109,10 +109,10 @@ function ComparePageContent() {
                           className="rounded"
                         />
                         <div className="flex-1 min-w-0">
-                          <div className="font-medium text-sm truncate">
+                          <div className="font-semibold text-sm text-gray-900 truncate">
                             {run.name || run.run_id.slice(0, 8)}
                           </div>
-                          <div className="text-xs text-gray-500">
+                          <div className="text-xs text-gray-700">
                             {run.status} - {run.metrics_count} metrics
                           </div>
                         </div>
