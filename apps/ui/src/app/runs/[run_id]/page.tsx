@@ -443,8 +443,7 @@ function MetricSectionRenderer({
               xData={chartData.xData}
               series={chartData.series}
               xLabel="Step"
-              yLabel="Value"
-              height={220}
+              height={340}
               interactive={true}
               darkTheme={darkTheme}
               showLegend={chart.isGrouped}

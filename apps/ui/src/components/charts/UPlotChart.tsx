@@ -104,7 +104,7 @@ export function UPlotChart({
   title,
   xLabel = 'Step',
   yLabel = 'Value',
-  height = 300,
+  height = 340,
   interactive = true,
   darkTheme = true,
   showLegend = true,
@@ -175,15 +175,14 @@ export function UPlotChart({
         return {
           label: s.label,
           stroke: color,
-          width: 2,
+          width: 1,
           points: {
-            show: xData.length < 50,
-            size: 4,
+            show: false,
           },
           // Add alpha for non-hovered series
           alpha: hoveredSeries === null || hoveredSeries === i + 1 ? 1 : 0.3,
-          // Area fill under line
-          fill: areaFill ? `${color}20` : undefined,
+          // Area fill under line - subtle
+          fill: areaFill ? `${color}15` : undefined,
         };
       }),
     ];
@@ -204,53 +203,46 @@ export function UPlotChart({
       },
       axes: [
         {
+          // X-axis — show tick values only, label at far right
           label: xLabel,
-          labelSize: 16,
-          labelFont: '11px system-ui, sans-serif',
-          font: '10px system-ui, sans-serif',
+          labelSize: 14,
+          labelFont: '10px system-ui, sans-serif',
+          font: '11px system-ui, sans-serif',
           stroke: axisColor,
-          size: 40,
-          gap: 5,
+          size: 32,
+          gap: 4,
           grid: {
             show: true,
             stroke: gridColor,
             width: 1,
           },
           ticks: {
-            show: true,
-            stroke: gridColor,
-            width: 1,
-            size: 4,
+            show: false,
           },
         },
         {
-          label: yLabel,
-          labelSize: 16,
-          labelFont: '11px system-ui, sans-serif',
-          font: '10px system-ui, sans-serif',
+          // Y-axis — tick values only, no label
+          font: '11px system-ui, sans-serif',
           stroke: axisColor,
-          size: 50,
-          gap: 5,
+          size: 48,
+          gap: 8,
           grid: {
             show: true,
             stroke: gridColor,
             width: 1,
           },
           ticks: {
-            show: true,
-            stroke: gridColor,
-            width: 1,
-            size: 4,
+            show: false,
           },
         },
       ],
       cursor: {
         drag: interactive ? { x: true, y: false } : undefined,
         points: {
-          size: 8,
+          size: 6,
           fill: bgColor,
           stroke: textColor,
-          width: 2,
+          width: 1,
         },
       },
       legend: {
