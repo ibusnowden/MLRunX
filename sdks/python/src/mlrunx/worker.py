@@ -62,6 +62,14 @@ class ConnectionState:
                 self._online = False
                 logger.warning("Connection lost - switching to offline mode")
 
+    def set_offline(self) -> None:
+        """Force connection state to offline mode."""
+        with self._lock:
+            self._online = False
+            self._last_failure_time = time.time()
+            if self._consecutive_failures < 3:
+                self._consecutive_failures = 3
+
     @property
     def consecutive_failures(self) -> int:
         with self._lock:
@@ -125,6 +133,9 @@ class FlushWorker:
 
         # Connection state
         self._connection = ConnectionState()
+        if config.offline_mode:
+            self._connection.set_offline()
+            logger.info("MLRUNX_OFFLINE enabled: worker starts in offline mode")
 
         # Initialize spool if enabled
         self._spool: DiskSpool | None = None
@@ -199,6 +210,10 @@ class FlushWorker:
     def flush(self) -> None:
         """Trigger an immediate flush."""
         self._flush_event.set()
+
+    def set_offline(self) -> None:
+        """Force worker into offline mode (events will be spooled if enabled)."""
+        self._connection.set_offline()
 
     def _run(self) -> None:
         """Main worker loop."""
@@ -309,8 +324,8 @@ class FlushWorker:
         if not events:
             return True
 
-        # If we're offline, don't even try
-        if not self._connection.is_online and self._spool is not None:
+        # If we're offline, don't try sending.
+        if not self._connection.is_online:
             return False
 
         # Group events by type

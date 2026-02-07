@@ -40,7 +40,6 @@ function ComparePageContent() {
       ? selectedRunIds.filter((id) => id !== runId)
       : [...selectedRunIds, runId];
 
-    // Update URL
     const newParams = new URLSearchParams(searchParams);
     if (newSelection.length > 0) {
       newParams.set('runs', newSelection.join(','));
@@ -56,50 +55,57 @@ function ComparePageContent() {
   };
 
   return (
-    <main className="min-h-screen p-8">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900">Compare Runs</h1>
-            <p className="text-gray-600 mt-1">
-              Select runs to compare their metrics
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => router.push('/')}
-              className="px-4 py-2 text-gray-600 hover:text-gray-900"
-            >
-              Back to Runs
-            </button>
-            {selectedRunIds.length > 0 && (
+    <main className="min-h-screen">
+      {/* Page header */}
+      <div className="border-b border-border bg-surface">
+        <div className="max-w-[1600px] mx-auto px-8 py-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-2xl font-bold text-text-primary">Compare Runs</h1>
+              <p className="text-sm text-text-secondary mt-0.5">
+                Select runs to compare their metrics side by side
+              </p>
+            </div>
+            <div className="flex gap-2">
               <button
-                onClick={clearSelection}
-                className="px-4 py-2 bg-gray-100 rounded-lg hover:bg-gray-200"
+                onClick={() => router.push('/')}
+                className="px-4 py-2 text-sm text-text-secondary hover:text-text-primary transition-colors"
               >
-                Clear Selection ({selectedRunIds.length})
+                Back to Runs
               </button>
-            )}
+              {selectedRunIds.length > 0 && (
+                <button
+                  onClick={clearSelection}
+                  className="px-4 py-2 text-sm bg-surface-secondary rounded-lg text-text-primary font-medium hover:bg-surface-hover border border-border transition-colors"
+                >
+                  Clear ({selectedRunIds.length})
+                </button>
+              )}
+            </div>
           </div>
         </div>
+      </div>
 
+      {/* Content */}
+      <div className="max-w-[1600px] mx-auto px-8 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Run Selector */}
           <div className="lg:col-span-1">
-            <div className="bg-white rounded-xl shadow-sm p-4 sticky top-4">
-              <h2 className="font-semibold mb-3">Select Runs</h2>
+            <div className="bg-surface rounded-xl border border-border p-4 sticky top-4">
+              <h2 className="font-semibold text-text-primary mb-3">Select Runs</h2>
               {loading ? (
-                <div className="text-gray-500 text-sm">Loading runs...</div>
+                <div className="text-text-muted text-sm">Loading runs...</div>
               ) : (
-                <div className="space-y-2 max-h-96 overflow-y-auto">
+                <div className="space-y-1.5 max-h-96 overflow-y-auto">
                   {runs.map((run) => {
                     const isSelected = selectedRunIds.includes(run.run_id);
                     return (
                       <label
                         key={run.run_id}
-                        className={`flex items-center gap-3 p-2 rounded cursor-pointer hover:bg-gray-50 ${
-                          isSelected ? 'bg-blue-50' : ''
+                        className={`flex items-center gap-3 p-2.5 rounded-lg cursor-pointer transition-colors ${
+                          isSelected
+                            ? 'bg-accent-subtle ring-1 ring-accent/30'
+                            : 'hover:bg-surface-hover'
                         }`}
                       >
                         <input
@@ -109,10 +115,10 @@ function ComparePageContent() {
                           className="rounded"
                         />
                         <div className="flex-1 min-w-0">
-                          <div className="font-medium text-sm truncate">
+                          <div className="font-medium text-sm text-text-primary truncate">
                             {run.name || run.run_id.slice(0, 8)}
                           </div>
-                          <div className="text-xs text-gray-500">
+                          <div className="text-xs text-text-muted">
                             {run.status} - {run.metrics_count} metrics
                           </div>
                         </div>
@@ -136,7 +142,11 @@ function ComparePageContent() {
 
 export default function ComparePage() {
   return (
-    <Suspense fallback={<div className="min-h-screen p-8 flex items-center justify-center">Loading...</div>}>
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center text-text-muted">
+        Loading...
+      </div>
+    }>
       <ComparePageContent />
     </Suspense>
   );

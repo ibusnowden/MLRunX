@@ -5,8 +5,12 @@
 pub mod clickhouse;
 pub mod minio;
 pub mod postgres;
+pub mod sqlite;
 
 pub use clickhouse::{ClickHouseClient, MetricsRepository};
+pub use sqlite::{
+    AggregatedPointRow, MetricRow, MetricSeriesRow, RunRow, SqliteConfig, SqliteError, SqliteStore,
+};
 pub use minio::{
     ArtifactLocation, ArtifactStore, MinioClient, MinioConfig, MinioError, PresignedUrl,
 };

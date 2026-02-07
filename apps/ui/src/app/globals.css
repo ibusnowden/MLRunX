@@ -1,26 +1,155 @@
 @import "tailwindcss";
 
+/* ── Light theme (default) ── */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f8f9fb;
+  --foreground: #1a1a2e;
+  --surface: #ffffff;
+  --surface-hover: #f3f4f6;
+  --surface-secondary: #f9fafb;
+  --border: #e5e7eb;
+  --border-subtle: #f0f0f0;
+  --text-primary: #111827;
+  --text-secondary: #4b5563;
+  --text-muted: #9ca3af;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-subtle: #eff6ff;
+  --success: #10b981;
+  --success-subtle: #ecfdf5;
+  --danger: #ef4444;
+  --danger-subtle: #fef2f2;
+  --warning: #f59e0b;
+  --warning-subtle: #fffbeb;
+  --sidebar-bg: #ffffff;
+  --sidebar-border: #e5e7eb;
+  --sidebar-text: #4b5563;
+  --sidebar-text-active: #111827;
+  --sidebar-hover: #f3f4f6;
+  --sidebar-active: #eff6ff;
+  --chart-bg: #ffffff;
+  --chart-grid: rgba(0, 0, 0, 0.06);
+  --chart-axis: #9ca3af;
+  --chart-text: #374151;
+  --badge-running-bg: #dbeafe;
+  --badge-running-text: #1e40af;
+  --badge-finished-bg: #dcfce7;
+  --badge-finished-text: #166534;
+  --badge-failed-bg: #fee2e2;
+  --badge-failed-text: #991b1b;
+  --badge-killed-bg: #fef3c7;
+  --badge-killed-text: #92400e;
+  --badge-pending-bg: #f3f4f6;
+  --badge-pending-text: #4b5563;
+}
+
+/* ── Dark theme ── */
+.dark {
+  --background: #0d1117;
+  --foreground: #e6edf3;
+  --surface: #161b22;
+  --surface-hover: #1c2128;
+  --surface-secondary: #0d1117;
+  --border: #30363d;
+  --border-subtle: #21262d;
+  --text-primary: #e6edf3;
+  --text-secondary: #8b949e;
+  --text-muted: #6e7681;
+  --accent: #58a6ff;
+  --accent-hover: #79c0ff;
+  --accent-subtle: rgba(56, 139, 253, 0.1);
+  --success: #3fb950;
+  --success-subtle: rgba(63, 185, 80, 0.1);
+  --danger: #f85149;
+  --danger-subtle: rgba(248, 81, 73, 0.1);
+  --warning: #d29922;
+  --warning-subtle: rgba(210, 153, 34, 0.1);
+  --sidebar-bg: #0d1117;
+  --sidebar-border: #21262d;
+  --sidebar-text: #8b949e;
+  --sidebar-text-active: #e6edf3;
+  --sidebar-hover: #161b22;
+  --sidebar-active: rgba(56, 139, 253, 0.1);
+  --chart-bg: #0d1117;
+  --chart-grid: rgba(255, 255, 255, 0.06);
+  --chart-axis: #6e7681;
+  --chart-text: #e6edf3;
+  --badge-running-bg: rgba(56, 139, 253, 0.15);
+  --badge-running-text: #58a6ff;
+  --badge-finished-bg: rgba(63, 185, 80, 0.15);
+  --badge-finished-text: #3fb950;
+  --badge-failed-bg: rgba(248, 81, 73, 0.15);
+  --badge-failed-text: #f85149;
+  --badge-killed-bg: rgba(210, 153, 34, 0.15);
+  --badge-killed-text: #d29922;
+  --badge-pending-bg: rgba(110, 118, 129, 0.15);
+  --badge-pending-text: #8b949e;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
+  --color-surface-secondary: var(--surface-secondary);
+  --color-border: var(--border);
+  --color-border-subtle: var(--border-subtle);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-subtle: var(--accent-subtle);
+  --color-success: var(--success);
+  --color-success-subtle: var(--success-subtle);
+  --color-danger: var(--danger);
+  --color-danger-subtle: var(--danger-subtle);
+  --color-warning: var(--warning);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-sidebar-bg: var(--sidebar-bg);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-text: var(--sidebar-text);
+  --color-sidebar-text-active: var(--sidebar-text-active);
+  --color-sidebar-hover: var(--sidebar-hover);
+  --color-sidebar-active: var(--sidebar-active);
+  --color-chart-bg: var(--chart-bg);
+  --color-chart-grid: var(--chart-grid);
+  --color-chart-axis: var(--chart-axis);
+  --color-chart-text: var(--chart-text);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+}
+
+/* Smooth theme transition */
+*,
+*::before,
+*::after {
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--background);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* uPlot overrides for theme */
+.u-legend {
+  font-family: var(--font-geist-sans), system-ui, sans-serif !important;
 }

@@ -21,7 +21,6 @@ interface ChartControlsProps {
   children: React.ReactNode;
 }
 
-// Icons as simple SVG components
 const FullscreenIcon = () => (
   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
@@ -53,16 +52,11 @@ export function ChartControls({
   smoothing = 0,
   onSmoothingChange,
   onResetZoom,
-  darkTheme = true,
   children,
 }: ChartControlsProps) {
   const [showSettings, setShowSettings] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
-
-  const buttonClass = darkTheme
-    ? 'p-1.5 rounded hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors'
-    : 'p-1.5 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors';
 
   const handleFullscreen = () => {
     if (!containerRef.current) return;
@@ -78,7 +72,6 @@ export function ChartControls({
   };
 
   const handleDownload = () => {
-    // Find the canvas in the chart
     const canvas = containerRef.current?.querySelector('canvas');
     if (canvas) {
       const link = document.createElement('a');
@@ -92,41 +85,29 @@ export function ChartControls({
   return (
     <div
       ref={containerRef}
-      className={`relative ${isFullscreen ? 'fixed inset-0 z-50' : ''} ${
-        darkTheme ? 'bg-[#0d1117]' : 'bg-white'
-      }`}
+      className={`relative flex flex-col ${isFullscreen ? 'fixed inset-0 z-50' : ''} bg-chart-bg`}
     >
       {/* Header with title and controls */}
-      <div className={`flex items-center justify-between px-4 py-2 ${
-        darkTheme ? 'border-gray-800' : 'border-gray-200'
-      }`}>
-        {/* Title */}
-        <h3 className={`text-sm font-medium ${darkTheme ? 'text-gray-300' : 'text-gray-700'}`}>
+      <div className="flex items-center justify-between px-4 py-2">
+        <h3 className="text-sm font-medium text-text-secondary">
           {title}
         </h3>
 
-        {/* Controls */}
         <div className="flex items-center gap-1">
-          {/* Settings dropdown */}
           <div className="relative">
             <button
               onClick={() => setShowSettings(!showSettings)}
-              className={buttonClass}
+              className="p-1.5 rounded hover:bg-surface-hover text-text-muted hover:text-text-primary transition-colors"
               title="Settings"
             >
               <SettingsIcon />
             </button>
 
             {showSettings && (
-              <div className={`absolute right-0 top-8 z-10 w-64 rounded-lg shadow-lg border p-3 ${
-                darkTheme ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'
-              }`}>
-                {/* Smoothing slider */}
+              <div className="absolute right-0 top-8 z-10 w-64 rounded-lg shadow-lg border border-border bg-surface p-3">
                 {onSmoothingChange && (
                   <div className="mb-3">
-                    <label className={`block text-xs font-medium mb-1 ${
-                      darkTheme ? 'text-gray-400' : 'text-gray-600'
-                    }`}>
+                    <label className="block text-xs font-medium mb-1 text-text-muted">
                       Smoothing: {smoothing.toFixed(2)}
                     </label>
                     <input
@@ -136,29 +117,22 @@ export function ChartControls({
                       step="0.01"
                       value={smoothing}
                       onChange={(e) => onSmoothingChange(parseFloat(e.target.value))}
-                      className="w-full h-2 rounded-lg appearance-none cursor-pointer bg-gray-600"
+                      className="w-full h-2 rounded-lg appearance-none cursor-pointer bg-border"
                     />
-                    <div className={`flex justify-between text-xs mt-1 ${
-                      darkTheme ? 'text-gray-500' : 'text-gray-400'
-                    }`}>
+                    <div className="flex justify-between text-xs mt-1 text-text-muted">
                       <span>None</span>
                       <span>Heavy</span>
                     </div>
                   </div>
                 )}
 
-                {/* Reset zoom button */}
                 {onResetZoom && (
                   <button
                     onClick={() => {
                       onResetZoom();
                       setShowSettings(false);
                     }}
-                    className={`w-full flex items-center gap-2 px-3 py-2 rounded text-sm ${
-                      darkTheme
-                        ? 'hover:bg-gray-700 text-gray-300'
-                        : 'hover:bg-gray-100 text-gray-700'
-                    }`}
+                    className="w-full flex items-center gap-2 px-3 py-2 rounded text-sm hover:bg-surface-hover text-text-primary"
                   >
                     <ResetIcon />
                     Reset Zoom
@@ -168,24 +142,28 @@ export function ChartControls({
             )}
           </div>
 
-          {/* Download button */}
-          <button onClick={handleDownload} className={buttonClass} title="Download PNG">
+          <button
+            onClick={handleDownload}
+            className="p-1.5 rounded hover:bg-surface-hover text-text-muted hover:text-text-primary transition-colors"
+            title="Download PNG"
+          >
             <DownloadIcon />
           </button>
 
-          {/* Fullscreen button */}
-          <button onClick={handleFullscreen} className={buttonClass} title="Fullscreen">
+          <button
+            onClick={handleFullscreen}
+            className="p-1.5 rounded hover:bg-surface-hover text-text-muted hover:text-text-primary transition-colors"
+            title="Fullscreen"
+          >
             <FullscreenIcon />
           </button>
         </div>
       </div>
 
-      {/* Chart content */}
-      <div className={isFullscreen ? 'h-[calc(100%-48px)]' : ''}>
+      <div className="flex-1 min-h-0">
         {children}
       </div>
 
-      {/* Click outside to close settings */}
       {showSettings && (
         <div
           className="fixed inset-0 z-0"
