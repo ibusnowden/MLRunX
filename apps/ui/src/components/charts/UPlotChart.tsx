@@ -127,24 +127,25 @@ export function UPlotChart({
   const axisColor = darkTheme ? '#6e7681' : '#9ca3af';
   const textColor = darkTheme ? '#e6edf3' : '#374151';
 
-  // Update dimensions on container resize
+  // Observe width from container, height from parent wrapper (for fullscreen)
   useEffect(() => {
     if (!containerRef.current) return;
+    const wrapperEl = containerRef.current.parentElement;
 
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const containerHeight = entry.contentRect.height;
-        // Use the actual container height if it's taller than the default
-        // (e.g., when the parent is fullscreen and stretches the container)
-        const effectiveHeight = containerHeight > height ? containerHeight : height;
-        setDimensions({
-          width: entry.contentRect.width,
-          height: effectiveHeight,
-        });
-      }
+    const observer = new ResizeObserver(() => {
+      if (!containerRef.current) return;
+      const width = containerRef.current.clientWidth;
+      // Check if the wrapper (outer div) has an explicit height set by
+      // a fullscreen parent. Only then override the default height prop.
+      const wrapperHeight = wrapperEl ? wrapperEl.clientHeight : 0;
+      // Use wrapper height only if it's significantly larger than the prop
+      // (i.e. fullscreen is stretching it), otherwise stick to the prop.
+      const effectiveHeight = wrapperHeight > height + 60 ? wrapperHeight - 50 : height;
+      setDimensions({ width, height: effectiveHeight });
     });
 
     observer.observe(containerRef.current);
+    if (wrapperEl) observer.observe(wrapperEl);
     return () => observer.disconnect();
   }, [height]);
 
@@ -285,14 +286,12 @@ export function UPlotChart({
   }, []);
 
   return (
-    <div className={`rounded-lg overflow-hidden ${darkTheme ? 'bg-[#0d1117]' : 'bg-white'}`}
-      style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
-    >
-      {/* Chart container - grows to fill parent when parent has explicit height (e.g. fullscreen) */}
+    <div className={`rounded-lg overflow-hidden ${darkTheme ? 'bg-[#0d1117]' : 'bg-white'}`}>
+      {/* Chart container */}
       <div
         ref={containerRef}
         className="w-full"
-        style={{ flex: '1 1 auto', minHeight: height, backgroundColor: bgColor }}
+        style={{ height, backgroundColor: bgColor }}
       />
 
       {/* Custom Legend */}
