@@ -285,12 +285,14 @@ export function UPlotChart({
   }, []);
 
   return (
-    <div className={`rounded-lg overflow-hidden flex flex-col h-full ${darkTheme ? 'bg-[#0d1117]' : 'bg-white'}`}>
-      {/* Chart container - flex-1 so it stretches to fill available space */}
+    <div className={`rounded-lg overflow-hidden ${darkTheme ? 'bg-[#0d1117]' : 'bg-white'}`}
+      style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+    >
+      {/* Chart container - grows to fill parent when parent has explicit height (e.g. fullscreen) */}
       <div
         ref={containerRef}
-        className="w-full flex-1"
-        style={{ minHeight: height, backgroundColor: bgColor }}
+        className="w-full"
+        style={{ flex: '1 1 auto', minHeight: height, backgroundColor: bgColor }}
       />
 
       {/* Custom Legend */}
