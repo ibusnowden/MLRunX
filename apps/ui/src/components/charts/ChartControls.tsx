@@ -85,7 +85,7 @@ export function ChartControls({
   return (
     <div
       ref={containerRef}
-      className={`relative ${isFullscreen ? 'fixed inset-0 z-50' : ''} bg-chart-bg`}
+      className={`relative flex flex-col ${isFullscreen ? 'fixed inset-0 z-50' : ''} bg-chart-bg`}
     >
       {/* Header with title and controls */}
       <div className="flex items-center justify-between px-4 py-2">
@@ -160,7 +160,7 @@ export function ChartControls({
         </div>
       </div>
 
-      <div className={isFullscreen ? 'h-[calc(100%-48px)]' : ''}>
+      <div className="flex-1 min-h-0">
         {children}
       </div>
 
