@@ -133,9 +133,13 @@ export function UPlotChart({
 
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
+        const containerHeight = entry.contentRect.height;
+        // Use the actual container height if it's taller than the default
+        // (e.g., when the parent is fullscreen and stretches the container)
+        const effectiveHeight = containerHeight > height ? containerHeight : height;
         setDimensions({
           width: entry.contentRect.width,
-          height,
+          height: effectiveHeight,
         });
       }
     });
@@ -289,11 +293,11 @@ export function UPlotChart({
   }, []);
 
   return (
-    <div className={`rounded-lg overflow-hidden ${darkTheme ? 'bg-[#0d1117]' : 'bg-white'}`}>
-      {/* Chart container */}
+    <div className={`rounded-lg overflow-hidden flex flex-col h-full ${darkTheme ? 'bg-[#0d1117]' : 'bg-white'}`}>
+      {/* Chart container - flex-1 so it stretches to fill available space */}
       <div
         ref={containerRef}
-        className="w-full"
+        className="w-full flex-1"
         style={{ minHeight: height, backgroundColor: bgColor }}
       />
 

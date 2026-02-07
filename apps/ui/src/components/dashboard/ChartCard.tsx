@@ -95,7 +95,7 @@ export function ChartCard({
   return (
     <div
       ref={containerRef}
-      className={`bg-chart-bg rounded-lg border border-border overflow-hidden ${
+      className={`bg-chart-bg rounded-lg border border-border overflow-hidden flex flex-col ${
         isFullscreen ? 'fixed inset-0 z-50 rounded-none' : ''
       }`}
     >
@@ -157,8 +157,8 @@ export function ChartCard({
         </div>
       </div>
 
-      {/* Chart content */}
-      <div className={`${isFullscreen ? 'h-[calc(100%-48px)]' : ''}`}>
+      {/* Chart content - flex-1 so it fills remaining space in fullscreen */}
+      <div className="flex-1 min-h-0">
         {children}
       </div>
     </div>
