@@ -43,7 +43,7 @@ export interface UPlotChartProps {
   areaFill?: boolean;
 }
 
-// Vibrant color palette inspired by W&B
+// Dark theme colors - vibrant palette inspired by W&B / modern dashboards
 const DARK_THEME_COLORS = [
   '#84cc16', // lime
   '#f97316', // orange
@@ -55,17 +55,24 @@ const DARK_THEME_COLORS = [
   '#3b82f6', // blue
   '#10b981', // emerald
   '#f43f5e', // rose
+  '#8b5cf6', // violet
+  '#14b8a6', // teal
 ];
 
+// Light theme colors - deeper, more contrast on white
 const LIGHT_THEME_COLORS = [
-  '#3b82f6', // blue
-  '#ef4444', // red
-  '#22c55e', // green
-  '#a855f7', // purple
-  '#f97316', // orange
-  '#ec4899', // pink
-  '#14b8a6', // teal
-  '#eab308', // yellow
+  '#2563eb', // blue
+  '#dc2626', // red
+  '#16a34a', // green
+  '#9333ea', // purple
+  '#ea580c', // orange
+  '#db2777', // pink
+  '#0d9488', // teal
+  '#ca8a04', // yellow
+  '#4f46e5', // indigo
+  '#059669', // emerald
+  '#e11d48', // rose
+  '#7c3aed', // violet
 ];
 
 // Apply exponential moving average smoothing
@@ -116,9 +123,9 @@ export function UPlotChart({
   // Theme colors
   const colors = darkTheme ? DARK_THEME_COLORS : LIGHT_THEME_COLORS;
   const bgColor = darkTheme ? '#0d1117' : '#ffffff';
-  const gridColor = darkTheme ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.1)';
-  const axisColor = darkTheme ? '#6b7280' : '#9ca3af';
-  const textColor = darkTheme ? '#e5e7eb' : '#374151';
+  const gridColor = darkTheme ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
+  const axisColor = darkTheme ? '#6e7681' : '#9ca3af';
+  const textColor = darkTheme ? '#e6edf3' : '#374151';
 
   // Update dimensions on container resize
   useEffect(() => {
@@ -126,9 +133,13 @@ export function UPlotChart({
 
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
+        const containerHeight = entry.contentRect.height;
+        // Use the actual container height if it's taller than the default
+        // (e.g., when the parent is fullscreen and stretches the container)
+        const effectiveHeight = containerHeight > height ? containerHeight : height;
         setDimensions({
           width: entry.contentRect.width,
-          height,
+          height: effectiveHeight,
         });
       }
     });
@@ -177,7 +188,7 @@ export function UPlotChart({
       }),
     ];
 
-    // Chart options with dark theme
+    // Chart options
     const opts: uPlot.Options = {
       width: dimensions.width,
       height: dimensions.height,
@@ -186,20 +197,19 @@ export function UPlotChart({
       scales: {
         x: { time: false },
         y: {
-          distr: logScale ? 3 : 1, // 3 = logarithmic, 1 = linear
+          distr: logScale ? 3 : 1,
           min: yMin,
           max: yMax,
         },
       },
       axes: [
         {
-          // X-axis (bottom)
           label: xLabel,
           labelSize: 16,
-          labelFont: '11px Inter, system-ui, sans-serif',
-          font: '10px Inter, system-ui, sans-serif',
+          labelFont: '11px system-ui, sans-serif',
+          font: '10px system-ui, sans-serif',
           stroke: axisColor,
-          size: 40, // Height for x-axis area (more space for labels)
+          size: 40,
           gap: 5,
           grid: {
             show: true,
@@ -214,13 +224,12 @@ export function UPlotChart({
           },
         },
         {
-          // Y-axis (left)
           label: yLabel,
           labelSize: 16,
-          labelFont: '11px Inter, system-ui, sans-serif',
-          font: '10px Inter, system-ui, sans-serif',
+          labelFont: '11px system-ui, sans-serif',
+          font: '10px system-ui, sans-serif',
           stroke: axisColor,
-          size: 50, // Width for y-axis area (more space for numbers)
+          size: 50,
           gap: 5,
           grid: {
             show: true,
@@ -245,7 +254,7 @@ export function UPlotChart({
         },
       },
       legend: {
-        show: false, // We use custom legend
+        show: false,
       },
       hooks: interactive && onViewportChange
         ? {
@@ -284,18 +293,18 @@ export function UPlotChart({
   }, []);
 
   return (
-    <div className={`rounded-lg overflow-hidden ${darkTheme ? 'bg-[#0d1117]' : 'bg-white'}`}>
-      {/* Chart container */}
+    <div className={`rounded-lg overflow-hidden flex flex-col h-full ${darkTheme ? 'bg-[#0d1117]' : 'bg-white'}`}>
+      {/* Chart container - flex-1 so it stretches to fill available space */}
       <div
         ref={containerRef}
-        className="w-full"
+        className="w-full flex-1"
         style={{ minHeight: height, backgroundColor: bgColor }}
       />
 
       {/* Custom Legend */}
       {showLegend && series.length > 0 && (
-        <div className={`px-4 py-3 border-t ${darkTheme ? 'border-gray-800' : 'border-gray-200'}`}>
-          <div className="flex flex-wrap gap-x-6 gap-y-2">
+        <div className={`px-4 py-3 border-t ${darkTheme ? 'border-[#21262d]' : 'border-gray-100'}`}>
+          <div className="flex flex-wrap gap-x-5 gap-y-1.5">
             {series.map((s, i) => {
               const color = s.color || colors[i % colors.length];
               const lastVal = getLastValue(s.data);
@@ -305,19 +314,19 @@ export function UPlotChart({
                 <div
                   key={s.label}
                   className={`flex items-center gap-2 cursor-pointer transition-opacity ${
-                    hoveredSeries !== null && !isHovered ? 'opacity-40' : 'opacity-100'
+                    hoveredSeries !== null && !isHovered ? 'opacity-30' : 'opacity-100'
                   }`}
                   onMouseEnter={() => setHoveredSeries(i + 1)}
                   onMouseLeave={() => setHoveredSeries(null)}
                 >
                   <div
-                    className="w-3 h-3 rounded-full"
+                    className="w-3 h-0.5 rounded-full"
                     style={{ backgroundColor: color }}
                   />
-                  <span className={`text-sm font-medium ${darkTheme ? 'text-gray-300' : 'text-gray-700'}`}>
+                  <span className={`text-xs font-medium ${darkTheme ? 'text-gray-400' : 'text-gray-600'}`}>
                     {s.label}
                   </span>
-                  <span className={`text-sm font-mono ${darkTheme ? 'text-gray-500' : 'text-gray-400'}`}>
+                  <span className={`text-xs font-mono ${darkTheme ? 'text-gray-600' : 'text-gray-400'}`}>
                     {lastVal}
                   </span>
                 </div>

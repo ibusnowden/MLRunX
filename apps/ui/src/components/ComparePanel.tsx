@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { api, MetricSeries } from '@/lib/api';
+import { UPlotChart } from '@/components/charts/UPlotChart';
+import { useTheme } from '@/components/ThemeProvider';
 
 interface CompareData {
   run_id: string;
@@ -15,17 +17,13 @@ interface ComparePanelProps {
 }
 
 const RUN_COLORS = [
-  'rgb(59, 130, 246)',   // blue
-  'rgb(239, 68, 68)',    // red
-  'rgb(34, 197, 94)',    // green
-  'rgb(168, 85, 247)',   // purple
-  'rgb(249, 115, 22)',   // orange
-  'rgb(236, 72, 153)',   // pink
-  'rgb(20, 184, 166)',   // teal
-  'rgb(234, 179, 8)',    // yellow
+  '#2563eb', '#dc2626', '#16a34a', '#9333ea',
+  '#ea580c', '#db2777', '#0d9488', '#ca8a04',
 ];
+const COMPARE_MAX_POINTS = 5000;
 
 export function ComparePanel({ runIds }: ComparePanelProps) {
+  const { isDark } = useTheme();
   const [runs, setRuns] = useState<CompareData[]>([]);
   const [commonMetrics, setCommonMetrics] = useState<string[]>([]);
   const [selectedMetric, setSelectedMetric] = useState<string>('');
@@ -37,6 +35,7 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
       if (runIds.length === 0) {
         setRuns([]);
         setCommonMetrics([]);
+        setSelectedMetric('');
         setLoading(false);
         return;
       }
@@ -45,12 +44,14 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
       setError(null);
 
       try {
-        const response = await api.compareRuns(runIds, [], 500);
+        const response = await api.compareRuns(runIds, [], COMPARE_MAX_POINTS);
         setRuns(response.runs);
         setCommonMetrics(response.common_metrics);
-        if (response.common_metrics.length > 0 && !selectedMetric) {
-          setSelectedMetric(response.common_metrics[0]);
-        }
+        setSelectedMetric((prev) => {
+          if (response.common_metrics.length === 0) return '';
+          if (prev && response.common_metrics.includes(prev)) return prev;
+          return response.common_metrics[0];
+        });
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to compare runs');
       } finally {
@@ -58,12 +59,12 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
       }
     }
     fetchComparison();
-  }, [runIds, selectedMetric]);
+  }, [runIds]);
 
   if (runIds.length === 0) {
     return (
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <div className="text-center py-8 text-gray-500">
+      <div className="bg-surface rounded-xl border border-border p-6">
+        <div className="text-center py-8 text-text-muted">
           Select runs to compare from the runs table
         </div>
       </div>
@@ -72,16 +73,16 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
 
   if (loading) {
     return (
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <div className="text-center py-8 text-gray-500">Loading comparison...</div>
+      <div className="bg-surface rounded-xl border border-border p-6">
+        <div className="text-center py-8 text-text-muted">Loading comparison...</div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+      <div className="bg-surface rounded-xl border border-border p-6">
+        <div className="p-4 bg-danger-subtle border border-danger/20 rounded-lg text-danger">
           {error}
         </div>
       </div>
@@ -95,27 +96,38 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
     metricSeries: run.series.find((s) => s.name === selectedMetric),
   }));
 
-  // Find max value for scaling
-  const allValues = comparisonData
-    .flatMap((r) => r.metricSeries?.points.map((p) => p.max) || []);
-  const maxValue = Math.max(...allValues, 0.001);
-
   // Find all steps
   const allSteps = new Set<number>();
   comparisonData.forEach((r) => {
     r.metricSeries?.points.forEach((p) => allSteps.add(p.step));
   });
   const sortedSteps = Array.from(allSteps).sort((a, b) => a - b);
+  const stepToIndex = new Map(sortedSteps.map((step, idx) => [step, idx]));
+  const chartSeries = comparisonData.map((run) => {
+    const points = run.metricSeries?.points ?? [];
+    const data = new Array(sortedSteps.length).fill(null);
+    points.forEach((point) => {
+      const idx = stepToIndex.get(point.step);
+      if (idx !== undefined) {
+        data[idx] = point.mean;
+      }
+    });
+    return {
+      label: run.run_name || run.run_id.slice(0, 8),
+      color: run.color,
+      data,
+    };
+  });
 
   return (
-    <div className="bg-white rounded-xl shadow-sm p-6">
+    <div className="bg-surface rounded-xl border border-border p-6">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-semibold">Compare Runs</h2>
+        <h2 className="text-xl font-semibold text-text-primary">Compare Runs</h2>
         {commonMetrics.length > 0 && (
           <select
             value={selectedMetric}
             onChange={(e) => setSelectedMetric(e.target.value)}
-            className="px-3 py-2 border rounded-lg"
+            className="px-3 py-2 border border-border rounded-lg text-text-primary bg-surface-secondary focus:outline-none focus:ring-2 focus:ring-accent"
           >
             {commonMetrics.map((name) => (
               <option key={name} value={name}>
@@ -134,65 +146,48 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
               className="w-3 h-3 rounded-full"
               style={{ backgroundColor: run.color }}
             />
-            <span className="text-sm">
+            <span className="text-sm font-medium text-text-primary">
               {run.run_name || run.run_id.slice(0, 8)}
             </span>
-            <span className="text-xs text-gray-500">({run.status})</span>
+            <span className="text-xs text-text-muted">({run.status})</span>
           </div>
         ))}
       </div>
 
       {commonMetrics.length === 0 ? (
-        <div className="text-center py-8 text-gray-500">
+        <div className="text-center py-8 text-text-muted">
           No common metrics found between selected runs
+        </div>
+      ) : sortedSteps.length === 0 ? (
+        <div className="text-center py-8 text-text-muted">
+          No data points available for {selectedMetric}
         </div>
       ) : (
         <div>
-          {/* Simple comparison chart (placeholder for uPlot) */}
-          <div className="h-64 bg-gray-50 rounded-lg p-4 overflow-auto">
-            <div className="text-sm text-gray-500 mb-2">{selectedMetric}</div>
-            <div className="space-y-2">
-              {sortedSteps.slice(0, 30).map((step) => (
-                <div key={step} className="flex items-center gap-2">
-                  <span className="text-xs text-gray-500 w-16">step {step}</span>
-                  <div className="flex-1 flex gap-1">
-                    {comparisonData.map((run) => {
-                      const point = run.metricSeries?.points.find((p) => p.step === step);
-                      if (!point) return null;
-                      return (
-                        <div
-                          key={run.run_id}
-                          className="h-4 rounded"
-                          style={{
-                            backgroundColor: run.color,
-                            width: `${(point.mean / maxValue) * 100}%`,
-                            minWidth: '2px',
-                          }}
-                          title={`${run.run_name || run.run_id.slice(0, 8)}: ${point.mean.toFixed(4)}`}
-                        />
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-              {sortedSteps.length > 30 && (
-                <div className="text-gray-500 text-sm">
-                  ... and {sortedSteps.length - 30} more steps
-                </div>
-              )}
-            </div>
+          <div className="rounded-lg border border-border overflow-hidden">
+            <UPlotChart
+              title={`${selectedMetric} across runs`}
+              xData={sortedSteps}
+              series={chartSeries}
+              xLabel="Step"
+              yLabel={selectedMetric}
+              height={320}
+              interactive={true}
+              darkTheme={isDark}
+              showLegend={true}
+            />
           </div>
 
           {/* Summary table */}
           <div className="mt-4 overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b">
-                  <th className="text-left py-2 px-3">Run</th>
-                  <th className="text-right py-2 px-3">Min</th>
-                  <th className="text-right py-2 px-3">Max</th>
-                  <th className="text-right py-2 px-3">Last</th>
-                  <th className="text-right py-2 px-3">Points</th>
+                <tr className="border-b border-border">
+                  <th className="text-left py-2 px-3 text-text-secondary font-semibold">Run</th>
+                  <th className="text-right py-2 px-3 text-text-secondary font-semibold">Min</th>
+                  <th className="text-right py-2 px-3 text-text-secondary font-semibold">Max</th>
+                  <th className="text-right py-2 px-3 text-text-secondary font-semibold">Last</th>
+                  <th className="text-right py-2 px-3 text-text-secondary font-semibold">Points</th>
                 </tr>
               </thead>
               <tbody>
@@ -201,24 +196,24 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
                   if (!series) return null;
                   const points = series.points;
                   return (
-                    <tr key={run.run_id} className="border-b">
-                      <td className="py-2 px-3 flex items-center gap-2">
+                    <tr key={run.run_id} className="border-b border-border">
+                      <td className="py-2 px-3 flex items-center gap-2 font-medium text-text-primary">
                         <div
                           className="w-2 h-2 rounded-full"
                           style={{ backgroundColor: run.color }}
                         />
                         {run.run_name || run.run_id.slice(0, 8)}
                       </td>
-                      <td className="text-right py-2 px-3 font-mono">
+                      <td className="text-right py-2 px-3 font-mono text-text-secondary">
                         {Math.min(...points.map((p) => p.min)).toFixed(4)}
                       </td>
-                      <td className="text-right py-2 px-3 font-mono">
+                      <td className="text-right py-2 px-3 font-mono text-text-secondary">
                         {Math.max(...points.map((p) => p.max)).toFixed(4)}
                       </td>
-                      <td className="text-right py-2 px-3 font-mono">
+                      <td className="text-right py-2 px-3 font-mono text-text-secondary">
                         {points.length > 0 ? points[points.length - 1].mean.toFixed(4) : '-'}
                       </td>
-                      <td className="text-right py-2 px-3">{series.total_points}</td>
+                      <td className="text-right py-2 px-3 text-text-secondary">{series.total_points}</td>
                     </tr>
                   );
                 })}

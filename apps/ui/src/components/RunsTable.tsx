@@ -9,12 +9,20 @@ interface RunsTableProps {
   onRunClick?: (run: Run) => void;
 }
 
-const STATUS_COLORS: Record<string, string> = {
-  running: 'bg-blue-100 text-blue-800',
-  finished: 'bg-green-100 text-green-800',
-  failed: 'bg-red-100 text-red-800',
-  killed: 'bg-yellow-100 text-yellow-800',
-  pending: 'bg-gray-100 text-gray-800',
+const STATUS_STYLES: Record<string, string> = {
+  running: 'bg-[var(--badge-running-bg)] text-[var(--badge-running-text)]',
+  finished: 'bg-[var(--badge-finished-bg)] text-[var(--badge-finished-text)]',
+  failed: 'bg-[var(--badge-failed-bg)] text-[var(--badge-failed-text)]',
+  killed: 'bg-[var(--badge-killed-bg)] text-[var(--badge-killed-text)]',
+  pending: 'bg-[var(--badge-pending-bg)] text-[var(--badge-pending-text)]',
+};
+
+const STATUS_DOT: Record<string, string> = {
+  running: 'bg-accent animate-pulse',
+  finished: 'bg-success',
+  failed: 'bg-danger',
+  killed: 'bg-warning',
+  pending: 'bg-text-muted',
 };
 
 const TOKEN_REGEX = /(\w+):("[^"]+"|'[^']+'|\S+)/g;
@@ -105,7 +113,6 @@ function formatDuration(seconds: number | null): string {
 }
 
 function formatDate(dateStr: string): string {
-  // Handle SystemTime format: "SystemTime { tv_sec: ..., tv_nsec: ... }"
   const match = dateStr.match(/tv_sec:\s*(\d+)/);
   if (match) {
     const timestamp = parseInt(match[1], 10) * 1000;
@@ -113,6 +120,31 @@ function formatDate(dateStr: string): string {
   }
   return dateStr;
 }
+
+// ── Icons ──
+const SearchIcon = () => (
+  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+  </svg>
+);
+
+const RefreshIcon = () => (
+  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+  </svg>
+);
+
+const ChevronLeftIcon = () => (
+  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+  </svg>
+);
+
+const ChevronRightIcon = () => (
+  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+  </svg>
+);
 
 export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
   const router = useRouter();
@@ -237,91 +269,109 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
   const totalPages = Math.ceil(total / pageSize);
   const isSearching = searchQuery.trim().length > 0;
   const resultsLabel = isSearching
-    ? `Showing ${runs.length} of ${total} matching runs`
-    : `Showing ${runs.length} of ${total} runs`;
+    ? `${total} matching runs`
+    : `${total} total runs`;
 
   return (
     <div className="w-full">
-      {/* Filters */}
-      <div className="mb-4">
-        <div className="flex flex-wrap gap-4 items-center">
+      {/* Toolbar */}
+      <div className="flex flex-wrap gap-3 items-center mb-4">
+        {/* Search */}
+        <div className="relative flex-1 min-w-[280px]">
+          <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-text-muted">
+            <SearchIcon />
+          </div>
           <input
             type="text"
-            placeholder="Search runs by name, id, project, or tag"
+            placeholder="Search runs... (e.g. project:demo status:finished tag:model=toy)"
             value={searchQuery}
             onChange={(e) => {
               setSearchQuery(e.target.value);
               setPage(0);
             }}
-            className="px-3 py-2 border rounded-lg flex-1 min-w-[240px]"
+            className="w-full pl-10 pr-4 py-2.5 text-sm rounded-lg border border-border bg-surface-secondary text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent"
           />
-          <select
-            value={statusToken?.value ?? ''}
-            onChange={(e) => {
-              const nextQuery = updateTokenValue(searchQuery, 'status', e.target.value);
-              setSearchQuery(nextQuery);
-              setPage(0);
-            }}
-            className="px-3 py-2 border rounded-lg"
-          >
-            <option value="">All Status</option>
-            <option value="running">Running</option>
-            <option value="finished">Finished</option>
-            <option value="failed">Failed</option>
-            <option value="killed">Killed</option>
-          </select>
+        </div>
+
+        {/* Status filter */}
+        <select
+          value={statusToken?.value ?? ''}
+          onChange={(e) => {
+            const nextQuery = updateTokenValue(searchQuery, 'status', e.target.value);
+            setSearchQuery(nextQuery);
+            setPage(0);
+          }}
+          className="px-3 py-2.5 text-sm rounded-lg border border-border bg-surface-secondary text-text-primary focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent"
+        >
+          <option value="">All Status</option>
+          <option value="running">Running</option>
+          <option value="finished">Finished</option>
+          <option value="failed">Failed</option>
+          <option value="killed">Killed</option>
+        </select>
+
+        {/* Clear */}
+        {isSearching && (
           <button
             onClick={() => {
               setSearchQuery('');
               setPage(0);
             }}
-            className="px-3 py-2 border rounded-lg text-gray-600 hover:border-gray-400"
+            className="px-3 py-2.5 text-sm rounded-lg border border-border text-text-secondary hover:bg-surface-hover hover:text-text-primary transition-colors"
           >
             Clear
           </button>
-          <button
-            onClick={fetchRuns}
-            className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
-          >
-            Refresh
-          </button>
-        </div>
-        <div className="mt-2 text-xs text-gray-500">
-          Examples: <span className="font-mono">project:demo status:finished tag:model=toy</span>
-        </div>
+        )}
+
+        {/* Refresh */}
+        <button
+          onClick={fetchRuns}
+          className="flex items-center gap-2 px-4 py-2.5 text-sm rounded-lg bg-accent text-white hover:bg-accent-hover transition-colors font-medium"
+        >
+          <RefreshIcon />
+          Refresh
+        </button>
       </div>
-      <div className="mb-3 text-sm text-gray-500">{resultsLabel}</div>
+
+      {/* Results count */}
+      <div className="mb-3 text-xs text-text-muted">{resultsLabel}</div>
 
       {/* Error */}
       {error && (
-        <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+        <div className="mb-4 p-4 rounded-lg bg-danger-subtle border border-danger/20 text-danger">
           {error}
         </div>
       )}
 
       {/* Table */}
-      <div className="overflow-x-auto border rounded-lg">
+      <div className="overflow-x-auto rounded-lg border border-border">
         <table className="w-full">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">Name</th>
-              <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">Status</th>
-              <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">Project</th>
-              <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">Metrics</th>
-              <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">Duration</th>
-              <th className="px-4 py-3 text-left text-sm font-medium text-gray-600">Created</th>
+          <thead>
+            <tr className="bg-surface-secondary">
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wider">Name</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wider">Status</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wider">Project</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wider">Metrics</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wider">Duration</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wider">Created</th>
             </tr>
           </thead>
-          <tbody className="divide-y">
+          <tbody className="divide-y divide-border">
             {loading ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-gray-500">
-                  Loading...
+                <td colSpan={6} className="px-4 py-12 text-center text-text-muted">
+                  <div className="flex items-center justify-center gap-2">
+                    <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                    </svg>
+                    Loading runs...
+                  </div>
                 </td>
               </tr>
             ) : runs.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-gray-500">
+                <td colSpan={6} className="px-4 py-12 text-center text-text-muted">
                   No runs found
                 </td>
               </tr>
@@ -330,31 +380,34 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
                 <tr
                   key={run.run_id}
                   onClick={() => onRunClick?.(run)}
-                  className="hover:bg-gray-50 cursor-pointer"
+                  className="hover:bg-surface-hover cursor-pointer transition-colors"
                 >
-                  <td className="px-4 py-3">
-                    <div className="font-medium text-gray-900">
+                  <td className="px-4 py-3.5">
+                    <div className="font-medium text-text-primary">
                       {run.name || run.run_id.slice(0, 8)}
                     </div>
-                    <div className="text-xs text-gray-500 font-mono">
-                      {run.run_id.slice(0, 8)}...
+                    <div className="text-xs text-text-muted font-mono mt-0.5">
+                      {run.run_id.slice(0, 12)}
                     </div>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-4 py-3.5">
                     <span
-                      className={`px-2 py-1 rounded-full text-xs font-medium ${
-                        STATUS_COLORS[run.status] || STATUS_COLORS.pending
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
+                        STATUS_STYLES[run.status] || STATUS_STYLES.pending
                       }`}
                     >
+                      <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[run.status] || STATUS_DOT.pending}`} />
                       {run.status}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-600">{run.project_id}</td>
-                  <td className="px-4 py-3 text-sm text-gray-600">{run.metrics_count}</td>
-                  <td className="px-4 py-3 text-sm text-gray-600">
+                  <td className="px-4 py-3.5 text-sm text-text-secondary">{run.project_id}</td>
+                  <td className="px-4 py-3.5">
+                    <span className="text-sm font-mono text-text-secondary">{run.metrics_count}</span>
+                  </td>
+                  <td className="px-4 py-3.5 text-sm text-text-secondary font-mono">
                     {formatDuration(run.duration_seconds)}
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-500">
+                  <td className="px-4 py-3.5 text-sm text-text-muted">
                     {formatDate(run.created_at)}
                   </td>
                 </tr>
@@ -367,26 +420,26 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
       {/* Pagination */}
       {totalPages > 1 && (
         <div className="mt-4 flex items-center justify-between">
-          <div className="text-sm text-gray-600">
-            Showing {page * pageSize + 1}-{Math.min((page + 1) * pageSize, total)} of {total} runs
+          <div className="text-sm text-text-muted">
+            {page * pageSize + 1}-{Math.min((page + 1) * pageSize, total)} of {total}
           </div>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-1">
             <button
               onClick={() => setPage((p) => Math.max(0, p - 1))}
               disabled={page === 0}
-              className="px-3 py-1 border rounded disabled:opacity-50"
+              className="p-2 rounded-lg border border-border text-text-secondary hover:bg-surface-hover disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
-              Previous
+              <ChevronLeftIcon />
             </button>
-            <span className="px-3 py-1">
-              Page {page + 1} of {totalPages}
+            <span className="px-3 py-1.5 text-sm text-text-secondary">
+              {page + 1} / {totalPages}
             </span>
             <button
               onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
               disabled={page >= totalPages - 1}
-              className="px-3 py-1 border rounded disabled:opacity-50"
+              className="p-2 rounded-lg border border-border text-text-secondary hover:bg-surface-hover disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
-              Next
+              <ChevronRightIcon />
             </button>
           </div>
         </div>

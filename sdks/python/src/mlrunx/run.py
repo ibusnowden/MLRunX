@@ -77,8 +77,15 @@ class Run:
         # Start the background worker
         self._worker.start()
 
-        # Initialize run on server
-        self._init_run_on_server(config or {})
+        # Initialize run on server unless explicit offline mode is requested.
+        if self._sdk_config.offline_mode:
+            self._offline = True
+            self._worker.set_offline()
+            logger.warning("MLRUNX_OFFLINE enabled - running in offline mode")
+            if config:
+                self.log_params(config)
+        else:
+            self._init_run_on_server(config or {})
 
         logger.info(f"Run started: {self._run_id} ({self._name})")
 
@@ -112,6 +119,7 @@ class Run:
 
             if response.get("offline"):
                 self._offline = True
+                self._worker.set_offline()
                 logger.warning(
                     "Running in offline mode - data will be synced when server is available"
                 )
@@ -123,6 +131,7 @@ class Run:
         except Exception as e:
             logger.warning(f"Failed to initialize run on server: {e}")
             self._offline = True
+            self._worker.set_offline()
 
         # Log initial config as params
         if config:

@@ -49,11 +49,13 @@ use services::{
     CardinalityTracker, IdempotencyResult, IdempotencyStore, IngestServiceImpl, MetricPayload,
     ParamPayload, TagPayload, compute_payload_hash, ingest::InMemoryStore,
 };
+use storage::{SqliteStore, MetricRow};
 
 /// Application state shared across handlers.
 #[derive(Clone)]
 pub struct AppState {
     store: Arc<InMemoryStore>,
+    sqlite_store: Arc<SqliteStore>,
     key_store: Arc<ApiKeyStore>,
     idempotency_store: Arc<IdempotencyStore>,
     cardinality_tracker: Arc<CardinalityTracker>,
@@ -97,17 +99,38 @@ async fn http_init_run(
         .run_id
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
 
-    let mut runs = state.store.runs.write().await;
-
-    // Check if exists (idempotent)
-    if runs.contains_key(&run_id) {
+    // Check if run exists in SQLite (idempotent)
+    if state.sqlite_store.run_exists(&run_id).await.unwrap_or(false) {
         return Ok(Json(InitRunHttpResponse {
             run_id,
             offline: false,
         }));
     }
 
-    // Create new run
+    // Get or create project in SQLite
+    let project_id = state.sqlite_store
+        .get_or_create_project(&req.project)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Create run in SQLite
+    state.sqlite_store
+        .create_run(&run_id, &project_id, req.name.as_deref())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Set initial tags if provided
+    if let Some(tags) = &req.tags {
+        let tag_pairs: Vec<(String, String)> = tags.iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        state.sqlite_store
+            .set_tags(&run_id, &tag_pairs)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    // Also maintain in-memory state for backward compatibility
     let now = std::time::SystemTime::now();
     let run_state = services::ingest::RunState {
         run_id: run_id.clone(),
@@ -118,11 +141,13 @@ async fn http_init_run(
         updated_at: now,
         metrics_count: 0,
         params_count: 0,
-        tags: req.tags.unwrap_or_default(),
+        tags: req.tags.clone().unwrap_or_default(),
     };
 
+    let mut runs = state.store.runs.write().await;
     runs.insert(run_id.clone(), run_state);
-    info!(run_id = %run_id, project = %req.project, "HTTP: Initialized run");
+
+    info!(run_id = %run_id, project = %req.project, "HTTP: Initialized run (SQLite)");
 
     Ok(Json(InitRunHttpResponse {
         run_id,
@@ -351,7 +376,29 @@ async fn http_ingest_batch(
         .count();
     let accepted_tag_count = accepted_tags.len();
 
+    // Persist metrics to SQLite
     if accepted_metric_count > 0 {
+        let sqlite_metrics: Vec<MetricRow> = req.metrics
+            .iter()
+            .filter(|m| accepted_metrics.contains(&m.name))
+            .map(|m| MetricRow {
+                name: m.name.clone(),
+                step: m.step,
+                value: m.value,
+                timestamp: m.timestamp,
+            })
+            .collect();
+
+        if let Err(e) = state.sqlite_store.insert_metrics(&req.run_id, &sqlite_metrics).await {
+            warn!(error = %e, "Failed to persist metrics to SQLite");
+        }
+
+        // Also update metrics count in SQLite
+        if let Err(e) = state.sqlite_store.increment_metrics_count(&req.run_id, accepted_metric_count as i64).await {
+            warn!(error = %e, "Failed to update metrics count in SQLite");
+        }
+
+        // Also maintain in-memory for backward compatibility
         let mut metrics_store = state.store.metrics.write().await;
         let run_metrics = metrics_store
             .entry(req.run_id.clone())
@@ -367,10 +414,31 @@ async fn http_ingest_batch(
         }
     }
 
+    // Persist tags to SQLite
+    if !accepted_tags.is_empty() {
+        let tag_pairs: Vec<(String, String)> = accepted_tags.iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if let Err(e) = state.sqlite_store.set_tags(&req.run_id, &tag_pairs).await {
+            warn!(error = %e, "Failed to persist tags to SQLite");
+        }
+    }
+
+    // Persist params to SQLite
+    if param_count > 0 {
+        let param_pairs: Vec<(String, String)> = req.params
+            .iter()
+            .map(|p| (p.name.clone(), p.value.clone()))
+            .collect();
+        if let Err(e) = state.sqlite_store.insert_params(&req.run_id, &param_pairs).await {
+            warn!(error = %e, "Failed to persist params to SQLite");
+        }
+    }
+
     run.metrics_count += accepted_metric_count as u64;
     run.params_count += param_count as u64;
 
-    // Update tags (only accepted ones)
+    // Update tags (only accepted ones) in memory
     for (key, value) in accepted_tags {
         run.tags.insert(key.clone(), value.clone());
     }
@@ -388,7 +456,7 @@ async fn http_ingest_batch(
         params = param_count,
         tags = accepted_tag_count,
         dropped = dropped,
-        "HTTP: Ingested batch"
+        "HTTP: Ingested batch (SQLite)"
     );
 
     Ok(Json(IngestBatchHttpResponse {
@@ -416,21 +484,25 @@ async fn http_finish_run(
     axum::extract::Path(run_id): axum::extract::Path<String>,
     Json(req): Json<FinishRunHttpRequest>,
 ) -> Result<Json<FinishRunHttpResponse>, (StatusCode, String)> {
+    // Update in SQLite
+    state.sqlite_store
+        .finish_run(&run_id, &req.status)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Also update in-memory for backward compatibility
     let mut runs = state.store.runs.write().await;
+    if let Some(run) = runs.get_mut(&run_id) {
+        run.status = match req.status.as_str() {
+            "finished" => mlrunx_proto::mlrunx::v1::RunStatus::Finished,
+            "failed" => mlrunx_proto::mlrunx::v1::RunStatus::Failed,
+            "killed" => mlrunx_proto::mlrunx::v1::RunStatus::Killed,
+            _ => mlrunx_proto::mlrunx::v1::RunStatus::Finished,
+        };
+        run.updated_at = std::time::SystemTime::now();
+    }
 
-    let run = runs
-        .get_mut(&run_id)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)))?;
-
-    run.status = match req.status.as_str() {
-        "finished" => mlrunx_proto::mlrunx::v1::RunStatus::Finished,
-        "failed" => mlrunx_proto::mlrunx::v1::RunStatus::Failed,
-        "killed" => mlrunx_proto::mlrunx::v1::RunStatus::Killed,
-        _ => mlrunx_proto::mlrunx::v1::RunStatus::Finished,
-    };
-    run.updated_at = std::time::SystemTime::now();
-
-    info!(run_id = %run_id, status = %req.status, "HTTP: Finished run");
+    info!(run_id = %run_id, status = %req.status, "HTTP: Finished run (SQLite)");
 
     Ok(Json(FinishRunHttpResponse {
         status: "ok".to_string(),
@@ -482,153 +554,53 @@ struct ListRunsResponse {
     offset: usize,
 }
 
-/// List runs with optional filtering.
+/// List runs with optional filtering (queries from SQLite).
 async fn http_list_runs(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<ListRunsQuery>,
 ) -> Result<Json<ListRunsResponse>, (StatusCode, String)> {
-    let runs = state.store.runs.read().await;
-
     let limit = query.limit.unwrap_or(100).min(1000);
     let offset = query.offset.unwrap_or(0);
-    let query_terms: Vec<String> = query
-        .q
-        .as_deref()
-        .unwrap_or("")
-        .split_whitespace()
-        .filter(|term| !term.is_empty())
-        .map(|term| term.to_lowercase())
-        .collect();
-    let tag_filters: Vec<(String, Option<String>)> = query
-        .tags
-        .as_deref()
-        .unwrap_or("")
-        .split(',')
-        .filter(|entry| !entry.trim().is_empty())
-        .map(|entry| {
-            let trimmed = entry.trim();
-            if let Some((key, value)) = trimmed.split_once('=') {
-                (key.trim().to_lowercase(), Some(value.trim().to_lowercase()))
-            } else {
-                (trimmed.to_lowercase(), None)
-            }
-        })
-        .collect();
 
-    // Filter runs
-    let mut filtered_runs: Vec<_> = runs
-        .values()
-        .filter(|run| {
-            // Filter by project
-            if let Some(ref project) = query.project {
-                if &run.project_id != project {
-                    return false;
-                }
-            }
+    // Query from SQLite
+    let (sqlite_runs, total) = state.sqlite_store
+        .list_runs(
+            query.project.as_deref(),
+            query.status.as_deref(),
+            query.q.as_deref(),
+            limit,
+            offset,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-            // Filter by status
-            if let Some(ref status) = query.status {
-                let status = status.to_lowercase();
-                let run_status = match run.status {
-                    mlrunx_proto::mlrunx::v1::RunStatus::Running => "running",
-                    mlrunx_proto::mlrunx::v1::RunStatus::Finished => "finished",
-                    mlrunx_proto::mlrunx::v1::RunStatus::Failed => "failed",
-                    mlrunx_proto::mlrunx::v1::RunStatus::Killed => "killed",
-                    _ => "pending",
-                };
-                if run_status != status {
-                    return false;
-                }
-            }
+    // Convert to response format
+    let mut runs_response = Vec::new();
+    for run in sqlite_runs {
+        // Get tags for this run
+        let tags = state.sqlite_store
+            .get_tags(&run.id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<std::collections::HashMap<String, String>>();
 
-            // Filter by tag (key or key=value)
-            if !tag_filters.is_empty() {
-                let matches_all_tags = tag_filters.iter().all(|(key, value)| {
-                    run.tags.iter().any(|(tag_key, tag_value)| {
-                        if tag_key.to_lowercase() != *key {
-                            return false;
-                        }
-                        value
-                            .as_ref()
-                            .map_or(true, |expected| tag_value.to_lowercase() == *expected)
-                    })
-                });
-
-                if !matches_all_tags {
-                    return false;
-                }
-            }
-
-            // Free-text search across run_id, name, project, and tags
-            if !query_terms.is_empty() {
-                let mut haystack = String::new();
-                haystack.push_str(&run.run_id);
-                haystack.push(' ');
-                if let Some(ref name) = run.name {
-                    haystack.push_str(name);
-                    haystack.push(' ');
-                }
-                haystack.push_str(&run.project_id);
-                for (tag_key, tag_value) in &run.tags {
-                    haystack.push(' ');
-                    haystack.push_str(tag_key);
-                    haystack.push(' ');
-                    haystack.push_str(tag_value);
-                }
-
-                let haystack = haystack.to_lowercase();
-                let matches_query = query_terms
-                    .iter()
-                    .all(|term| haystack.contains(term));
-                if !matches_query {
-                    return false;
-                }
-            }
-
-            true
-        })
-        .collect();
-
-    // Sort by created_at descending (newest first)
-    filtered_runs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-
-    let total = filtered_runs.len();
-
-    // Apply pagination
-    let page_runs: Vec<_> = filtered_runs
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .map(|run| {
-            let duration = run
-                .updated_at
-                .duration_since(run.created_at)
-                .ok()
-                .map(|d| d.as_secs_f64());
-
-            RunResponse {
-                run_id: run.run_id.clone(),
-                project_id: run.project_id.clone(),
-                name: run.name.clone(),
-                status: match run.status {
-                    mlrunx_proto::mlrunx::v1::RunStatus::Running => "running".to_string(),
-                    mlrunx_proto::mlrunx::v1::RunStatus::Finished => "finished".to_string(),
-                    mlrunx_proto::mlrunx::v1::RunStatus::Failed => "failed".to_string(),
-                    mlrunx_proto::mlrunx::v1::RunStatus::Killed => "killed".to_string(),
-                    _ => "pending".to_string(),
-                },
-                metrics_count: run.metrics_count,
-                params_count: run.params_count,
-                tags: run.tags.clone(),
-                created_at: format!("{:?}", run.created_at),
-                updated_at: format!("{:?}", run.updated_at),
-                duration_seconds: duration,
-            }
-        })
-        .collect();
+        runs_response.push(RunResponse {
+            run_id: run.id,
+            project_id: run.project_id,
+            name: run.name,
+            status: run.status,
+            metrics_count: run.metrics_count as u64,
+            params_count: run.params_count as u64,
+            tags,
+            created_at: run.created_at,
+            updated_at: run.updated_at,
+            duration_seconds: None,
+        });
+    }
 
     Ok(Json(ListRunsResponse {
-        runs: page_runs,
+        runs: runs_response,
         total,
         limit,
         offset,
@@ -664,39 +636,38 @@ async fn http_get_run(
     State(state): State<AppState>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
 ) -> Result<Json<RunDetailResponse>, (StatusCode, String)> {
-    let runs = state.store.runs.read().await;
+    // Run list is sourced from SQLite; run detail must use the same source.
+    let run = state
+        .sqlite_store
+        .get_run(&run_id)
+        .await
+        .map_err(|e| match e {
+            storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
 
-    let run = runs
-        .get(&run_id)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)))?;
+    let tags = state
+        .sqlite_store
+        .get_tags(&run_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<std::collections::HashMap<String, String>>();
 
-    let duration = run
-        .updated_at
-        .duration_since(run.created_at)
-        .ok()
-        .map(|d| d.as_secs_f64());
-
-    // TODO: Get actual metrics summary from ClickHouse
-    // For now, return empty list (metrics are tracked in-memory as count only)
+    // Keep detail summary lightweight for now.
     let metrics_summary = vec![];
 
     Ok(Json(RunDetailResponse {
-        run_id: run.run_id.clone(),
+        run_id: run.id.clone(),
         project_id: run.project_id.clone(),
         name: run.name.clone(),
-        status: match run.status {
-            mlrunx_proto::mlrunx::v1::RunStatus::Running => "running".to_string(),
-            mlrunx_proto::mlrunx::v1::RunStatus::Finished => "finished".to_string(),
-            mlrunx_proto::mlrunx::v1::RunStatus::Failed => "failed".to_string(),
-            mlrunx_proto::mlrunx::v1::RunStatus::Killed => "killed".to_string(),
-            _ => "pending".to_string(),
-        },
-        metrics_count: run.metrics_count,
-        params_count: run.params_count,
-        tags: run.tags.clone(),
-        created_at: format!("{:?}", run.created_at),
-        updated_at: format!("{:?}", run.updated_at),
-        duration_seconds: duration,
+        status: run.status.clone(),
+        metrics_count: run.metrics_count as u64,
+        params_count: run.params_count as u64,
+        tags,
+        created_at: run.created_at.clone(),
+        updated_at: run.updated_at.clone(),
+        duration_seconds: None,
         metrics_summary,
     }))
 }
@@ -730,12 +701,9 @@ async fn http_get_metrics(
     axum::extract::Path(run_id): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<MetricsQuery>,
 ) -> Result<Json<services::MetricsQueryResponse>, (StatusCode, String)> {
-    // Verify run exists
-    {
-        let runs = state.store.runs.read().await;
-        if !runs.contains_key(&run_id) {
-            return Err((StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)));
-        }
+    // Verify run exists in SQLite
+    if !state.sqlite_store.run_exists(&run_id).await.unwrap_or(false) {
+        return Err((StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)));
     }
 
     // Parse metric names
@@ -749,18 +717,34 @@ async fn http_get_metrics(
             .collect()
     };
 
-    // Query metrics
-    let metrics_store = state.store.metrics.read().await;
-    let run_metrics = metrics_store.get(&run_id);
+    // Query metrics from SQLite
+    let sqlite_series = state.sqlite_store
+        .get_metrics(&run_id, &names, query.max_points)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let (series, available_metrics) = match run_metrics {
-        Some(rm) => {
-            let series = rm.query(&names, query.max_points, query.start_step, query.end_step);
-            let available = rm.metric_names();
-            (series, available)
-        }
-        None => (vec![], vec![]),
-    };
+    // Get available metric names
+    let available_metrics = state.sqlite_store
+        .get_metric_names(&run_id)
+        .await
+        .unwrap_or_default();
+
+    // Convert SQLite format to API format
+    let series: Vec<services::MetricSeries> = sqlite_series
+        .into_iter()
+        .map(|s| services::MetricSeries {
+            name: s.name,
+            points: s.points.into_iter().map(|p| services::AggregatedPoint {
+                step: p.step,
+                mean: p.mean,
+                min: p.min,
+                max: p.max,
+                count: p.count,
+            }).collect(),
+            total_points: s.total_points,
+            downsampled: s.downsampled,
+        })
+        .collect();
 
     Ok(Json(services::MetricsQueryResponse {
         run_id,
@@ -832,34 +816,57 @@ async fn http_compare_runs(
         ));
     }
 
-    let runs_store = state.store.runs.read().await;
-    let metrics_store = state.store.metrics.read().await;
-
     // Collect data for each run
     let mut runs_data = Vec::new();
     let mut all_metric_sets: Vec<std::collections::HashSet<String>> = Vec::new();
 
     for run_id in &req.run_ids {
-        // Get run info
-        let run = runs_store
-            .get(run_id)
-            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)))?;
+        let run = state
+            .sqlite_store
+            .get_run(run_id)
+            .await
+            .map_err(|e| match e {
+                storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+                _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            })?;
 
-        // Get run metrics
-        let run_metrics = metrics_store.get(run_id);
-        let (series, available) = match run_metrics {
-            Some(rm) => {
-                let names = if req.metric_names.is_empty() {
-                    vec![]
-                } else {
-                    req.metric_names.clone()
-                };
-                let series = rm.query(&names, req.max_points, None, None);
-                let available = rm.metric_names();
-                (series, available)
-            }
-            None => (vec![], vec![]),
+        let names = if req.metric_names.is_empty() {
+            vec![]
+        } else {
+            req.metric_names.clone()
         };
+
+        let sqlite_series = state
+            .sqlite_store
+            .get_metrics(run_id, &names, req.max_points)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        let series: Vec<services::MetricSeries> = sqlite_series
+            .into_iter()
+            .map(|s| services::MetricSeries {
+                name: s.name,
+                points: s
+                    .points
+                    .into_iter()
+                    .map(|p| services::AggregatedPoint {
+                        step: p.step,
+                        mean: p.mean,
+                        min: p.min,
+                        max: p.max,
+                        count: p.count,
+                    })
+                    .collect(),
+                total_points: s.total_points,
+                downsampled: s.downsampled,
+            })
+            .collect();
+
+        let available = state
+            .sqlite_store
+            .get_metric_names(run_id)
+            .await
+            .unwrap_or_default();
 
         // Track metric names for finding common ones
         let metric_set: std::collections::HashSet<String> = available.into_iter().collect();
@@ -868,13 +875,7 @@ async fn http_compare_runs(
         runs_data.push(RunCompareData {
             run_id: run_id.clone(),
             run_name: run.name.clone(),
-            status: match run.status {
-                mlrunx_proto::mlrunx::v1::RunStatus::Running => "running".to_string(),
-                mlrunx_proto::mlrunx::v1::RunStatus::Finished => "finished".to_string(),
-                mlrunx_proto::mlrunx::v1::RunStatus::Failed => "failed".to_string(),
-                mlrunx_proto::mlrunx::v1::RunStatus::Killed => "killed".to_string(),
-                _ => "pending".to_string(),
-            },
+            status: run.status.clone(),
             series,
         });
     }
@@ -970,10 +971,20 @@ async fn main() {
         cardinality_tracker.config().max_tags_per_project
     );
 
+    // Initialize SQLite store for persistence
+    let sqlite_path = std::env::var("MLRUNX_SQLITE_PATH")
+        .unwrap_or_else(|_| "mlrunx.db".to_string());
+    let sqlite_store = Arc::new(
+        SqliteStore::new(&sqlite_path)
+            .expect("Failed to initialize SQLite store")
+    );
+    info!("SQLite store initialized at: {}", sqlite_path);
+
     // Create shared state
     let store = Arc::new(InMemoryStore::new());
     let app_state = AppState {
         store: store.clone(),
+        sqlite_store,
         key_store: key_store.clone(),
         idempotency_store,
         cardinality_tracker,
@@ -1029,12 +1040,18 @@ mod tests {
 
     fn test_app() -> Router {
         let store = Arc::new(InMemoryStore::new());
+        // Use in-memory SQLite for tests
+        let sqlite_store = Arc::new(
+            SqliteStore::new(":memory:")
+                .expect("Failed to create test SQLite store")
+        );
         // Use dev mode for tests (auth disabled)
         let key_store = Arc::new(ApiKeyStore::new_dev_mode());
         let idempotency_store = Arc::new(IdempotencyStore::new());
         let cardinality_tracker = Arc::new(CardinalityTracker::default());
         let state = AppState {
             store,
+            sqlite_store,
             key_store,
             idempotency_store,
             cardinality_tracker,
@@ -1081,6 +1098,49 @@ mod tests {
                     .body(Body::from(
                         r#"{"project": "test-project", "name": "test-run"}"#,
                     ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_get_run_from_sqlite_after_in_memory_reset() {
+        let store = Arc::new(InMemoryStore::new());
+        let sqlite_store = Arc::new(
+            SqliteStore::new(":memory:")
+                .expect("Failed to create test SQLite store")
+        );
+        let key_store = Arc::new(ApiKeyStore::new_dev_mode());
+        let idempotency_store = Arc::new(IdempotencyStore::new());
+        let cardinality_tracker = Arc::new(CardinalityTracker::default());
+
+        let project_id = sqlite_store
+            .get_or_create_project("test-project")
+            .await
+            .unwrap();
+        sqlite_store
+            .create_run("run-sqlite-only", &project_id, Some("sqlite-only-run"))
+            .await
+            .unwrap();
+
+        let state = AppState {
+            store,
+            sqlite_store,
+            key_store,
+            idempotency_store,
+            cardinality_tracker,
+        };
+        let app = build_http_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/runs/run-sqlite-only")
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await

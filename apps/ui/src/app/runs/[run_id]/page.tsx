@@ -1,10 +1,11 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useState, useEffect, useCallback, useMemo, use } from 'react';
+import { useRouter } from 'next/navigation';
 import { api, RunDetail, MetricSeries } from '@/lib/api';
 import { DashboardLayout, MetricSection, ChartCard } from '@/components/dashboard';
 import { UPlotChart } from '@/components/charts/UPlotChart';
+import { useTheme } from '@/components/ThemeProvider';
 import {
   groupMetrics,
   filterMetrics,
@@ -37,10 +38,11 @@ interface MetricChartData {
   series: { label: string; data: number[]; color?: string }[];
 }
 
-export default function RunDetailPage() {
-  const params = useParams();
+export default function RunDetailPage({ params }: { params: Promise<{ run_id: string }> }) {
+  // Unwrap the async params using React.use()
+  const { run_id: runId } = use(params);
   const router = useRouter();
-  const runId = params.run_id as string;
+  const { isDark } = useTheme();
 
   // Run state
   const [run, setRun] = useState<RunDetail | null>(null);
@@ -58,7 +60,7 @@ export default function RunDetailPage() {
   const [smoothing, setSmoothing] = useState(0);
   const maxPoints = 1000;
 
-  const darkTheme = true;
+  const darkTheme = isDark;
 
   // Fetch run details
   useEffect(() => {
@@ -233,9 +235,9 @@ export default function RunDetailPage() {
   // Loading state
   if (loading) {
     return (
-      <main className="min-h-screen p-8 bg-[#0d1117]">
+      <main className="min-h-screen p-8 bg-background">
         <div className="max-w-7xl mx-auto">
-          <div className="text-center py-16 text-gray-500">
+          <div className="text-center py-16 text-text-muted">
             <LoadingSpinner />
           </div>
         </div>
@@ -246,14 +248,14 @@ export default function RunDetailPage() {
   // Error state
   if (error || !run) {
     return (
-      <main className="min-h-screen p-8 bg-[#0d1117]">
+      <main className="min-h-screen p-8 bg-background">
         <div className="max-w-7xl mx-auto">
-          <div className="bg-red-900/30 border border-red-800 rounded-lg p-4 text-red-400">
+          <div className="bg-danger-subtle border border-danger/20 rounded-lg p-4 text-danger">
             {error || 'Run not found'}
           </div>
           <button
             onClick={() => router.push('/')}
-            className="mt-4 px-4 py-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 flex items-center gap-2"
+            className="mt-4 px-4 py-2 bg-surface text-text-secondary rounded-lg hover:bg-surface-hover flex items-center gap-2 border border-border"
           >
             <BackIcon />
             Back to Runs
@@ -274,7 +276,7 @@ export default function RunDetailPage() {
       {/* Back button */}
       <button
         onClick={() => router.push('/')}
-        className="mb-4 text-gray-400 hover:text-white flex items-center gap-1 transition-colors"
+        className="mb-4 text-text-secondary hover:text-text-primary flex items-center gap-1 transition-colors"
       >
         <BackIcon />
         Back to Runs
@@ -282,28 +284,28 @@ export default function RunDetailPage() {
 
       {/* Metrics Loading State */}
       {metricsLoading && (
-        <div className="text-center py-16 text-gray-500">
+        <div className="text-center py-16 text-text-muted">
           <LoadingSpinner />
         </div>
       )}
 
       {/* Metrics Error State */}
       {metricsError && (
-        <div className="bg-red-900/30 border border-red-800 rounded-lg p-4 text-red-400 mb-4">
+        <div className="bg-danger-subtle border border-danger/20 rounded-lg p-4 text-danger mb-4">
           {metricsError}
         </div>
       )}
 
       {/* No Metrics State */}
       {!metricsLoading && !metricsError && availableMetrics.length === 0 && (
-        <div className="text-center py-16 text-gray-500">
+        <div className="text-center py-16 text-text-muted">
           No metrics recorded for this run
         </div>
       )}
 
       {/* No Results After Filter */}
       {!metricsLoading && !metricsError && availableMetrics.length > 0 && filteredMetrics.length === 0 && (
-        <div className="text-center py-16 text-gray-500">
+        <div className="text-center py-16 text-text-muted">
           No metrics match filter &quot;{filter}&quot;
         </div>
       )}
@@ -324,11 +326,11 @@ export default function RunDetailPage() {
 
       {/* Parameters Section */}
       {run.params_count > 0 && (
-        <div className="bg-[#161b22] rounded-xl border border-[#30363d] p-6 mt-4">
-          <h2 className="text-xl font-semibold text-gray-200 mb-4">Parameters</h2>
-          <div className="text-sm text-gray-400">
+        <div className="bg-surface rounded-xl border border-border p-6 mt-4">
+          <h2 className="text-xl font-semibold text-text-primary mb-4">Parameters</h2>
+          <div className="text-sm text-text-secondary">
             {run.params_count} parameters logged
-            <span className="ml-2 text-xs">(detail view coming soon)</span>
+            <span className="ml-2 text-xs text-text-muted">(detail view coming soon)</span>
           </div>
         </div>
       )}
