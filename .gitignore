@@ -13,22 +13,15 @@ __pycache__/
 *$py.class
 *.so
 .Python
-<<<<<<< HEAD
-=======
 .venv/
 venv/
 ENV/
 env/
->>>>>>> feature/research-dashboard
 .eggs/
 *.egg-info/
 *.egg
 dist/
 build/
-.venv/
-venv/
-ENV/
-env/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
@@ -94,12 +87,15 @@ outputs/
 *.pth
 *.bin
 
-<<<<<<< HEAD
 # Data
 data/
-sdks/python/data/
-=======
-# Dataset downloads
-data/
 **/data/
->>>>>>> feature/research-dashboard
+
+# SQLite runtime databases
+*.db
+*.db-shm
+*.db-wal
+
+# Slurm job outputs
+slurm-*.out
+slurm-*.err
