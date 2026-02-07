@@ -449,7 +449,7 @@ function MetricSectionRenderer({
               showLegend={chart.isGrouped}
               smoothing={smoothing}
               logScale={useLogScale}
-              areaFill={!chart.isGrouped && chartData.series.length === 1}
+              areaFill={false}
             />
           </ChartCard>
         );
