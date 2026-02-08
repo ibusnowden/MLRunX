@@ -277,6 +277,35 @@ impl AuthContext {
             "Access denied: this API key cannot access runs in this project.".to_string(),
         ))
     }
+
+    /// Check if the caller has a required scope.
+    /// Returns Ok(()) if allowed, Err with 403 if insufficient.
+    pub fn require_scope(&self, scope: &str) -> Result<(), (StatusCode, String)> {
+        if self.is_dev_mode {
+            return Ok(()); // dev mode has all scopes
+        }
+        if self.api_key.has_scope(scope) {
+            return Ok(());
+        }
+        Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "Insufficient permissions: this API key requires the '{}' scope.",
+                scope
+            ),
+        ))
+    }
+
+    /// Check both project access AND required scope in one call.
+    pub fn require_access(
+        &self,
+        run_project_id: &str,
+        scope: &str,
+    ) -> Result<(), (StatusCode, String)> {
+        self.require_scope(scope)?;
+        self.require_project_access(run_project_id)?;
+        Ok(())
+    }
 }
 
 /// Authentication error types.
