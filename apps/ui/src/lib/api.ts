@@ -148,6 +148,15 @@ export const api = {
   },
 
   /**
+   * Delete a run and all its associated data.
+   */
+  async deleteRun(runId: string): Promise<{ status: string }> {
+    return fetchApi(`/api/v1/runs/${runId}`, {
+      method: 'DELETE',
+    });
+  },
+
+  /**
    * Compare multiple runs.
    */
   async compareRuns(

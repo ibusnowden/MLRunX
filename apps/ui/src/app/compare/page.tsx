@@ -5,6 +5,15 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { api, Run } from '@/lib/api';
 import { ComparePanel } from '@/components/ComparePanel';
 
+function formatDuration(seconds: number | null): string {
+  if (seconds === null) return '-';
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
 function ComparePageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -120,6 +129,9 @@ function ComparePageContent() {
                           </div>
                           <div className="text-xs text-text-muted">
                             {run.status} - {run.metrics_count} metrics
+                            {run.duration_seconds != null && (
+                              <span> - {formatDuration(run.duration_seconds)}</span>
+                            )}
                           </div>
                         </div>
                       </label>
