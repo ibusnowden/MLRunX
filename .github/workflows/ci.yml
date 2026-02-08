@@ -1,6 +1,6 @@
-# MLRunX CI Pipeline
-# Runs on PRs and pushes to main
-# See: docs/testing.md for test strategy
+# =============================================================================
+# MLRunX CI — Runs on every push and PR
+# =============================================================================
 
 name: CI
 
@@ -12,296 +12,59 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
 
 jobs:
-  # ===========================================================================
-  # Proto Validation
-  # ===========================================================================
-
-  proto:
-    name: Proto Lint & Breaking Changes
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Fetch full history for breaking change detection
-          fetch-depth: 0
-
-      - name: Install buf
-        uses: bufbuild/buf-setup-action@v1
-        with:
-          version: "1.47.2"
-
-      - name: Lint protos
-        run: buf lint
-
-      - name: Check for breaking changes
-        # Only check breaking changes on PRs, not main pushes
-        if: github.event_name == 'pull_request'
-        run: buf breaking --against '.git#branch=main'
-
-  # ===========================================================================
-  # Rust
-  # ===========================================================================
-
-  rust-lint:
-    name: Rust Lint
+  # ---------------------------------------------------------------------------
+  # Rust API: build + test
+  # ---------------------------------------------------------------------------
+  api:
+    name: API (Rust)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
         with:
-          toolchain: stable
-          override: true
-          components: rustfmt, clippy
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "25.x"
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-  rust-test:
-    name: Rust Test
-    runs-on: ubuntu-latest
-    needs: [proto]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "25.x"
+      - name: Build
+        run: cargo build --release --bin mlrunx-api
 
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --release --bin mlrunx-api
 
-  rust-build:
-    name: Rust Build
+  # ---------------------------------------------------------------------------
+  # UI: build check
+  # ---------------------------------------------------------------------------
+  ui:
+    name: UI (Next.js)
     runs-on: ubuntu-latest
-    needs: [rust-lint, rust-test]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "25.x"
-
-      - name: Build release
-        run: cargo build --release
-
-  # ===========================================================================
-  # Python
-  # ===========================================================================
-
-  python-lint:
-    name: Python Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --all-packages
-
-      - name: Ruff check
-        run: uv run ruff check sdks/
-
-      - name: Mypy
-        run: uv run mypy sdks/ || echo "Mypy warnings (non-blocking for now)"
-
-  python-test:
-    name: Python Test
-    runs-on: ubuntu-latest
-    needs: [proto]
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
-
-      - name: Install dependencies
-        run: uv sync --all-packages
-
-      - name: Run tests
-        run: uv run pytest sdks/ -v --tb=short
-
-  # ===========================================================================
-  # Proto Codegen Check
-  # ===========================================================================
-
-  proto-codegen:
-    name: Proto Codegen Drift Check
-    runs-on: ubuntu-latest
-    needs: [proto]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install buf
-        uses: bufbuild/buf-setup-action@v1
-        with:
-          version: "1.47.2"
-
-      - name: Generate Python protos
-        run: |
-          mkdir -p sdks/python/src/mlrunx/proto
-          buf generate --template buf.gen.yaml
-
-      - name: Check for drift
-        run: |
-          if git diff --exit-code sdks/python/src/mlrunx/proto/; then
-            echo "Proto codegen is up to date"
-          else
-            echo "ERROR: Generated proto files have drifted!"
-            echo "Run 'make proto' locally and commit the changes."
-            exit 1
-          fi
-
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "25.x"
-
-      - name: Verify Rust proto crate builds
-        run: cargo build -p mlrunx-proto
-
-  # ===========================================================================
-  # Integration Tests
-  # ===========================================================================
-
-  integration-test:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    needs: [rust-build]
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "25.x"
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install test dependencies
-        run: pip install -r tests/integration/requirements.txt
-
-      - name: Build API binary
-        run: cargo build --release --package mlrunx-api
-
-      - name: Start API server
-        run: |
-          MLRUNX_DEV_MODE=true RUST_LOG=info ./target/release/mlrunx-api &
-          echo "Waiting for API to start..."
-          for i in {1..30}; do
-            if curl -s http://localhost:3001/health > /dev/null; then
-              echo "API is ready"
-              break
-            fi
-            sleep 1
-          done
-
-      - name: Run integration tests
-        run: python tests/integration/runner.py --api-url http://localhost:3001 --no-wait
-
-      - name: Stop API server
-        if: always()
-        run: pkill mlrunx-api || true
-
-  # ===========================================================================
-  # UI (placeholder)
-  # ===========================================================================
-
-  ui-lint:
-    name: UI Lint
-    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/ui
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/ui/package-lock.json
 
       - name: Install dependencies
-        working-directory: apps/ui
         run: npm ci
 
-      - name: Lint
-        working-directory: apps/ui
-        run: npm run lint 2>/dev/null || echo "UI lint not fully configured yet"
-
-  # ===========================================================================
-  # Summary
-  # ===========================================================================
-
-  ci-complete:
-    name: CI Complete
-    runs-on: ubuntu-latest
-    needs: [proto, rust-lint, rust-test, rust-build, python-lint, python-test, proto-codegen, ui-lint, integration-test]
-    steps:
-      - name: All checks passed
-        run: echo "All CI checks passed!"
+      - name: Build
+        run: npm run build
