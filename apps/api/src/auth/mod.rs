@@ -252,6 +252,31 @@ impl AuthContext {
             is_dev_mode: true,
         }
     }
+
+    /// Get the project_id this key is scoped to (None = global/admin).
+    pub fn project_id(&self) -> Option<&str> {
+        self.api_key.project_id.as_deref()
+    }
+
+    /// Returns true if this context has global access (dev mode or admin with no project scope).
+    pub fn is_global(&self) -> bool {
+        self.is_dev_mode || self.api_key.project_id.is_none()
+    }
+
+    /// Check if the caller can access a specific project's resources.
+    /// Returns Ok(()) if allowed, Err with 403 if denied.
+    pub fn require_project_access(&self, run_project_id: &str) -> Result<(), (StatusCode, String)> {
+        if self.is_global() {
+            return Ok(());
+        }
+        if self.api_key.can_access_project(run_project_id) {
+            return Ok(());
+        }
+        Err((
+            StatusCode::FORBIDDEN,
+            "Access denied: this API key cannot access runs in this project.".to_string(),
+        ))
+    }
 }
 
 /// Authentication error types.

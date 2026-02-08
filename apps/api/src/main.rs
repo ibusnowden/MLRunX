@@ -31,7 +31,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::State,
     http::StatusCode,
     middleware,
@@ -43,7 +43,7 @@ use tower_http::{cors::CorsLayer, decompression::RequestDecompressionLayer};
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use auth::{ApiKeyStore, auth_middleware};
+use auth::{ApiKeyStore, AuthContext, auth_middleware};
 use mlrunx_proto::mlrunx::v1::ingest_service_server::IngestServiceServer;
 use services::{
     CardinalityTracker, IdempotencyResult, IdempotencyStore, IngestServiceImpl, MetricPayload,
@@ -93,6 +93,7 @@ struct InitRunHttpResponse {
 /// Initialize a run via HTTP (for SDK HTTP transport).
 async fn http_init_run(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<InitRunHttpRequest>,
 ) -> Result<Json<InitRunHttpResponse>, (StatusCode, String)> {
     let run_id = req
@@ -101,6 +102,10 @@ async fn http_init_run(
 
     // Check if run exists in SQLite (idempotent)
     if state.sqlite_store.run_exists(&run_id).await.unwrap_or(false) {
+        // Verify the caller can access this existing run's project
+        if let Ok(existing_project) = state.sqlite_store.get_run_project_id(&run_id).await {
+            auth.require_project_access(&existing_project)?;
+        }
         return Ok(Json(InitRunHttpResponse {
             run_id,
             offline: false,
@@ -112,6 +117,9 @@ async fn http_init_run(
         .get_or_create_project(&req.project)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Enforce project scope: scoped keys can only create runs in their project
+    auth.require_project_access(&project_id)?;
 
     // Create run in SQLite
     state.sqlite_store
@@ -214,8 +222,13 @@ struct IngestBatchHttpResponse {
 /// Ingest a batch of events via HTTP (for SDK HTTP transport).
 async fn http_ingest_batch(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<IngestBatchHttpRequest>,
 ) -> Result<Json<IngestBatchHttpResponse>, (StatusCode, String)> {
+    // Verify the caller can access the run's project
+    if let Ok(run_project) = state.sqlite_store.get_run_project_id(&req.run_id).await {
+        auth.require_project_access(&run_project)?;
+    }
     // Generate batch_id if not provided
     let batch_id = req
         .batch_id
@@ -481,9 +494,15 @@ struct FinishRunHttpResponse {
 /// Finish a run via HTTP.
 async fn http_finish_run(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
     Json(req): Json<FinishRunHttpRequest>,
 ) -> Result<Json<FinishRunHttpResponse>, (StatusCode, String)> {
+    // Verify the caller can access the run's project
+    let run_project = state.sqlite_store.get_run_project_id(&run_id).await
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    auth.require_project_access(&run_project)?;
+
     // Update in SQLite
     state.sqlite_store
         .finish_run(&run_id, &req.status)
@@ -518,8 +537,17 @@ struct DeleteRunHttpResponse {
 /// Delete a run and all its associated data.
 async fn http_delete_run(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
 ) -> Result<Json<DeleteRunHttpResponse>, (StatusCode, String)> {
+    // Verify the caller can access the run's project
+    let run_project = state.sqlite_store.get_run_project_id(&run_id).await
+        .map_err(|e| match e {
+            storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
+    auth.require_project_access(&run_project)?;
+
     // Delete from SQLite (cascades to metrics, tags, params, batches)
     state.sqlite_store
         .delete_run(&run_id)
@@ -588,15 +616,35 @@ struct ListRunsResponse {
 /// List runs with optional filtering (queries from SQLite).
 async fn http_list_runs(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     axum::extract::Query(query): axum::extract::Query<ListRunsQuery>,
 ) -> Result<Json<ListRunsResponse>, (StatusCode, String)> {
     let limit = query.limit.unwrap_or(100).min(1000);
     let offset = query.offset.unwrap_or(0);
 
+    // Enforce project scope: scoped keys can only list runs in their project.
+    // If the caller has a project_id, use it (overriding any query param).
+    // Admin/dev keys can still filter by any project or see all.
+    let effective_project = match auth.project_id() {
+        Some(scoped_project) => {
+            // If caller also passed a ?project= filter, verify it matches their scope
+            if let Some(ref requested) = query.project {
+                if requested != scoped_project {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        format!("Access denied: your key is scoped to project '{}', cannot query '{}'.", scoped_project, requested),
+                    ));
+                }
+            }
+            Some(scoped_project.to_string())
+        }
+        None => query.project.clone(), // Admin: use whatever was requested
+    };
+
     // Query from SQLite
     let (sqlite_runs, total) = state.sqlite_store
         .list_runs(
-            query.project.as_deref(),
+            effective_project.as_deref(),
             query.status.as_deref(),
             query.q.as_deref(),
             limit,
@@ -665,6 +713,7 @@ struct MetricSummaryResponse {
 /// Get run detail by ID.
 async fn http_get_run(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
 ) -> Result<Json<RunDetailResponse>, (StatusCode, String)> {
     // Run list is sourced from SQLite; run detail must use the same source.
@@ -676,6 +725,9 @@ async fn http_get_run(
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         })?;
+
+    // Verify the caller can access this run's project
+    auth.require_project_access(&run.project_id)?;
 
     let tags = state
         .sqlite_store
@@ -729,13 +781,14 @@ fn default_max_points() -> usize {
 /// Get metrics for a run with optional downsampling.
 async fn http_get_metrics(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<MetricsQuery>,
 ) -> Result<Json<services::MetricsQueryResponse>, (StatusCode, String)> {
-    // Verify run exists in SQLite
-    if !state.sqlite_store.run_exists(&run_id).await.unwrap_or(false) {
-        return Err((StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)));
-    }
+    // Verify run exists and check project access
+    let run_project = state.sqlite_store.get_run_project_id(&run_id).await
+        .map_err(|_| (StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)))?;
+    auth.require_project_access(&run_project)?;
 
     // Parse metric names
     let names: Vec<String> = if query.names.is_empty() {
@@ -831,6 +884,7 @@ struct CompareRunsResponse {
 /// Compare metrics across multiple runs.
 async fn http_compare_runs(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<CompareRunsRequest>,
 ) -> Result<Json<CompareRunsResponse>, (StatusCode, String)> {
     if req.run_ids.is_empty() {
@@ -860,6 +914,9 @@ async fn http_compare_runs(
                 storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             })?;
+
+        // Verify the caller can access this run's project
+        auth.require_project_access(&run.project_id)?;
 
         let names = if req.metric_names.is_empty() {
             vec![]
