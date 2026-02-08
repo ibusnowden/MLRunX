@@ -79,31 +79,31 @@ export function DashboardLayout({
   return (
     <div className="min-h-screen bg-background">
       {/* Sticky Header */}
-      <div className="sticky top-0 z-40 bg-surface border-b border-border">
-        <div className="max-w-[1600px] mx-auto px-6 py-4">
-          <div className="flex items-center justify-between gap-4">
+      <div className="sticky top-12 md:top-0 z-40 bg-surface border-b border-border">
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 sm:py-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             {/* Left: Run name, status, duration */}
-            <div className="flex items-center gap-3 min-w-0">
-              <h1 className="text-xl font-semibold truncate text-text-primary">
+            <div className="flex flex-wrap items-center gap-2 sm:gap-3 min-w-0">
+              <h1 className="text-lg sm:text-xl font-semibold truncate text-text-primary max-w-full">
                 {runName}
               </h1>
               <StatusBadge status={status} />
               {durationSeconds != null && (
-                <span className="flex items-center gap-1 text-sm text-text-muted">
+                <span className="flex items-center gap-1 text-xs sm:text-sm text-text-muted">
                   <ClockIcon />
                   {formatDuration(durationSeconds)}
                 </span>
               )}
               {totalMetrics > 0 && (
-                <span className="text-sm text-text-muted">
+                <span className="text-xs sm:text-sm text-text-muted">
                   {totalMetrics} metrics
                 </span>
               )}
             </div>
 
             {/* Right: Search bar + Delete */}
-            <div className="flex items-center gap-3">
-              <div className="flex-shrink-0 w-72">
+            <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center sm:gap-3 lg:w-auto">
+              <div className="w-full sm:w-72">
                 <div className="relative">
                   <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-text-muted">
                     <SearchIcon />
@@ -119,7 +119,7 @@ export function DashboardLayout({
               </div>
 
               {onDelete && (
-                <div className="relative">
+                <div className="relative self-end sm:self-auto">
                   {showDeleteConfirm ? (
                     <div className="flex items-center gap-2">
                       <span className="text-xs text-text-muted whitespace-nowrap">Delete?</span>
@@ -156,7 +156,7 @@ export function DashboardLayout({
       </div>
 
       {/* Main Content Area */}
-      <div className="max-w-[1600px] mx-auto px-6 py-6">
+      <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-4 sm:py-6">
         {children}
       </div>
     </div>

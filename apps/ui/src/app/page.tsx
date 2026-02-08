@@ -43,18 +43,18 @@ export default function Home() {
     <main className="min-h-screen">
       {/* Page header */}
       <div className="border-b border-border bg-surface">
-        <div className="max-w-[1600px] mx-auto px-8 py-6">
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="p-2.5 rounded-xl bg-accent-subtle">
+            <div className="flex items-center gap-3 sm:gap-4">
+              <div className="p-2 rounded-xl bg-accent-subtle">
                 <ActivityIcon />
               </div>
               <div>
-                <h1 className="text-2xl font-bold text-text-primary">
-                  Experiments
+                <h1 className="text-xl sm:text-2xl font-bold text-text-primary">
+                  MLRunX Experiments
                 </h1>
-                <p className="text-sm text-text-secondary mt-0.5">
-                  Track, compare and analyze your ML training runs
+                <p className="text-xs sm:text-sm text-text-secondary mt-0.5">
+                  Experiment tracking for ML runs anywhere
                 </p>
               </div>
             </div>
@@ -63,17 +63,17 @@ export default function Home() {
       </div>
 
       {/* Main content */}
-      <div className="max-w-[1600px] mx-auto px-8 py-6">
+      <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6">
         {/* Runs card */}
         <div className="bg-surface rounded-xl border border-border overflow-hidden">
           {/* Card header */}
-          <div className="flex items-center gap-3 px-6 py-4 border-b border-border">
+          <div className="flex items-center gap-3 px-4 sm:px-6 py-4 border-b border-border">
             <RunsIcon />
             <h2 className="text-lg font-semibold text-text-primary">Training Runs</h2>
           </div>
 
           {/* Card body */}
-          <div className="p-6">
+          <div className="p-4 sm:p-6">
             <Suspense fallback={<LoadingSkeleton />}>
               <RunsTable onRunClick={handleRunClick} />
             </Suspense>

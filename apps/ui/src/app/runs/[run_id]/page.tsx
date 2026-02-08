@@ -6,6 +6,7 @@ import { api, RunDetail, MetricSeries } from '@/lib/api';
 import { DashboardLayout, MetricSection, ChartCard } from '@/components/dashboard';
 import { UPlotChart } from '@/components/charts/UPlotChart';
 import { useTheme } from '@/components/ThemeProvider';
+import { useAutoRefresh } from '@/lib/useAutoRefresh';
 import {
   groupMetrics,
   filterMetrics,
@@ -38,6 +39,8 @@ interface MetricChartData {
   series: { label: string; data: number[]; color?: string; upper?: number[]; lower?: number[] }[];
 }
 
+const RUN_METRICS_MAX_POINTS = 1000;
+
 export default function RunDetailPage({ params }: { params: Promise<{ run_id: string }> }) {
   // Unwrap the async params using React.use()
   const { run_id: runId } = use(params);
@@ -58,53 +61,72 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
   // UI state
   const [filter, setFilter] = useState('');
   const [smoothing, setSmoothing] = useState(0);
-  const maxPoints = 1000;
 
   const darkTheme = isDark;
 
-  // Fetch run details
-  useEffect(() => {
-    async function fetchRun() {
+  const fetchRun = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
+    if (!silent) {
       setLoading(true);
-      setError(null);
-      try {
-        const data = await api.getRun(runId);
-        setRun(data);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to fetch run');
-      } finally {
+    }
+    setError(null);
+    try {
+      const data = await api.getRun(runId);
+      setRun(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to fetch run');
+    } finally {
+      if (!silent) {
         setLoading(false);
       }
     }
-    fetchRun();
   }, [runId]);
 
-  // Fetch all metrics for the run
-  useEffect(() => {
-    async function fetchAllMetrics() {
+  const fetchAllMetrics = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
+    if (!silent) {
       setMetricsLoading(true);
-      setMetricsError(null);
-      try {
-        // First get the list of available metrics
-        const response = await api.getMetrics(runId, { maxPoints });
-        setAvailableMetrics(response.available_metrics);
+    }
+    setMetricsError(null);
+    try {
+      // First get the list of available metrics
+      const response = await api.getMetrics(runId, { maxPoints: RUN_METRICS_MAX_POINTS });
+      setAvailableMetrics(response.available_metrics);
 
-        // Then fetch all metrics data
-        if (response.available_metrics.length > 0) {
-          const allData = await api.getMetrics(runId, {
-            names: response.available_metrics,
-            maxPoints,
-          });
-          setAllMetrics(allData.series);
-        }
-      } catch (err) {
-        setMetricsError(err instanceof Error ? err.message : 'Failed to fetch metrics');
-      } finally {
+      // Then fetch all metrics data
+      if (response.available_metrics.length > 0) {
+        const allData = await api.getMetrics(runId, {
+          names: response.available_metrics,
+          maxPoints: RUN_METRICS_MAX_POINTS,
+        });
+        setAllMetrics(allData.series);
+      } else {
+        setAllMetrics([]);
+      }
+    } catch (err) {
+      setMetricsError(err instanceof Error ? err.message : 'Failed to fetch metrics');
+    } finally {
+      if (!silent) {
         setMetricsLoading(false);
       }
     }
-    fetchAllMetrics();
-  }, [runId, maxPoints]);
+  }, [runId]);
+
+  useEffect(() => {
+    void fetchRun();
+  }, [fetchRun]);
+
+  useEffect(() => {
+    void fetchAllMetrics();
+  }, [fetchAllMetrics]);
+
+  useAutoRefresh(
+    async () => {
+      await Promise.all([
+        fetchRun({ silent: true }),
+        fetchAllMetrics({ silent: true }),
+      ]);
+    },
+    { enabled: run?.status === 'running', intervalMs: 15000, runOnMount: false }
+  );
 
   // Filter and group metrics
   const filteredMetrics = useMemo(() => {
@@ -267,7 +289,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
   // Loading state
   if (loading) {
     return (
-      <main className="min-h-screen p-8 bg-background">
+      <main className="min-h-screen p-4 sm:p-6 bg-background">
         <div className="max-w-7xl mx-auto">
           <div className="text-center py-16 text-text-muted">
             <LoadingSpinner />
@@ -280,7 +302,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
   // Error state
   if (error || !run) {
     return (
-      <main className="min-h-screen p-8 bg-background">
+      <main className="min-h-screen p-4 sm:p-6 bg-background">
         <div className="max-w-7xl mx-auto">
           <div className="bg-danger-subtle border border-danger/20 rounded-lg p-4 text-danger">
             {error || 'Run not found'}
