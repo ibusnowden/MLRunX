@@ -102,9 +102,9 @@ async fn http_init_run(
 
     // Check if run exists in SQLite (idempotent)
     if state.sqlite_store.run_exists(&run_id).await.unwrap_or(false) {
-        // Verify the caller can access this existing run's project
+        // Verify the caller can access this existing run's project with write scope
         if let Ok(existing_project) = state.sqlite_store.get_run_project_id(&run_id).await {
-            auth.require_project_access(&existing_project)?;
+            auth.require_access(&existing_project, "write")?;
         }
         return Ok(Json(InitRunHttpResponse {
             run_id,
@@ -118,8 +118,8 @@ async fn http_init_run(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Enforce project scope: scoped keys can only create runs in their project
-    auth.require_project_access(&project_id)?;
+    // Enforce project scope and write permission
+    auth.require_access(&project_id, "write")?;
 
     // Create run in SQLite
     state.sqlite_store
@@ -225,9 +225,9 @@ async fn http_ingest_batch(
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<IngestBatchHttpRequest>,
 ) -> Result<Json<IngestBatchHttpResponse>, (StatusCode, String)> {
-    // Verify the caller can access the run's project
+    // Verify the caller can access the run's project and has write scope
     if let Ok(run_project) = state.sqlite_store.get_run_project_id(&req.run_id).await {
-        auth.require_project_access(&run_project)?;
+        auth.require_access(&run_project, "write")?;
     }
     // Generate batch_id if not provided
     let batch_id = req
@@ -498,10 +498,10 @@ async fn http_finish_run(
     axum::extract::Path(run_id): axum::extract::Path<String>,
     Json(req): Json<FinishRunHttpRequest>,
 ) -> Result<Json<FinishRunHttpResponse>, (StatusCode, String)> {
-    // Verify the caller can access the run's project
+    // Verify the caller can access the run's project and has write scope
     let run_project = state.sqlite_store.get_run_project_id(&run_id).await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
-    auth.require_project_access(&run_project)?;
+    auth.require_access(&run_project, "write")?;
 
     // Update in SQLite
     state.sqlite_store
@@ -540,13 +540,13 @@ async fn http_delete_run(
     Extension(auth): Extension<AuthContext>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
 ) -> Result<Json<DeleteRunHttpResponse>, (StatusCode, String)> {
-    // Verify the caller can access the run's project
+    // Verify the caller can access the run's project and has admin scope
     let run_project = state.sqlite_store.get_run_project_id(&run_id).await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         })?;
-    auth.require_project_access(&run_project)?;
+    auth.require_access(&run_project, "admin")?;
 
     // Delete from SQLite (cascades to metrics, tags, params, batches)
     state.sqlite_store
@@ -566,6 +566,399 @@ async fn http_delete_run(
     Ok(Json(DeleteRunHttpResponse {
         status: "ok".to_string(),
     }))
+}
+
+// =============================================================================
+// Key Management API Handlers
+// =============================================================================
+
+/// Request to create a new API key.
+#[derive(Debug, Deserialize)]
+struct CreateKeyRequest {
+    /// Project to scope the key to (None = admin/global key)
+    project_id: Option<String>,
+    /// Human-readable name for the key
+    name: Option<String>,
+    /// Scopes: "admin", "write", "read"
+    scopes: Vec<String>,
+}
+
+/// Response from creating a key (raw key shown ONCE).
+#[derive(Debug, Serialize)]
+struct CreateKeyResponse {
+    /// The raw API key — shown only once, store it safely
+    api_key: String,
+    /// Key identifier
+    key_id: String,
+    /// First 8 chars for identification
+    key_prefix: String,
+    /// Project scope (null = global admin)
+    project_id: Option<String>,
+    /// Human-readable name
+    name: Option<String>,
+    /// Granted scopes
+    scopes: Vec<String>,
+}
+
+/// A key in the list response (no raw key exposed).
+#[derive(Debug, Serialize)]
+struct KeyInfoResponse {
+    key_id: String,
+    key_prefix: String,
+    project_id: Option<String>,
+    name: Option<String>,
+    scopes: Vec<String>,
+    created_at: String,
+    last_used_at: Option<String>,
+    is_revoked: bool,
+}
+
+/// Response for listing keys.
+#[derive(Debug, Serialize)]
+struct ListKeysResponse {
+    keys: Vec<KeyInfoResponse>,
+}
+
+/// Create a new API key (admin only).
+async fn http_create_key(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<CreateKeyRequest>,
+) -> Result<Json<CreateKeyResponse>, (StatusCode, String)> {
+    // Only admin can create keys
+    auth.require_scope("admin")?;
+
+    // Validate scopes
+    let valid_scopes = ["admin", "write", "read"];
+    for scope in &req.scopes {
+        if !valid_scopes.contains(&scope.as_str()) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Invalid scope '{}'. Valid scopes: admin, write, read", scope),
+            ));
+        }
+    }
+
+    if req.scopes.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "At least one scope is required.".to_string(),
+        ));
+    }
+
+    let (raw_key, key) = state
+        .key_store
+        .create_key(req.project_id.clone(), req.name.clone(), req.scopes.clone())
+        .await;
+
+    info!(
+        key_prefix = %key.key_prefix,
+        project_id = ?req.project_id,
+        scopes = ?req.scopes,
+        "Created new API key"
+    );
+
+    Ok(Json(CreateKeyResponse {
+        api_key: raw_key,
+        key_id: key.id,
+        key_prefix: key.key_prefix,
+        project_id: key.project_id,
+        name: key.name,
+        scopes: key.scopes,
+    }))
+}
+
+/// List API keys (admin sees all, scoped users see their project's keys).
+async fn http_list_keys(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<ListKeysResponse>, (StatusCode, String)> {
+    auth.require_scope("admin")?;
+
+    let project_filter = auth.project_id();
+    let keys = state.key_store.list_keys(project_filter).await;
+
+    let keys_response: Vec<KeyInfoResponse> = keys
+        .into_iter()
+        .map(|k| {
+            let created_at = k
+                .created_at
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let last_used_at = k.last_used_at.map(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_string()
+            });
+
+            KeyInfoResponse {
+                key_id: k.id,
+                key_prefix: k.key_prefix,
+                project_id: k.project_id,
+                name: k.name,
+                scopes: k.scopes,
+                created_at: created_at.to_string(),
+                last_used_at,
+                is_revoked: k.revoked_at.is_some(),
+            }
+        })
+        .collect();
+
+    Ok(Json(ListKeysResponse {
+        keys: keys_response,
+    }))
+}
+
+/// Revoke an API key by its key_id.
+async fn http_revoke_key(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(key_id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    auth.require_scope("admin")?;
+
+    // Find the key by id and get its hash for revocation
+    let keys = state.key_store.list_keys(None).await;
+    let target = keys.iter().find(|k| k.id == key_id);
+
+    match target {
+        Some(key) => {
+            state.key_store.revoke_key(&key.key_hash).await;
+            info!(key_id = %key_id, key_prefix = %key.key_prefix, "Revoked API key");
+            Ok(Json(serde_json::json!({ "status": "ok", "revoked": key_id })))
+        }
+        None => Err((
+            StatusCode::NOT_FOUND,
+            format!("Key not found: {}", key_id),
+        )),
+    }
+}
+
+// =============================================================================
+// Share Token API Handlers
+// =============================================================================
+
+/// Request to create a share link.
+#[derive(Debug, Deserialize)]
+struct CreateShareRequest {
+    /// Number of days until the link expires (None = never)
+    expires_in_days: Option<i64>,
+}
+
+/// Response from creating a share link.
+#[derive(Debug, Serialize)]
+struct CreateShareResponse {
+    token: String,
+    share_url: String,
+    run_id: String,
+    expires_at: Option<String>,
+}
+
+/// Response for a shared run (public, no auth).
+#[derive(Debug, Serialize)]
+struct SharedRunResponse {
+    run_id: String,
+    project_id: String,
+    name: Option<String>,
+    status: String,
+    metrics_count: u64,
+    params_count: u64,
+    tags: std::collections::HashMap<String, String>,
+    created_at: String,
+    updated_at: String,
+    duration_seconds: Option<f64>,
+    available_metrics: Vec<String>,
+}
+
+/// Create a share token for a run.
+async fn http_create_share_token(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(run_id): axum::extract::Path<String>,
+    Json(req): Json<CreateShareRequest>,
+) -> Result<Json<CreateShareResponse>, (StatusCode, String)> {
+    // Verify the caller can access the run
+    let run_project = state.sqlite_store.get_run_project_id(&run_id).await
+        .map_err(|e| match e {
+            storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
+    auth.require_access(&run_project, "read")?;
+
+    // Generate a short, URL-safe token
+    let token = generate_share_token();
+
+    // Calculate expiry
+    let expires_at = req.expires_in_days.map(|days| {
+        let expires = chrono::Utc::now() + chrono::Duration::days(days);
+        expires.format("%Y-%m-%d %H:%M:%S").to_string()
+    });
+
+    state.sqlite_store
+        .create_share_token(
+            &token,
+            &run_id,
+            Some(&auth.api_key.key_prefix),
+            expires_at.as_deref(),
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    info!(run_id = %run_id, "Created share token");
+
+    Ok(Json(CreateShareResponse {
+        share_url: format!("/api/v1/shared/{}", token),
+        token,
+        run_id,
+        expires_at,
+    }))
+}
+
+/// Get a shared run via token (PUBLIC — no auth required).
+async fn http_get_shared_run(
+    State(state): State<AppState>,
+    axum::extract::Path(token): axum::extract::Path<String>,
+) -> Result<Json<SharedRunResponse>, (StatusCode, String)> {
+    // Validate the share token
+    let share = state.sqlite_store
+        .validate_share_token(&token)
+        .await
+        .map_err(|e| match e {
+            storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
+
+    // Fetch the run
+    let run = state.sqlite_store
+        .get_run(&share.run_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let tags = state.sqlite_store
+        .get_tags(&share.run_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<std::collections::HashMap<String, String>>();
+
+    let available_metrics = state.sqlite_store
+        .get_metric_names(&share.run_id)
+        .await
+        .unwrap_or_default();
+
+    Ok(Json(SharedRunResponse {
+        run_id: run.id,
+        project_id: run.project_id,
+        name: run.name,
+        status: run.status,
+        metrics_count: run.metrics_count as u64,
+        params_count: run.params_count as u64,
+        tags,
+        created_at: run.created_at,
+        updated_at: run.updated_at,
+        duration_seconds: run.duration_seconds,
+        available_metrics,
+    }))
+}
+
+/// Get metrics for a shared run via token (PUBLIC — no auth required).
+async fn http_get_shared_metrics(
+    State(state): State<AppState>,
+    axum::extract::Path(token): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<MetricsQuery>,
+) -> Result<Json<services::MetricsQueryResponse>, (StatusCode, String)> {
+    // Validate the share token
+    let share = state.sqlite_store
+        .validate_share_token(&token)
+        .await
+        .map_err(|e| match e {
+            storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
+
+    // Parse metric names
+    let names: Vec<String> = if query.names.is_empty() {
+        vec![]
+    } else {
+        query
+            .names
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect()
+    };
+
+    // Query metrics
+    let sqlite_series = state.sqlite_store
+        .get_metrics(&share.run_id, &names, query.max_points)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let available_metrics = state.sqlite_store
+        .get_metric_names(&share.run_id)
+        .await
+        .unwrap_or_default();
+
+    let series: Vec<services::MetricSeries> = sqlite_series
+        .into_iter()
+        .map(|s| services::MetricSeries {
+            name: s.name,
+            points: s.points.into_iter().map(|p| services::AggregatedPoint {
+                step: p.step,
+                mean: p.mean,
+                min: p.min,
+                max: p.max,
+                count: p.count,
+            }).collect(),
+            total_points: s.total_points,
+            downsampled: s.downsampled,
+        })
+        .collect();
+
+    Ok(Json(services::MetricsQueryResponse {
+        run_id: share.run_id,
+        series,
+        available_metrics,
+    }))
+}
+
+/// Revoke a share token for a run.
+async fn http_revoke_share_token(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path((run_id, token)): axum::extract::Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Verify the caller can access the run
+    let run_project = state.sqlite_store.get_run_project_id(&run_id).await
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    auth.require_access(&run_project, "read")?;
+
+    state.sqlite_store
+        .revoke_share_token(&token)
+        .await
+        .map_err(|e| match e {
+            storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
+
+    info!(run_id = %run_id, "Revoked share token");
+
+    Ok(Json(serde_json::json!({ "status": "ok", "revoked": token })))
+}
+
+/// Generate a URL-safe share token (24 chars).
+fn generate_share_token() -> String {
+    use rand::Rng;
+    let mut rng = rand::rng();
+    let bytes: Vec<u8> = (0..18).map(|_| rng.random()).collect();
+    base64_url_encode(&bytes)
+}
+
+/// Base64 URL-safe encoding (no padding).
+fn base64_url_encode(data: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data)
 }
 
 // =============================================================================
@@ -619,6 +1012,9 @@ async fn http_list_runs(
     Extension(auth): Extension<AuthContext>,
     axum::extract::Query(query): axum::extract::Query<ListRunsQuery>,
 ) -> Result<Json<ListRunsResponse>, (StatusCode, String)> {
+    // Require at least read scope
+    auth.require_scope("read")?;
+
     let limit = query.limit.unwrap_or(100).min(1000);
     let offset = query.offset.unwrap_or(0);
 
@@ -726,8 +1122,8 @@ async fn http_get_run(
             _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         })?;
 
-    // Verify the caller can access this run's project
-    auth.require_project_access(&run.project_id)?;
+    // Verify the caller can access this run's project and has read scope
+    auth.require_access(&run.project_id, "read")?;
 
     let tags = state
         .sqlite_store
@@ -785,10 +1181,10 @@ async fn http_get_metrics(
     axum::extract::Path(run_id): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<MetricsQuery>,
 ) -> Result<Json<services::MetricsQueryResponse>, (StatusCode, String)> {
-    // Verify run exists and check project access
+    // Verify run exists, check project access, and require read scope
     let run_project = state.sqlite_store.get_run_project_id(&run_id).await
         .map_err(|_| (StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)))?;
-    auth.require_project_access(&run_project)?;
+    auth.require_access(&run_project, "read")?;
 
     // Parse metric names
     let names: Vec<String> = if query.names.is_empty() {
@@ -915,8 +1311,8 @@ async fn http_compare_runs(
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             })?;
 
-        // Verify the caller can access this run's project
-        auth.require_project_access(&run.project_id)?;
+        // Verify the caller can access this run's project and has read scope
+        auth.require_access(&run.project_id, "read")?;
 
         let names = if req.metric_names.is_empty() {
             vec![]
@@ -1007,6 +1403,12 @@ fn build_http_router(state: AppState) -> Router {
         .route("/api/v1/runs/{run_id}", get(http_get_run).delete(http_delete_run))
         .route("/api/v1/runs/{run_id}/metrics", get(http_get_metrics))
         .route("/api/v1/runs/compare", post(http_compare_runs))
+        // Key management endpoints (admin only)
+        .route("/api/v1/keys", post(http_create_key).get(http_list_keys))
+        .route("/api/v1/keys/{key_id}", delete(http_revoke_key))
+        // Share token management (requires auth)
+        .route("/api/v1/runs/{run_id}/share", post(http_create_share_token))
+        .route("/api/v1/runs/{run_id}/share/{token}", delete(http_revoke_share_token))
         .layer(middleware::from_fn_with_state(
             state.key_store.clone(),
             auth_middleware,
@@ -1015,7 +1417,10 @@ fn build_http_router(state: AppState) -> Router {
     // Public routes (no auth required)
     let public_routes = Router::new()
         .route("/", get(root))
-        .route("/health", get(health));
+        .route("/health", get(health))
+        // Shared run endpoints (public, no auth — token is the credential)
+        .route("/api/v1/shared/{token}", get(http_get_shared_run))
+        .route("/api/v1/shared/{token}/metrics", get(http_get_shared_metrics));
 
     // Combine routes
     Router::new()

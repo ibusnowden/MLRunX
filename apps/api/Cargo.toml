@@ -43,8 +43,6 @@ anyhow.workspace = true
 
 # Config
 config.workspace = true
-
-# Utils
 chrono.workspace = true
 time.workspace = true
 uuid.workspace = true
@@ -53,6 +51,7 @@ uuid.workspace = true
 sha2.workspace = true
 hex.workspace = true
 rand.workspace = true
+base64 = "0.22.1"
 
 [dev-dependencies]
 axum = { workspace = true }

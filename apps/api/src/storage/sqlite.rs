@@ -171,6 +171,18 @@ impl SqliteStore {
                 FOREIGN KEY (run_id) REFERENCES runs(id)
             );
             CREATE INDEX IF NOT EXISTS idx_batches_run ON batches(run_id);
+
+            -- Share tokens table (public read-only links)
+            CREATE TABLE IF NOT EXISTS share_tokens (
+                token TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                created_by_key_prefix TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                expires_at TEXT,
+                revoked_at TEXT,
+                FOREIGN KEY (run_id) REFERENCES runs(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_share_tokens_run ON share_tokens(run_id);
         "#)?;
 
         debug!("SQLite schema initialized");
@@ -639,6 +651,112 @@ impl SqliteStore {
 
         Ok(())
     }
+
+    // =========================================================================
+    // Share token operations
+    // =========================================================================
+
+    /// Create a share token for a run.
+    pub async fn create_share_token(
+        &self,
+        token: &str,
+        run_id: &str,
+        created_by_key_prefix: Option<&str>,
+        expires_at: Option<&str>,
+    ) -> Result<(), SqliteError> {
+        let conn = self.conn.lock().await;
+
+        conn.execute(
+            "INSERT INTO share_tokens (token, run_id, created_by_key_prefix, expires_at) VALUES (?1, ?2, ?3, ?4)",
+            params![token, run_id, created_by_key_prefix, expires_at],
+        )?;
+
+        debug!(run_id = %run_id, "Created share token");
+        Ok(())
+    }
+
+    /// Validate a share token and return the associated run_id if valid.
+    pub async fn validate_share_token(&self, token: &str) -> Result<ShareTokenRow, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let row = conn.query_row(
+            r#"SELECT token, run_id, created_by_key_prefix, created_at, expires_at, revoked_at
+               FROM share_tokens WHERE token = ?1"#,
+            params![token],
+            |row| {
+                Ok(ShareTokenRow {
+                    token: row.get(0)?,
+                    run_id: row.get(1)?,
+                    created_by_key_prefix: row.get(2)?,
+                    created_at: row.get(3)?,
+                    expires_at: row.get(4)?,
+                    revoked_at: row.get(5)?,
+                })
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => {
+                SqliteError::NotFound("Invalid or expired share link.".to_string())
+            }
+            _ => SqliteError::Database(e),
+        })?;
+
+        // Check if revoked
+        if row.revoked_at.is_some() {
+            return Err(SqliteError::NotFound("This share link has been revoked.".to_string()));
+        }
+
+        // Check if expired
+        if let Some(ref expires) = row.expires_at {
+            let now: String = conn.query_row(
+                "SELECT datetime('now')", [], |r| r.get(0)
+            )?;
+            if now > *expires {
+                return Err(SqliteError::NotFound("This share link has expired.".to_string()));
+            }
+        }
+
+        Ok(row)
+    }
+
+    /// List share tokens for a run.
+    pub async fn list_share_tokens(&self, run_id: &str) -> Result<Vec<ShareTokenRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let mut stmt = conn.prepare(
+            r#"SELECT token, run_id, created_by_key_prefix, created_at, expires_at, revoked_at
+               FROM share_tokens WHERE run_id = ?1 ORDER BY created_at DESC"#
+        )?;
+        let rows = stmt.query_map(params![run_id], |row| {
+            Ok(ShareTokenRow {
+                token: row.get(0)?,
+                run_id: row.get(1)?,
+                created_by_key_prefix: row.get(2)?,
+                created_at: row.get(3)?,
+                expires_at: row.get(4)?,
+                revoked_at: row.get(5)?,
+            })
+        })?;
+
+        let tokens: Result<Vec<_>, _> = rows.collect();
+        Ok(tokens?)
+    }
+
+    /// Revoke a share token.
+    pub async fn revoke_share_token(&self, token: &str) -> Result<(), SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let changes = conn.execute(
+            "UPDATE share_tokens SET revoked_at = datetime('now') WHERE token = ?1 AND revoked_at IS NULL",
+            params![token],
+        )?;
+
+        if changes == 0 {
+            return Err(SqliteError::NotFound("Share token not found or already revoked.".to_string()));
+        }
+
+        Ok(())
+    }
 }
 
 /// A row from the runs table.
@@ -654,6 +772,17 @@ pub struct RunRow {
     pub metrics_count: i64,
     pub params_count: i64,
     pub duration_seconds: Option<f64>,
+}
+
+/// A share token row.
+#[derive(Debug, Clone)]
+pub struct ShareTokenRow {
+    pub token: String,
+    pub run_id: String,
+    pub created_by_key_prefix: Option<String>,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+    pub revoked_at: Option<String>,
 }
 
 /// A metric data point.
