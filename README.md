@@ -66,61 +66,34 @@
 
 ## Why MLRunX?
 
-- **Performance-first**: Sub-200ms UI queries at 10k+ runs, high-throughput ingestion with server-side downsampling
-- **AI-native**: Built-in eval harness, agent/tool tracing, prompt versioning
-- **Local-first**: Full Docker Compose stack, privacy-first defaults, no vendor lock-in
-- **Open**: MIT licensed, OSS stack (ClickHouse + Postgres + MinIO)
+- **Performance-first**: Rust API gateway with sub-second responses, designed to scale to 10k+ runs
+- **AI-native**: Built for RL/LLM training workflows with multi-run comparison and system metric overlays
+- **Local-first**: Single binary + SQLite, no external databases required. Privacy-first, no vendor lock-in
+- **Open**: MIT licensed, fully open-source
 
-## How MLRunX Differs from W&B
+## Architecture (v0.1)
 
-### Performance-First Architecture
+The current release uses a lightweight, self-contained architecture:
 
-| Aspect | W&B | MLRunX      |
-|--------|-----|------------|
-| Backend | Python/Go, proprietary | Rust (Axum/Tonic) - lower latency |
-| Metrics DB | Proprietary | ClickHouse - built for analytics at scale |
-| Query at 10k runs | Often sluggish | Target: p95 < 200ms |
-| Log → visible latency | Variable | Target: p95 < 500ms |
+```
+┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│  Python SDK │────▶│   API Gateway    │────▶│     SQLite      │
+│  (async +   │     │  (Rust / Axum)   │     │   (all data)    │
+│   batching) │     │  HTTP + gRPC     │     └─────────────────┘
+└─────────────┘     └──────────────────┘
+                           ▲
+                           │
+                    ┌──────────────────┐
+                    │   Next.js UI     │
+                    │  (TypeScript)    │
+                    └──────────────────┘
+```
 
-### AI-Native from Day One
+<details>
+<summary><b>Planned: Scale-out architecture</b></summary>
 
-W&B bolted on LLM features later. MLRunX builds them in:
-- **Eval harness**: First-class prompt sets, graders, regression detection
-- **Agent tracing**: Spans for tool calls, nested reasoning steps
-- **OTLP compatibility**: Bridge ML and infra observability
-
-### Local-First / Privacy-First
-
-| W&B | MLRunX      |
-|-----|------------|
-| Cloud-first, self-hosted is enterprise tier | Docker Compose works day one |
-| Telemetry on by default | No outbound telemetry by default |
-| Vendor lock-in | OSS stack (CH + PG + MinIO) |
-
-### SDK Design
-
-| W&B | MLRunX      |
-|-----|------------|
-| Sync-heavy, can block training | Async-first, non-blocking |
-| Network failure = data loss risk | Offline spool with bounded disk |
-| ~1-5% overhead reported | Target: < 1% overhead |
-
-### Transparent Benchmarks
-
-W&B doesn't publish performance numbers. MLRunX does:
-- **W1**: Run listing at scale (10k runs)
-- **W2**: Ingest throughput + latency
-- **W3**: Mixed workloads (metrics + traces + evals)
-- Reproducible scripts, published results
-
-### Technical Bets
-
-1. **ClickHouse** - 10-100x faster aggregations than general-purpose DBs
-2. **Rust ingest** - Predictable latency, no GC pauses
-3. **gRPC-first** - Efficient binary protocol, streaming support
-4. **Server-side downsampling** - Never send millions of points to browser
-
-## Architecture
+The codebase includes scaffolded storage backends (ClickHouse, PostgreSQL, MinIO) and
+service skeletons (ingest, processor) for a future distributed deployment:
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────────┐
@@ -141,169 +114,172 @@ W&B doesn't publish performance numbers. MLRunX does:
                     └─────────────┘     └─────────────────┘
 ```
 
+The Docker Compose stack at `infra/docker/` already provisions ClickHouse, Postgres,
+MinIO, Redis, and an OTEL collector for when these backends are wired in.
+
+</details>
+
+## Features (v0.1.0)
+
+| Feature | Status |
+|---------|--------|
+| Rust API gateway (Axum + gRPC) | Shipped |
+| SQLite storage (runs, metrics, keys, share tokens) | Shipped |
+| Next.js dashboard with dark/light themes | Shipped |
+| Multi-run comparison with interactive charts | Shipped |
+| System metrics (CPU, memory, GPU, disk, network) | Shipped |
+| Project-scoped API keys | Shipped |
+| Role-based access control (admin / write / read) | Shipped |
+| Key management API (create / list / revoke) | Shipped |
+| Shareable view-only links (with optional expiry) | Shipped |
+| Standalone Docker image | Shipped |
+| GitHub Actions CI/CD (build, test, release) | Shipped |
+| Python SDK (async batching + offline spool) | Beta |
+| Framework integrations (Lightning, HF, Optuna) | Scaffolded |
+| ClickHouse / Postgres / MinIO backends | Scaffolded |
+| Distributed ingest + processor services | Scaffolded |
+
 ## Project Structure
 
 ```
 MLRunX/
 ├── apps/
-│   ├── ui/                 # Next.js dashboard (TypeScript)
-│   └── api/                # Rust API gateway (Axum)
-├── services/
-│   ├── ingest/             # Rust ingest service (gRPC/HTTP)
-│   └── processor/          # Rollups, downsampling, cardinality guards
+│   ├── api/                # Rust API gateway (Axum + gRPC + SQLite)
+│   └── ui/                 # Next.js dashboard (TypeScript + Tailwind)
 ├── sdks/
 │   ├── python/             # Python SDK (async batching + offline spool)
 │   └── integrations/       # Lightning, Hydra, Optuna, HuggingFace hooks
+├── services/
+│   ├── ingest/             # [scaffold] Rust ingest service
+│   └── processor/          # [scaffold] Rollups, downsampling
+├── crates/
+│   └── proto/              # Protobuf definitions + generated code
 ├── infra/
-│   ├── docker/             # Docker Compose for local dev
-│   ├── k8s/                # Helm charts and manifests
+│   ├── docker/             # Docker Compose stack (CH, PG, MinIO, Redis)
+│   ├── k8s/                # Kubernetes manifests
 │   └── observability/      # OpenTelemetry collector config
-├── docs/                   # Documentation
-├── bench/
-│   ├── generators/         # Synthetic data generators
-│   └── workloads/          # W1/W2/W3 benchmark definitions
-└── migrations/
-    ├── wandb/              # W&B export/import tools
-    └── mlflow/             # MLflow adapters
+├── docs/                   # Architecture, specs, operations guides
+├── bench/                  # Benchmark scripts + CI thresholds
+├── migrations/
+│   ├── clickhouse/         # ClickHouse schema migrations
+│   ├── postgres/           # Postgres schema migrations
+│   ├── wandb/              # [placeholder] W&B import tools
+│   └── mlflow/             # [placeholder] MLflow adapters
+├── proto/                  # .proto source files
+├── tests/                  # Contract, integration, unit tests
+├── Dockerfile              # Standalone SQLite deployment image
+├── Cargo.toml              # Rust workspace manifest
+├── Makefile                # Build automation
+└── pyproject.toml          # Python project config
 ```
 
 ## Tech Stack
 
-| Component | Technology |
-|-----------|------------|
-| **Metrics Storage** | ClickHouse |
-| **Metadata Store** | PostgreSQL |
-| **Artifact Storage** | MinIO (S3-compatible) |
-| **Ingest Service** | Rust + Tonic (gRPC) |
-| **API Gateway** | Rust + Axum |
-| **Dashboard** | Next.js + TypeScript + Tailwind |
-| **Python SDK** | Python 3.10+ (async, httpx, pydantic) |
-| **Observability** | OpenTelemetry |
+| Component | Technology | Status |
+|-----------|------------|--------|
+| **API Gateway** | Rust + Axum (HTTP) + Tonic (gRPC) | Active |
+| **Storage** | SQLite (runs, metrics, API keys, share tokens) | Active |
+| **Dashboard** | Next.js 16 + TypeScript + Tailwind CSS v4 | Active |
+| **Charts** | uPlot (high-performance time series) | Active |
+| **Python SDK** | Python 3.10+ (async, httpx, pydantic) | Beta |
+| **Metrics Storage** | ClickHouse | Scaffolded |
+| **Metadata Store** | PostgreSQL | Scaffolded |
+| **Artifact Storage** | MinIO (S3-compatible) | Scaffolded |
+| **Observability** | OpenTelemetry | Scaffolded |
 
 ## Quick Start
 
-### Prerequisites
-
-- Docker & Docker Compose (recommended: [OrbStack](https://orbstack.dev/) for macOS)
-- (For development) Rust 1.85+, Node.js 22+, Python 3.10+, uv
-
-### Run Locally
+### Option A: Standalone binary (simplest)
 
 ```bash
-# Start infrastructure services
+# Clone and build
+git clone https://github.com/ibusnowden/MLRunX.git
+cd MLRunX
+
+# Start the API (SQLite, zero dependencies)
+cargo run --bin mlrunx-api
+# → HTTP on :3001, gRPC on :50051, SQLite at ./mlrunx.db
+
+# Start the UI (in another terminal)
+cd apps/ui && npm install && npm run dev
+# → Dashboard on http://localhost:3000
+```
+
+### Option B: Docker
+
+```bash
+# Pull and run the pre-built image
+docker run -p 3001:3001 -p 50051:50051 -v mlrunx-data:/data \
+  ghcr.io/ibusnowden/mlrunx:latest
+
+# Or build locally
+docker build -t mlrunx .
+docker run -p 3001:3001 -p 50051:50051 -v mlrunx-data:/data mlrunx
+```
+
+### Option C: Full Docker Compose stack (for development)
+
+```bash
+# Starts ClickHouse, Postgres, MinIO, Redis, OTEL collector, API, and UI
 cd infra/docker
-docker compose up -d clickhouse postgres minio redis otel-collector
-
-# Verify all services are healthy
-docker compose ps
-
-# View logs
-docker compose logs -f
+cp .env.example .env    # review and edit secrets
+docker compose up -d
 ```
 
 ### Services & Ports
 
 | Service | Port | Description |
 |---------|------|-------------|
-| **ClickHouse** | 8123 (HTTP), 9000 (TCP) | Metrics and traces storage |
-| **PostgreSQL** | 5432 | Metadata (runs, params, tags, API keys) |
-| **MinIO** | 9001 (API), 9002 (Console) | Artifact storage (S3-compatible) |
-| **Redis** | 6379 | Queue and cache |
-| **OTEL Collector** | 4317 (gRPC), 4318 (HTTP), 8889 (metrics) | Telemetry collection |
+| **API** | 3001 (HTTP), 50051 (gRPC) | Rust API gateway |
 | **UI** | 3000 | Next.js dashboard |
-| **API** | 3001 | Rust API gateway |
-| **Ingest** | 3002 (HTTP), 50051 (gRPC) | Ingest service |
 
-### Insecure Local Dev Defaults (Docker Only)
+<details>
+<summary>Full Docker Compose stack ports</summary>
 
-> ⚠️ These defaults are for local Docker quickstart only. Do **not** use them in staging/production or on internet-exposed hosts.
-> For hosted deployments, copy `infra/docker/.env.example` to `infra/docker/.env` and set strong random secrets.
+| Service | Port | Description |
+|---------|------|-------------|
+| **ClickHouse** | 8123 (HTTP), 9000 (TCP) | Metrics storage (scaffolded) |
+| **PostgreSQL** | 5432 | Metadata storage (scaffolded) |
+| **MinIO** | 9001 (API), 9002 (Console) | Artifact storage (scaffolded) |
+| **Redis** | 6379 | Queue and cache (scaffolded) |
+| **OTEL Collector** | 4317 (gRPC), 4318 (HTTP) | Telemetry collection |
 
-| Service | Env Vars | Local Default |
-|---------|----------|---------------|
-| ClickHouse | `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | `track` / `track_dev` |
-| PostgreSQL | `POSTGRES_USER` / `POSTGRES_PASSWORD` | `track` / `track_dev` |
-| MinIO | `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | `track` / `track_dev_secret` |
+</details>
+
+### API Authentication
+
+```bash
+# Disable auth for local development
+MLRUNX_AUTH_DISABLED=true cargo run --bin mlrunx-api
+
+# Or use an admin API key to create scoped keys
+curl -X POST http://localhost:3001/api/v1/keys \
+  -H "X-API-Key: $ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "team-alpha", "project_id": "my-project", "scope": "write"}'
+```
 
 ### Development Setup
 
 ```bash
 # Clone the repo
-git clone https://github.com/your-org/MLRunX.git
-cd mlrunx
+git clone https://github.com/ibusnowden/MLRunX.git
+cd MLRunX
 
-# Python SDK development
-uv sync --all-packages
-source .venv/bin/activate
-
-# Rust services
+# Rust API
 cargo check
+cargo run --bin mlrunx-api
 
 # UI development
 cd apps/ui && npm install && npm run dev
+
+# Python SDK development
+cd sdks/python
+uv sync --all-packages
+source .venv/bin/activate
 ```
 
-### Package Release Flow
-
-- Stable vs dev release process: `docs/ops/release_channels.md`
-
-### Testing Connectivity
-
-```bash
-# If you changed credentials in infra/docker/.env, replace values below.
-
-# ClickHouse
-docker exec track-clickhouse clickhouse-client --user track --password track_dev --query "SELECT 1"
-
-# PostgreSQL
-docker exec track-postgres psql -U track -d track -c "SELECT 1"
-
-# Redis
-docker exec track-redis redis-cli PING
-
-# MinIO Console
-open http://localhost:9002
-```
-
-## Roadmap 2026
-
-### Phase 1: MVP + Core (Q1-Q2)
-- [X] M0: Project scaffolding + CI
-- [X] M1: Local-first single-user alpha
-- [ ] M2: High-throughput ingest + ClickHouse schema
-- [ ] M3: UI v0 (runs table, compare view, charts)
-- [ ] M4: One-click Docker + basic K8s
-- [ ] M5: Benchmarks W1/W2 + alpha report
-
-### Phase 2: AI-Native Edge (Q2-Q3)
-- [ ] M6: LLM Evals v0 (prompt sets, graders, comparison UI)
-- [ ] M7: Agent tracing + OpenTelemetry compatibility
-- [ ] M8: Integrations v1 (HF, Optuna, Lightning, Hydra)
-- [ ] M9: Reliability (offline spool, retry, retention/rollups)
-
-### Phase 3: OSS + Migration (Q3-Q4)
-- [ ] M10: Migration tools (W&B, MLflow importers)
-- [ ] M11: OSS release + docs + examples
-- [ ] M12: Beta → v1.0 hardening
-
-### Phase 4: Enterprise (Q4+)
-- [ ] RBAC, audit logs, federation, multi-region
-
-## Contributors
-
-- Codex
-
-## Benchmarks
-
-MLRunX targets measurable performance:
-
-| Workload | Metric | Target |
-|----------|--------|--------|
-| **W1**: 10k runs | List/filter p95 | < 200ms |
-| **W2**: High-freq ingest | Log → visible p95 | < 500ms |
-| **W3**: Mixed (metrics + traces + evals) | Dashboard p95 | < 300ms |
-
-## SDK Usage (Preview)
+## SDK Usage (Beta)
 
 ```python
 import mlrunx
@@ -322,7 +298,7 @@ run.log_artifact("model.pt", type="model")
 run.finish()
 ```
 
-## Integrations (Preview)
+## Integrations (Scaffolded)
 
 ```python
 # PyTorch Lightning
@@ -337,9 +313,45 @@ trainer.add_callback(TrackCallback())
 from mlrunx.integrations import TrackOptunaCallback
 study.optimize(objective, callbacks=[TrackOptunaCallback()])
 ```
+
+## Roadmap 2026
+
+### Phase 1: MVP + Core (Q1-Q2)
+- [x] M0: Project scaffolding + CI
+- [x] M1: Local-first single-user alpha (SQLite)
+- [x] M3: UI v0 (runs table, compare view, charts)
+- [x] M4: Docker image + CI/CD
+- [x] RBAC + API key management + share links
+- [ ] M2: High-throughput ingest + ClickHouse wiring
+- [ ] M5: Benchmarks W1/W2 + alpha report
+
+### Phase 2: AI-Native Edge (Q2-Q3)
+- [ ] M6: LLM Evals v0 (prompt sets, graders, comparison UI)
+- [ ] M7: Agent tracing + OpenTelemetry compatibility
+- [ ] M8: Integrations v1 (HF, Optuna, Lightning, Hydra)
+- [ ] M9: Reliability (offline spool, retry, retention/rollups)
+
+### Phase 3: OSS + Migration (Q3-Q4)
+- [ ] M10: Migration tools (W&B, MLflow importers)
+- [ ] M11: OSS release + docs + examples
+- [ ] M12: Beta -> v1.0 hardening
+
+### Phase 4: Enterprise (Q4+)
+- [ ] Multi-tenancy, audit logs, federation, multi-region
+
+## Benchmarks (Planned)
+
+MLRunX targets measurable performance:
+
+| Workload | Metric | Target |
+|----------|--------|--------|
+| **W1**: 10k runs | List/filter p95 | < 200ms |
+| **W2**: High-freq ingest | Log -> visible p95 | < 500ms |
+| **W3**: Mixed (metrics + traces + evals) | Dashboard p95 | < 300ms |
+
 ## Contributing
 
-See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
