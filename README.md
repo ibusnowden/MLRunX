@@ -1,14 +1,20 @@
 <p align="center">
-  <img src="docs/mlrunx-logo.png" alt="MLRunX" width="420" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/mlrunx-logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/mlrunx-logo-light.svg">
+    <img alt="MLRunX" src="docs/mlrunx-logo-light.svg" width="380" />
+  </picture>
 </p>
 
-<h3 align="center">ML Experiment Tracking for Modern AI Workflows</h3>
+<h3 align="center"><b>Open-Source ML Experiment Tracking</b></h3>
 
 <p align="center">
   <a href="https://deepwiki.com/ibusnowden/MLRunX">Documentation</a> &middot;
   <a href="https://github.com/ibusnowden/MLRunX/releases">Releases</a> &middot;
   <a href="https://github.com/ibusnowden/MLRunX">GitHub</a>
 </p>
+
+<br/>
 
 <p align="center">
   <a href="https://github.com/ibusnowden/MLRunX/actions/workflows/ci.yml">
@@ -25,7 +31,7 @@
   </a>
 </p>
 
----
+<br/>
 
 ## News & Updates
 
