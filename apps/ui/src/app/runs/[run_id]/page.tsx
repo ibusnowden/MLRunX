@@ -209,8 +209,24 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
           else if (prefix === 'loss') {
             groupKey = 'loss';
           }
-          // System metrics: group by type (gpu, cpu, memory, disk, network)
-          else if (['gpu', 'cpu', 'memory', 'disk', 'network'].includes(prefix)) {
+          // GPU metrics: sub-group by metric type across GPUs
+          // Only keep memory_total_gb and memory_used_percent charts
+          else if (prefix === 'gpu') {
+            const SHOWN_GPU_METRICS = ['memory_total_gb', 'memory_used_percent'];
+            if (parts.length >= 3) {
+              const metricType = parts.slice(2).join('/');
+              if (SHOWN_GPU_METRICS.includes(metricType)) {
+                groupKey = `gpu_${metricType}`;
+              } else {
+                continue; // skip unwanted GPU metrics
+              }
+            } else {
+              // gpu/{something} with no GPU ID (e.g. gpu/device_count)
+              continue; // skip device_count etc.
+            }
+          }
+          // Other system metrics: group by type (cpu, memory, disk, network)
+          else if (['cpu', 'memory', 'disk', 'network'].includes(prefix)) {
             groupKey = prefix;
           }
           // Default: group by first-level prefix
@@ -391,11 +407,13 @@ function MetricSectionRenderer({
     }> = [];
 
     // Groups that should always be overlaid regardless of count
-    const alwaysGrouped = ['activation', 'grad_norm_layers', 'grad_norm_global', 'gpu', 'cpu', 'memory', 'disk', 'network'];
+    // Include gpu_* sub-groups so each GPU metric type is overlaid across GPUs
+    const alwaysGrouped = ['activation', 'grad_norm_layers', 'grad_norm_global', 'cpu', 'memory', 'disk', 'network'];
 
     metricsByPrefix.forEach((metrics, prefix) => {
-      // Always group these prefixes together
-      if (alwaysGrouped.includes(prefix) && metrics.length > 1) {
+      // Always group these prefixes together (including gpu_* sub-groups)
+      const isAlwaysGrouped = alwaysGrouped.includes(prefix) || prefix.startsWith('gpu_');
+      if (isAlwaysGrouped && metrics.length > 1) {
         charts.push({
           key: prefix,
           title: getMetricDisplayTitle(prefix),
