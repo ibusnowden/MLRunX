@@ -244,6 +244,22 @@ export function shouldUseLogScale(metricName: string): boolean {
 }
 
 /**
+ * GPU metric sub-group title mappings.
+ * Keys are the leaf metric names (after gpu/{id}/...).
+ */
+const GPU_METRIC_TITLES: Record<string, string> = {
+  'memory_used_percent': 'GPU Memory Utilization (%)',
+  'memory_allocated_gb': 'GPU Memory Allocated (GB)',
+  'memory_reserved_gb': 'GPU Memory Reserved (GB)',
+  'memory_total_gb': 'GPU Memory Total (GB)',
+  'memory_max_allocated_gb': 'GPU Peak Memory Allocated (GB)',
+  'memory_max_reserved_gb': 'GPU Peak Memory Reserved (GB)',
+  'utilization_percent': 'GPU Compute Utilization (%)',
+  'power_w': 'GPU Power (W)',
+  'temperature_c': 'GPU Temperature (°C)',
+};
+
+/**
  * Get a display-friendly title for a metric or group key.
  */
 export function getMetricDisplayTitle(metricName: string): string {
@@ -252,7 +268,7 @@ export function getMetricDisplayTitle(metricName: string): string {
     'grad_norm_global': 'Gradient Norm (Global)',
     'grad_norm_layers': 'Gradient Norm (Per Layer)',
     'activation': 'Activations',
-    'gpu': 'GPU power (W)',
+    'gpu': 'GPU Metrics',
     'cpu': 'CPU Utilization',
     'memory': 'Memory Usage (GB)',
     'disk': 'Disk I/O (Mbps)',
@@ -261,6 +277,16 @@ export function getMetricDisplayTitle(metricName: string): string {
 
   if (specialTitles[metricName]) {
     return specialTitles[metricName];
+  }
+
+  // Handle GPU sub-group keys like "gpu_memory_used_percent"
+  if (metricName.startsWith('gpu_')) {
+    const metricType = metricName.slice(4); // strip "gpu_"
+    if (GPU_METRIC_TITLES[metricType]) {
+      return GPU_METRIC_TITLES[metricType];
+    }
+    // Fallback: generate a readable title from the metric type
+    return 'GPU ' + toTitleCase(metricType);
   }
 
   // Handle prefixed metrics like "grad_norm/fc1"
@@ -325,6 +351,11 @@ export function getMetricSeriesLabel(metricName: string): string {
   const parts = metricName.split('/');
   if (parts.length <= 1) {
     return formatMetricSegment(metricName);
+  }
+
+  // GPU metrics: gpu/{id}/{metric_type} → "GPU {id}"
+  if (parts[0] === 'gpu' && parts.length >= 3) {
+    return `GPU ${parts[1]}`;
   }
 
   return formatMetricPath(parts.slice(1).join('/'));
