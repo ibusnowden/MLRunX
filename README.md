@@ -39,6 +39,31 @@
 
 ---
 
+## Preview
+
+> Compare reward curves across RL training runs -- REINFORCE, GSPO, GRPO, PPO, RLOO, CISPO and more.
+
+<p align="center">
+  <img src="docs/screenshots/compare-light.png" alt="Compare view — light mode" width="100%" />
+</p>
+<p align="center"><em>Expanded compare chart — Light mode</em></p>
+
+<br/>
+
+<p align="center">
+  <img src="docs/screenshots/compare-dark.png" alt="Compare view — dark mode" width="100%" />
+</p>
+<p align="center"><em>Full compare dashboard with run selector and statistics — Dark mode</em></p>
+
+<br/>
+
+<p align="center">
+  <img src="docs/screenshots/compare-expanded-dark.png" alt="Expanded compare chart — dark mode" width="100%" />
+</p>
+<p align="center"><em>Expanded compare chart — Dark mode</em></p>
+
+---
+
 ## Why MLRunX?
 
 - **Performance-first**: Sub-200ms UI queries at 10k+ runs, high-throughput ingestion with server-side downsampling
