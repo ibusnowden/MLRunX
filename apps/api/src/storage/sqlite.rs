@@ -231,6 +231,23 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Get the project_id for a run (lightweight ownership check).
+    pub async fn get_run_project_id(&self, run_id: &str) -> Result<String, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        conn.query_row(
+            "SELECT project_id FROM runs WHERE id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => {
+                SqliteError::NotFound(format!("Run not found: {}", run_id))
+            }
+            _ => SqliteError::Database(e),
+        })
+    }
+
     /// Check if a run exists.
     pub async fn run_exists(&self, run_id: &str) -> Result<bool, SqliteError> {
         let conn = self.conn.lock().await;
