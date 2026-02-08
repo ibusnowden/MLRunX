@@ -1,6 +1,37 @@
-# MLRunX
+<p align="center">
+  <img src="docs/mlrunx-logo.png" alt="MLRunX" width="420" />
+</p>
 
-A high-performance, open-source ML experiment tracking platform. Built for modern AI workflows with first-class support for LLM evals, agent tracing, and scale.
+<h3 align="center">ML Experiment Tracking for Modern AI Workflows</h3>
+
+<p align="center">
+  <a href="https://deepwiki.com/ibusnowden/MLRunX">Documentation</a> &middot;
+  <a href="https://github.com/ibusnowden/MLRunX/releases">Releases</a> &middot;
+  <a href="https://github.com/ibusnowden/MLRunX">GitHub</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/ibusnowden/MLRunX/actions/workflows/ci.yml">
+    <img src="https://github.com/ibusnowden/MLRunX/actions/workflows/ci.yml/badge.svg" alt="CI" />
+  </a>
+  <a href="https://github.com/ibusnowden/MLRunX/actions/workflows/release.yml">
+    <img src="https://github.com/ibusnowden/MLRunX/actions/workflows/release.yml/badge.svg" alt="Release" />
+  </a>
+  <a href="https://github.com/ibusnowden/MLRunX/releases/tag/v0.1.0">
+    <img src="https://img.shields.io/github/v/release/ibusnowden/MLRunX?label=latest" alt="Latest Release" />
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" />
+  </a>
+</p>
+
+---
+
+## News & Updates
+
+- **[02/07/26]** `v0.1.0` is released, featuring the Rust API gateway (Axum + SQLite), Next.js dashboard with dark/light theming, project-scoped API keys, role-based access control, shareable view-only links, key management API, Docker image, and GitHub Actions CI/CD.
+
+---
 
 ## Why MLRunX?
 
@@ -275,10 +306,6 @@ trainer.add_callback(TrackCallback())
 from mlrunx.integrations import TrackOptunaCallback
 study.optimize(objective, callbacks=[TrackOptunaCallback()])
 ```
-## Get to know about the repo more...
-
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ibusnowden/MLRunX)
-
 ## Contributing
 
 See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for guidelines.
