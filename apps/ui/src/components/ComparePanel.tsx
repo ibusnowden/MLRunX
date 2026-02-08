@@ -1,9 +1,28 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { api, MetricSeries } from '@/lib/api';
 import { UPlotChart } from '@/components/charts/UPlotChart';
 import { useTheme } from '@/components/ThemeProvider';
+
+// Icons
+const ExpandIcon = () => (
+  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+  </svg>
+);
+
+const CollapseIcon = () => (
+  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+  </svg>
+);
+
+const DownloadIcon = () => (
+  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+  </svg>
+);
 
 interface CompareData {
   run_id: string;
@@ -29,6 +48,34 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
   const [selectedMetric, setSelectedMetric] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const expandedChartRef = useRef<HTMLDivElement>(null);
+
+  // Close expanded view on Escape key
+  useEffect(() => {
+    if (!isExpanded) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setIsExpanded(false);
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    // Prevent body scroll when expanded
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.body.style.overflow = '';
+    };
+  }, [isExpanded]);
+
+  const handleDownload = useCallback(() => {
+    const container = expandedChartRef.current ?? document.querySelector('[data-compare-chart]');
+    const canvas = container?.querySelector('canvas');
+    if (canvas) {
+      const link = document.createElement('a');
+      link.download = `${selectedMetric || 'compare'}_chart.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    }
+  }, [selectedMetric]);
 
   useEffect(() => {
     async function fetchComparison() {
@@ -106,16 +153,22 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
   const chartSeries = comparisonData.map((run) => {
     const points = run.metricSeries?.points ?? [];
     const data = new Array(sortedSteps.length).fill(null);
+    const upper = new Array(sortedSteps.length).fill(null);
+    const lower = new Array(sortedSteps.length).fill(null);
     points.forEach((point) => {
       const idx = stepToIndex.get(point.step);
       if (idx !== undefined) {
         data[idx] = point.mean;
+        upper[idx] = point.max;
+        lower[idx] = point.min;
       }
     });
     return {
       label: run.run_name || run.run_id.slice(0, 8),
       color: run.color,
       data,
+      upper,
+      lower,
     };
   });
 
@@ -164,7 +217,8 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
         </div>
       ) : (
         <div>
-          <div className="rounded-lg border border-border overflow-hidden">
+          {/* Inline chart with expand button */}
+          <div className="rounded-lg border border-border overflow-hidden relative" data-compare-chart>
             <UPlotChart
               title={`${selectedMetric} across runs`}
               xData={sortedSteps}
@@ -176,7 +230,84 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
               darkTheme={isDark}
               showLegend={true}
             />
+            {/* Expand button overlay */}
+            <button
+              onClick={() => setIsExpanded(true)}
+              className="absolute top-2 right-2 p-1.5 rounded-md bg-surface/80 backdrop-blur-sm border border-border/50 hover:bg-surface-hover text-text-muted hover:text-text-primary transition-colors z-10"
+              title="Expand chart"
+            >
+              <ExpandIcon />
+            </button>
           </div>
+
+          {/* Expanded overlay */}
+          {isExpanded && (
+            <div className="fixed inset-0 z-50 flex flex-col" style={{ backgroundColor: isDark ? '#0d1117' : '#ffffff' }}>
+              {/* Expanded header */}
+              <div className="flex items-center justify-between px-6 py-3 border-b border-border shrink-0">
+                <div className="flex items-center gap-4">
+                  <h2 className="text-lg font-semibold text-text-primary">
+                    {selectedMetric} across runs
+                  </h2>
+                  {commonMetrics.length > 1 && (
+                    <select
+                      value={selectedMetric}
+                      onChange={(e) => setSelectedMetric(e.target.value)}
+                      className="px-3 py-1.5 border border-border rounded-lg text-sm text-text-primary bg-surface-secondary focus:outline-none focus:ring-2 focus:ring-accent"
+                    >
+                      {commonMetrics.map((name) => (
+                        <option key={name} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleDownload}
+                    className="p-2 rounded-lg hover:bg-surface-hover text-text-muted hover:text-text-primary transition-colors"
+                    title="Download PNG"
+                  >
+                    <DownloadIcon />
+                  </button>
+                  <button
+                    onClick={() => setIsExpanded(false)}
+                    className="p-2 rounded-lg hover:bg-surface-hover text-text-muted hover:text-text-primary transition-colors"
+                    title="Close (Esc)"
+                  >
+                    <CollapseIcon />
+                  </button>
+                </div>
+              </div>
+
+              {/* Expanded legend */}
+              <div className="flex flex-wrap gap-4 px-6 py-2 border-b border-border shrink-0">
+                {comparisonData.map((run) => (
+                  <div key={run.run_id} className="flex items-center gap-2">
+                    <div
+                      className="w-3 h-0.5 rounded-full"
+                      style={{ backgroundColor: run.color }}
+                    />
+                    <span className="text-sm font-medium text-text-primary">
+                      {run.run_name || run.run_id.slice(0, 8)}
+                    </span>
+                    <span className="text-xs text-text-muted">({run.status})</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Expanded chart — takes remaining space */}
+              <div ref={expandedChartRef} className="flex-1 min-h-0 p-4">
+                <ExpandedChart
+                  selectedMetric={selectedMetric}
+                  sortedSteps={sortedSteps}
+                  chartSeries={chartSeries}
+                  isDark={isDark}
+                />
+              </div>
+            </div>
+          )}
 
           {/* Summary table */}
           <div className="mt-4 overflow-x-auto">
@@ -222,6 +353,56 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * A separate component for the expanded chart so it measures its own
+ * container height independently and passes it to UPlotChart.
+ */
+function ExpandedChart({
+  selectedMetric,
+  sortedSteps,
+  chartSeries,
+  isDark,
+}: {
+  selectedMetric: string;
+  sortedSteps: number[];
+  chartSeries: { label: string; color: string; data: number[]; upper?: number[]; lower?: number[] }[];
+  isDark: boolean;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [chartHeight, setChartHeight] = useState(500);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const h = entry.contentRect.height;
+        if (h > 100) {
+          // Leave room for the legend inside UPlotChart (approx 44px)
+          setChartHeight(Math.floor(h - 44));
+        }
+      }
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div ref={containerRef} className="w-full h-full">
+      <UPlotChart
+        title={`${selectedMetric} across runs`}
+        xData={sortedSteps}
+        series={chartSeries}
+        xLabel="Step"
+        yLabel={selectedMetric}
+        height={chartHeight}
+        interactive={true}
+        darkTheme={isDark}
+        showLegend={true}
+      />
     </div>
   );
 }

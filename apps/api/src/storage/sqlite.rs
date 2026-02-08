@@ -250,7 +250,8 @@ impl SqliteStore {
 
         conn.query_row(
             r#"SELECT id, project_id, name, status, created_at, updated_at,
-                      finished_at, metrics_count, params_count
+                      finished_at, metrics_count, params_count,
+                      (julianday(COALESCE(finished_at, updated_at)) - julianday(created_at)) * 86400.0
                FROM runs WHERE id = ?1"#,
             params![run_id],
             |row| {
@@ -264,6 +265,7 @@ impl SqliteStore {
                     finished_at: row.get(6)?,
                     metrics_count: row.get(7)?,
                     params_count: row.get(8)?,
+                    duration_seconds: row.get(9)?,
                 })
             },
         )
@@ -288,7 +290,9 @@ impl SqliteStore {
 
         let mut sql = String::from(
             "SELECT id, project_id, name, status, created_at, updated_at,
-                    finished_at, metrics_count, params_count FROM runs WHERE 1=1"
+                    finished_at, metrics_count, params_count,
+                    (julianday(COALESCE(finished_at, updated_at)) - julianday(created_at)) * 86400.0
+             FROM runs WHERE 1=1"
         );
         let mut count_sql = String::from("SELECT COUNT(*) FROM runs WHERE 1=1");
 
@@ -340,11 +344,33 @@ impl SqliteStore {
                 finished_at: row.get(6)?,
                 metrics_count: row.get(7)?,
                 params_count: row.get(8)?,
+                duration_seconds: row.get(9)?,
             })
         })?;
 
         let runs: Result<Vec<_>, _> = rows.collect();
         Ok((runs?, total))
+    }
+
+    /// Delete a run and all its associated data (metrics, tags, params, batches).
+    pub async fn delete_run(&self, run_id: &str) -> Result<(), SqliteError> {
+        let conn = self.conn.lock().await;
+
+        // Delete related data first (no ON DELETE CASCADE in schema)
+        conn.execute("DELETE FROM metrics WHERE run_id = ?1", params![run_id])?;
+        conn.execute("DELETE FROM tags WHERE run_id = ?1", params![run_id])?;
+        conn.execute("DELETE FROM params WHERE run_id = ?1", params![run_id])?;
+        conn.execute("DELETE FROM batches WHERE run_id = ?1", params![run_id])?;
+
+        // Delete the run itself
+        let changes = conn.execute("DELETE FROM runs WHERE id = ?1", params![run_id])?;
+
+        if changes == 0 {
+            return Err(SqliteError::NotFound(format!("Run not found: {}", run_id)));
+        }
+
+        info!(run_id = %run_id, "Deleted run and associated data");
+        Ok(())
     }
 
     /// Update run status.
@@ -610,6 +636,7 @@ pub struct RunRow {
     pub finished_at: Option<String>,
     pub metrics_count: i64,
     pub params_count: i64,
+    pub duration_seconds: Option<f64>,
 }
 
 /// A metric data point.

@@ -35,7 +35,7 @@ const LoadingSpinner = () => (
 
 interface MetricChartData {
   xData: number[];
-  series: { label: string; data: number[]; color?: string }[];
+  series: { label: string; data: number[]; color?: string; upper?: number[]; lower?: number[] }[];
 }
 
 export default function RunDetailPage({ params }: { params: Promise<{ run_id: string }> }) {
@@ -125,10 +125,12 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
 
       const xData = series.points.map((p) => p.step);
       const yData = series.points.map((p) => p.mean);
+      const upper = series.points.map((p) => p.max);
+      const lower = series.points.map((p) => p.min);
 
       return {
         xData,
-        series: [{ label: metricName, data: yData }],
+        series: [{ label: metricName, data: yData, upper, lower }],
       };
     },
     [allMetrics]
@@ -158,15 +160,19 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
 
       const chartSeries = seriesData.map((s) => {
         const data = new Array(xData.length).fill(null);
+        const upper = new Array(xData.length).fill(null);
+        const lower = new Array(xData.length).fill(null);
         s.points.forEach((p) => {
           const idx = stepToIndex.get(p.step);
           if (idx !== undefined) {
             data[idx] = p.mean;
+            upper[idx] = p.max;
+            lower[idx] = p.min;
           }
         });
         // Use the suffix for label (e.g., "fc1" from "grad_norm/fc1")
         const label = getMetricSeriesLabel(s.name);
-        return { label, data };
+        return { label, data, upper, lower };
       });
 
       return { xData, series: chartSeries };
@@ -265,12 +271,23 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     );
   }
 
+  const handleDeleteRun = useCallback(async () => {
+    try {
+      await api.deleteRun(runId);
+      router.push('/');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete run');
+    }
+  }, [runId, router]);
+
   return (
     <DashboardLayout
       runName={run.name || run.run_id}
       status={run.status}
       totalMetrics={availableMetrics.length}
+      durationSeconds={run.duration_seconds}
       onFilterChange={handleFilterChange}
+      onDelete={handleDeleteRun}
       darkTheme={darkTheme}
     >
       {/* Back button */}
