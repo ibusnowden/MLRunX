@@ -22,16 +22,9 @@
     <line x1="2" y1="58" x2="60" y2="58" stroke="#60A5FA" stroke-width="2" opacity="0.5"/>
   </g>
 
-  <!-- Wordmark -->
-  <g transform="translate(82, 0)">
-    <!-- "ML" in bold -->
-    <text x="0" y="56" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
-          font-size="52" font-weight="700" fill="#F1F5F9" letter-spacing="-1">ML</text>
-    <!-- "Run" in regular weight -->
-    <text x="82" y="56" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
-          font-size="52" font-weight="400" fill="#CBD5E1" letter-spacing="-1">Run</text>
-    <!-- "X" in accent color -->
-    <text x="193" y="56" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
-          font-size="52" font-weight="700" fill="url(#x-grad)" letter-spacing="-1">X</text>
-  </g>
+  <!-- Wordmark — single text element so glyphs flow naturally -->
+  <text x="82" y="56" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="52" letter-spacing="-1">
+    <tspan font-weight="700" fill="#F1F5F9">ML</tspan><tspan font-weight="400" fill="#CBD5E1">Run</tspan><tspan font-weight="700" fill="url(#x-grad)">X</tspan>
+  </text>
 </svg>
