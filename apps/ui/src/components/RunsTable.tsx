@@ -146,6 +146,12 @@ const ChevronRightIcon = () => (
   </svg>
 );
 
+const TrashIcon = () => (
+  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+  </svg>
+);
+
 export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -159,6 +165,10 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
   const [total, setTotal] = useState(initialData?.total || 0);
   const [loading, setLoading] = useState(!initialData);
   const [error, setError] = useState<string | null>(null);
+
+  // Delete state
+  const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
   // Filters
   const [searchQuery, setSearchQuery] = useState(initialQuery);
@@ -266,6 +276,21 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
     fetchRuns();
   }, [fetchRuns]);
 
+  const handleDeleteRun = useCallback(async (runId: string) => {
+    setDeletingRunId(runId);
+    try {
+      await api.deleteRun(runId);
+      // Remove from local state immediately
+      setRuns((prev) => prev.filter((r) => r.run_id !== runId));
+      setTotal((prev) => Math.max(0, prev - 1));
+      setDeleteConfirmId(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete run');
+    } finally {
+      setDeletingRunId(null);
+    }
+  }, []);
+
   const totalPages = Math.ceil(total / pageSize);
   const isSearching = searchQuery.trim().length > 0;
   const resultsLabel = isSearching
@@ -354,12 +379,13 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wider">Metrics</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wider">Duration</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wider">Created</th>
+              <th className="px-4 py-3 text-right text-xs font-semibold text-text-secondary uppercase tracking-wider w-16"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
             {loading ? (
               <tr>
-                <td colSpan={6} className="px-4 py-12 text-center text-text-muted">
+                <td colSpan={7} className="px-4 py-12 text-center text-text-muted">
                   <div className="flex items-center justify-center gap-2">
                     <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
@@ -371,7 +397,7 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
               </tr>
             ) : runs.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-12 text-center text-text-muted">
+                <td colSpan={7} className="px-4 py-12 text-center text-text-muted">
                   No runs found
                 </td>
               </tr>
@@ -380,7 +406,7 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
                 <tr
                   key={run.run_id}
                   onClick={() => onRunClick?.(run)}
-                  className="hover:bg-surface-hover cursor-pointer transition-colors"
+                  className="group hover:bg-surface-hover cursor-pointer transition-colors"
                 >
                   <td className="px-4 py-3.5">
                     <div className="font-medium text-text-primary">
@@ -409,6 +435,42 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
                   </td>
                   <td className="px-4 py-3.5 text-sm text-text-muted">
                     {formatDate(run.created_at)}
+                  </td>
+                  <td className="px-4 py-3.5 text-right">
+                    {deleteConfirmId === run.run_id ? (
+                      <div className="flex items-center gap-1 justify-end" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteRun(run.run_id);
+                          }}
+                          disabled={deletingRunId === run.run_id}
+                          className="px-2 py-1 text-xs font-medium rounded bg-danger text-white hover:bg-danger/80 disabled:opacity-50 transition-colors"
+                        >
+                          {deletingRunId === run.run_id ? '...' : 'Yes'}
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeleteConfirmId(null);
+                          }}
+                          className="px-2 py-1 text-xs font-medium rounded bg-surface-secondary text-text-secondary hover:bg-surface-hover border border-border transition-colors"
+                        >
+                          No
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeleteConfirmId(run.run_id);
+                        }}
+                        className="p-1.5 rounded hover:bg-danger/10 text-text-muted hover:text-danger transition-colors opacity-0 group-hover:opacity-100"
+                        title="Delete run"
+                      >
+                        <TrashIcon />
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))

@@ -35,7 +35,7 @@ use axum::{
     extract::State,
     http::StatusCode,
     middleware,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
 use tonic::transport::Server as TonicServer;
@@ -509,6 +509,37 @@ async fn http_finish_run(
     }))
 }
 
+/// Response for deleting a run.
+#[derive(Debug, Serialize)]
+struct DeleteRunHttpResponse {
+    status: String,
+}
+
+/// Delete a run and all its associated data.
+async fn http_delete_run(
+    State(state): State<AppState>,
+    axum::extract::Path(run_id): axum::extract::Path<String>,
+) -> Result<Json<DeleteRunHttpResponse>, (StatusCode, String)> {
+    // Delete from SQLite (cascades to metrics, tags, params, batches)
+    state.sqlite_store
+        .delete_run(&run_id)
+        .await
+        .map_err(|e| match e {
+            storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
+
+    // Also remove from in-memory store
+    state.store.runs.write().await.remove(&run_id);
+    state.store.metrics.write().await.remove(&run_id);
+
+    info!(run_id = %run_id, "HTTP: Deleted run");
+
+    Ok(Json(DeleteRunHttpResponse {
+        status: "ok".to_string(),
+    }))
+}
+
 // =============================================================================
 // Query API Handlers
 // =============================================================================
@@ -595,7 +626,7 @@ async fn http_list_runs(
             tags,
             created_at: run.created_at,
             updated_at: run.updated_at,
-            duration_seconds: None,
+            duration_seconds: run.duration_seconds,
         });
     }
 
@@ -667,7 +698,7 @@ async fn http_get_run(
         tags,
         created_at: run.created_at.clone(),
         updated_at: run.updated_at.clone(),
-        duration_seconds: None,
+        duration_seconds: run.duration_seconds,
         metrics_summary,
     }))
 }
@@ -916,7 +947,7 @@ fn build_http_router(state: AppState) -> Router {
         .route("/api/v1/runs/{run_id}/finish", post(http_finish_run))
         // Query API endpoints
         .route("/api/v1/runs", get(http_list_runs))
-        .route("/api/v1/runs/{run_id}", get(http_get_run))
+        .route("/api/v1/runs/{run_id}", get(http_get_run).delete(http_delete_run))
         .route("/api/v1/runs/{run_id}/metrics", get(http_get_metrics))
         .route("/api/v1/runs/compare", post(http_compare_runs))
         .layer(middleware::from_fn_with_state(

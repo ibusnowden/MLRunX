@@ -8,6 +8,10 @@ export interface ChartSeries {
   label: string;
   data: number[];
   color?: string;
+  /** Upper bound data (e.g. max values) for band shading */
+  upper?: number[];
+  /** Lower bound data (e.g. min values) for band shading */
+  lower?: number[];
 }
 
 export interface UPlotChartProps {
@@ -74,6 +78,14 @@ const LIGHT_THEME_COLORS = [
   '#e11d48', // rose
   '#7c3aed', // violet
 ];
+
+/** Convert a hex color like '#2563eb' to 'rgba(37, 99, 235, alpha)' */
+function hexToRgba(hex: string, alpha: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
 
 // Apply exponential moving average smoothing
 function smoothData(data: number[], factor: number): number[] {
@@ -163,30 +175,72 @@ export function UPlotChart({
     const processedSeries = series.map(s => ({
       ...s,
       data: smoothing > 0 ? smoothData(s.data, smoothing) : s.data,
+      upper: s.upper && smoothing > 0 ? smoothData(s.upper, smoothing) : s.upper,
+      lower: s.lower && smoothing > 0 ? smoothData(s.lower, smoothing) : s.lower,
     }));
 
-    // Prepare data: [xData, ...series.data]
-    const data: uPlot.AlignedData = [xData, ...processedSeries.map((s) => s.data)];
+    // Build data array and series config, interleaving band series
+    // Layout: [x, line1, upper1?, lower1?, line2, upper2?, lower2?, ...]
+    const dataArrays: (number[] | null[])[] = [xData];
+    const seriesConfig: uPlot.Series[] = [{ label: xLabel }];
+    const bands: uPlot.Band[] = [];
 
-    // Build series config with optional area fill
-    const seriesConfig: uPlot.Series[] = [
-      { label: xLabel },
-      ...processedSeries.map((s, i) => {
-        const color = s.color || colors[i % colors.length];
-        return {
-          label: s.label,
-          stroke: color,
-          width: 1,
-          points: {
-            show: false,
-          },
-          // Add alpha for non-hovered series
-          alpha: hoveredSeries === null || hoveredSeries === i + 1 ? 1 : 0.3,
-          // Area fill under line - subtle
-          fill: areaFill ? `${color}15` : undefined,
-        };
-      }),
-    ];
+    // Track which uPlot-series-index each visible line lives at
+    let dataIdx = 1; // next index into the data/series arrays
+
+    processedSeries.forEach((s, i) => {
+      const color = s.color || colors[i % colors.length];
+      const isActive = hoveredSeries === null || hoveredSeries === i + 1;
+
+      // 1. Main line series
+      dataArrays.push(s.data);
+      seriesConfig.push({
+        label: s.label,
+        stroke: color,
+        width: 1,
+        points: { show: false },
+        alpha: isActive ? 1 : 0.3,
+        fill: areaFill ? `${color}15` : undefined,
+      });
+      dataIdx++;
+
+      // 2. Band (upper/lower) series — only if bounds are provided
+      if (s.upper && s.lower) {
+        // Upper bound (hidden line)
+        dataArrays.push(s.upper);
+        seriesConfig.push({
+          label: `${s.label} upper`,
+          stroke: 'transparent',
+          width: 0,
+          points: { show: false },
+          show: true,         // must be true for band to render
+          alpha: 0,           // visually invisible line
+        });
+        const upperIdx = dataIdx;
+        dataIdx++;
+
+        // Lower bound (hidden line)
+        dataArrays.push(s.lower);
+        seriesConfig.push({
+          label: `${s.label} lower`,
+          stroke: 'transparent',
+          width: 0,
+          points: { show: false },
+          show: true,
+          alpha: 0,
+        });
+        const lowerIdx = dataIdx;
+        dataIdx++;
+
+        // Band between upper and lower
+        bands.push({
+          series: [upperIdx, lowerIdx] as [number, number],
+          fill: hexToRgba(color, isActive ? 0.10 : 0.04),
+        });
+      }
+    });
+
+    const data: uPlot.AlignedData = dataArrays as uPlot.AlignedData;
 
     // Chart options
     const opts: uPlot.Options = {
@@ -194,6 +248,7 @@ export function UPlotChart({
       height: dimensions.height,
       title: title,
       series: seriesConfig,
+      bands: bands.length > 0 ? bands : undefined,
       scales: {
         x: { time: false },
         y: {
