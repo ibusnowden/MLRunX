@@ -238,6 +238,16 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     setFilter(newFilter);
   }, []);
 
+  // Handle delete run
+  const handleDeleteRun = useCallback(async () => {
+    try {
+      await api.deleteRun(runId);
+      router.push('/');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete run');
+    }
+  }, [runId, router]);
+
   // Loading state
   if (loading) {
     return (
@@ -270,15 +280,6 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
       </main>
     );
   }
-
-  const handleDeleteRun = useCallback(async () => {
-    try {
-      await api.deleteRun(runId);
-      router.push('/');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete run');
-    }
-  }, [runId, router]);
 
   return (
     <DashboardLayout
