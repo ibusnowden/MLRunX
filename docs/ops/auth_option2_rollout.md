@@ -112,3 +112,17 @@ Implementation notes:
 - Keep API-key auth as the baseline safety net until PR 4 is fully rolled out.
 - Run migration-first deploys, then application deploys.
 - Add dashboards/alerts for auth failures and denied requests before enforcing strict RBAC globally.
+- Use the operational runbook at `docs/ops/auth_rbac_rollout_runbook.md` for canary gates, alert thresholds, and rollback steps.
+
+## STO-002 (In Progress): PostgreSQL Parameter Shadow Writes
+
+Scope (current start):
+- `log_params` now supports an optional PostgreSQL shadow write path.
+- In-memory behavior remains authoritative for safety; PostgreSQL write is best-effort.
+
+Feature flag:
+- `MLRUNX_POSTGRES_SHADOW_WRITES_ENABLED` (default `false`)
+
+Safety behavior:
+- If PostgreSQL write fails, ingest stays available and returns a warning detail.
+- If `run_id` is not a UUID, PostgreSQL shadow write is skipped with a warning detail.
