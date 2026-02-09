@@ -10,9 +10,10 @@ use std::time::SystemTime;
 use prost_types::Timestamp;
 use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
+use crate::storage::{CreateParameterInput, ParameterRepository, ParameterValue};
 use mlrunx_proto::mlrunx::v1::{
     CreateArtifactUploadRequest, CreateArtifactUploadResponse, FinalizeArtifactUploadRequest,
     FinalizeArtifactUploadResponse, FinishRunRequest, FinishRunResponse, HeartbeatRequest,
@@ -69,6 +70,42 @@ fn now_timestamp() -> Option<Timestamp> {
         seconds: duration.as_secs() as i64,
         nanos: duration.subsec_nanos() as i32,
     })
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+}
+
+fn warning_detail(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    field: impl Into<String>,
+) -> mlrunx_proto::mlrunx::v1::ErrorDetail {
+    mlrunx_proto::mlrunx::v1::ErrorDetail {
+        code: code.into(),
+        message: message.into(),
+        field: field.into(),
+        severity: 1, // ERROR_SEVERITY_WARNING
+    }
+}
+
+fn build_postgres_parameter_inputs(
+    run_id: &str,
+    params: &[mlrunx_proto::mlrunx::v1::Parameter],
+) -> Result<Vec<CreateParameterInput>, String> {
+    let run_uuid = Uuid::parse_str(run_id).map_err(|_| {
+        format!("run_id '{run_id}' is not a UUID; skipping PostgreSQL parameter shadow write")
+    })?;
+
+    Ok(params
+        .iter()
+        .map(|param| CreateParameterInput {
+            run_id: run_uuid,
+            name: param.name.clone(),
+            value: ParameterValue::String(param.value.clone()),
+        })
+        .collect())
 }
 
 #[tonic::async_trait]
@@ -263,6 +300,7 @@ impl IngestService for IngestServiceImpl {
 
         let param_count = req.params.len();
         tracing::Span::current().record("param_count", param_count);
+        let mut warnings = Vec::new();
 
         {
             let mut runs = self.store.runs.write().await;
@@ -274,7 +312,43 @@ impl IngestService for IngestServiceImpl {
             run.updated_at = SystemTime::now();
         }
 
-        // TODO: Write to PostgreSQL (STO-002)
+        // STO-002 start: optional PostgreSQL shadow write for parameter durability.
+        // Current safety posture: in-memory remains the primary path; DB write is best-effort.
+        if env_flag("MLRUNX_POSTGRES_SHADOW_WRITES_ENABLED") {
+            match build_postgres_parameter_inputs(&run_id.value, &req.params) {
+                Ok(inputs) => match ParameterRepository::upsert_batch(inputs).await {
+                    Ok(written) => {
+                        debug!(
+                            run_id = %run_id.value,
+                            params = param_count,
+                            postgres_upserted = written,
+                            "Shadow wrote parameters to PostgreSQL"
+                        );
+                    }
+                    Err(err) => {
+                        warn!(
+                            run_id = %run_id.value,
+                            error = %err,
+                            "PostgreSQL parameter shadow write failed"
+                        );
+                        warnings.push(warning_detail(
+                            "POSTGRES_SHADOW_WRITE_FAILED",
+                            "PostgreSQL parameter shadow write failed; in-memory ingest path remains active.",
+                            "params",
+                        ));
+                    }
+                },
+                Err(message) => {
+                    warn!(run_id = %run_id.value, "{message}");
+                    warnings.push(warning_detail(
+                        "POSTGRES_SHADOW_WRITE_SKIPPED",
+                        message,
+                        "run_id",
+                    ));
+                }
+            }
+        }
+
         debug!(
             run_id = %run_id.value,
             params = param_count,
@@ -284,7 +358,7 @@ impl IngestService for IngestServiceImpl {
         Ok(Response::new(LogParamsResponse {
             accepted_count: param_count as i64,
             existing_count: 0,
-            warnings: vec![],
+            warnings,
         }))
     }
 
@@ -565,5 +639,35 @@ mod tests {
         let resp = response.into_inner();
 
         assert!(resp.duration_seconds >= 0.0);
+    }
+
+    #[test]
+    fn test_build_postgres_parameter_inputs_with_uuid() {
+        let run_id = Uuid::now_v7().to_string();
+        let params = vec![
+            mlrunx_proto::mlrunx::v1::Parameter {
+                name: "lr".to_string(),
+                value: "0.001".to_string(),
+            },
+            mlrunx_proto::mlrunx::v1::Parameter {
+                name: "optimizer".to_string(),
+                value: "adamw".to_string(),
+            },
+        ];
+
+        let result = build_postgres_parameter_inputs(&run_id, &params).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "lr");
+    }
+
+    #[test]
+    fn test_build_postgres_parameter_inputs_with_non_uuid_run_id() {
+        let params = vec![mlrunx_proto::mlrunx::v1::Parameter {
+            name: "lr".to_string(),
+            value: "0.001".to_string(),
+        }];
+
+        let err = build_postgres_parameter_inputs("run-non-uuid-id", &params).unwrap_err();
+        assert!(err.contains("not a UUID"));
     }
 }

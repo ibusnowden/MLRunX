@@ -99,3 +99,6 @@ data/
 # Slurm job outputs
 slurm-*.out
 slurm-*.err
+
+# Local runtime spool
+.mlrunx/spool/

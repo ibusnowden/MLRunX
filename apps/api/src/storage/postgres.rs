@@ -5,7 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::instrument;
+use tokio_postgres::NoTls;
+use tracing::{instrument, warn};
 use uuid::Uuid;
 
 /// Errors that can occur in PostgreSQL operations.
@@ -279,6 +280,21 @@ pub struct ListRunsFilter {
     pub offset: Option<i64>,
 }
 
+async fn connect_client() -> Result<tokio_postgres::Client, PostgresError> {
+    let config = PostgresConfig::from_env();
+    let (client, connection) = tokio_postgres::connect(&config.url, NoTls)
+        .await
+        .map_err(|e| PostgresError::Database(format!("Failed to connect to PostgreSQL: {e}")))?;
+
+    tokio::spawn(async move {
+        if let Err(err) = connection.await {
+            warn!(error = %err, "PostgreSQL connection task ended");
+        }
+    });
+
+    Ok(client)
+}
+
 /// Repository for projects.
 pub struct ProjectRepository;
 
@@ -384,10 +400,94 @@ pub struct ParameterRepository;
 impl ParameterRepository {
     /// Create or update parameters.
     #[instrument(skip_all)]
-    pub async fn upsert_batch(_inputs: Vec<CreateParameterInput>) -> Result<usize, PostgresError> {
-        Err(PostgresError::Config(
-            "Database connection not implemented".to_string(),
-        ))
+    pub async fn upsert_batch(inputs: Vec<CreateParameterInput>) -> Result<usize, PostgresError> {
+        if inputs.is_empty() {
+            return Ok(0);
+        }
+
+        let mut client = connect_client().await?;
+        let transaction = client
+            .transaction()
+            .await
+            .map_err(|e| PostgresError::Database(format!("Failed to start transaction: {e}")))?;
+
+        let statement = transaction
+            .prepare(
+                "INSERT INTO parameters
+                    (run_id, name, value_string, value_float, value_int, value_bool, value_json, value_type)
+                 VALUES
+                    ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (run_id, name) DO UPDATE SET
+                    value_string = EXCLUDED.value_string,
+                    value_float = EXCLUDED.value_float,
+                    value_int = EXCLUDED.value_int,
+                    value_bool = EXCLUDED.value_bool,
+                    value_json = EXCLUDED.value_json,
+                    value_type = EXCLUDED.value_type",
+            )
+            .await
+            .map_err(|e| PostgresError::Database(format!("Failed to prepare parameter upsert statement: {e}")))?;
+
+        let mut affected = 0usize;
+        for input in inputs {
+            let (value_string, value_float, value_int, value_bool, value_json, value_type) =
+                match input.value {
+                    ParameterValue::String(value) => {
+                        (Some(value), None, None, None, None, "string".to_string())
+                    }
+                    ParameterValue::Float(value) => {
+                        (None, Some(value), None, None, None, "float".to_string())
+                    }
+                    ParameterValue::Int(value) => {
+                        (None, None, Some(value), None, None, "int".to_string())
+                    }
+                    ParameterValue::Bool(value) => {
+                        (None, None, None, Some(value), None, "bool".to_string())
+                    }
+                    ParameterValue::Json(value) => {
+                        (None, None, None, None, Some(value), "json".to_string())
+                    }
+                };
+
+            transaction
+                .execute(
+                    &statement,
+                    &[
+                        &input.run_id,
+                        &input.name,
+                        &value_string,
+                        &value_float,
+                        &value_int,
+                        &value_bool,
+                        &value_json,
+                        &value_type,
+                    ],
+                )
+                .await
+                .map_err(|e| {
+                    if let Some(code) = e.code() {
+                        if *code == tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION {
+                            return PostgresError::NotFound(format!(
+                                "Run not found in PostgreSQL for parameter upsert: {}",
+                                input.run_id
+                            ));
+                        }
+                    }
+                    PostgresError::Database(format!(
+                        "Failed to upsert parameter '{}' for run '{}': {e}",
+                        input.name, input.run_id
+                    ))
+                })?;
+            affected += 1;
+        }
+
+        transaction.commit().await.map_err(|e| {
+            PostgresError::Database(format!(
+                "Failed to commit parameter upsert transaction: {e}"
+            ))
+        })?;
+
+        Ok(affected)
     }
 
     /// Get parameters for a run.

@@ -29,6 +29,7 @@ serde_json.workspace = true
 # Database
 clickhouse.workspace = true
 rusqlite.workspace = true
+tokio-postgres.workspace = true
 
 # Observability
 tracing.workspace = true
