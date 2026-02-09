@@ -64,6 +64,31 @@ pub struct AppState {
     cardinality_tracker: Arc<CardinalityTracker>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum EndpointRbacTier {
+    Read,
+    Write,
+    Admin,
+}
+
+impl EndpointRbacTier {
+    fn scope(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Admin => "admin",
+        }
+    }
+
+    fn env_flag_name(self) -> &'static str {
+        match self {
+            Self::Read => "MLRUNX_RBAC_READ_ENFORCEMENT_ENABLED",
+            Self::Write => "MLRUNX_RBAC_WRITE_ENFORCEMENT_ENABLED",
+            Self::Admin => "MLRUNX_RBAC_ADMIN_ENFORCEMENT_ENABLED",
+        }
+    }
+}
+
 // =============================================================================
 // HTTP Handlers
 // =============================================================================
@@ -108,6 +133,154 @@ fn env_flag(name: &str) -> bool {
     std::env::var(name).map_or(false, |v| {
         v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
     })
+}
+
+fn env_flag_default(name: &str, default_value: bool) -> bool {
+    std::env::var(name).map_or(default_value, |v| {
+        v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+    })
+}
+
+fn auth_mode_label(auth: &AuthContext) -> &'static str {
+    match auth.auth_mode {
+        AuthMode::ApiKey => "api_key",
+        AuthMode::UiJwt => "ui_jwt",
+    }
+}
+
+fn audit_actor_ids(auth: &AuthContext) -> (Option<String>, Option<String>) {
+    if auth.is_dev_mode {
+        return (None, None);
+    }
+
+    if auth.is_ui_jwt() {
+        let user_id = auth
+            .api_key
+            .id
+            .split_once(':')
+            .map(|(_, value)| value.to_string());
+        (user_id, None)
+    } else {
+        (None, Some(auth.api_key.id.clone()))
+    }
+}
+
+fn should_enforce_scope(auth: &AuthContext, tier: EndpointRbacTier) -> bool {
+    if auth.is_dev_mode {
+        return false;
+    }
+    if !auth.is_ui_jwt() {
+        return true;
+    }
+
+    if !env_flag_default("MLRUNX_RBAC_ENDPOINT_ENFORCEMENT_ENABLED", true) {
+        return false;
+    }
+    env_flag_default(tier.env_flag_name(), true)
+}
+
+async fn emit_audit_event(
+    state: &AppState,
+    auth: Option<&AuthContext>,
+    project_id: Option<&str>,
+    run_id: Option<&str>,
+    action: &str,
+    resource_type: &str,
+    resource_id: Option<&str>,
+    outcome: &str,
+    metadata: serde_json::Value,
+) {
+    let metadata_json = serde_json::to_string(&metadata).ok();
+    let (actor_user_id, actor_key_id) = if let Some(auth) = auth {
+        let (user_id, key_id) = audit_actor_ids(auth);
+        (user_id, key_id)
+    } else {
+        (None, None)
+    };
+
+    if let Err(err) = state
+        .sqlite_store
+        .insert_audit_event(
+            actor_user_id.as_deref(),
+            actor_key_id.as_deref(),
+            project_id,
+            run_id,
+            action,
+            resource_type,
+            resource_id,
+            outcome,
+            metadata_json.as_deref(),
+        )
+        .await
+    {
+        warn!(
+            error = %err,
+            action = %action,
+            outcome = %outcome,
+            "Failed to persist audit event"
+        );
+    }
+}
+
+async fn require_endpoint_access(
+    state: &AppState,
+    auth: &AuthContext,
+    tier: EndpointRbacTier,
+    project_id: Option<&str>,
+    run_id: Option<&str>,
+    action: &str,
+    resource_type: &str,
+    resource_id: Option<&str>,
+) -> Result<(), (StatusCode, String)> {
+    let scope = tier.scope();
+    let scope_enforced = should_enforce_scope(auth, tier);
+
+    if scope_enforced {
+        if let Err((status, message)) = auth.require_scope(scope) {
+            emit_audit_event(
+                state,
+                Some(auth),
+                project_id,
+                run_id,
+                action,
+                resource_type,
+                resource_id,
+                "denied",
+                serde_json::json!({
+                    "reason": "scope_denied",
+                    "required_scope": scope,
+                    "auth_mode": auth_mode_label(auth),
+                }),
+            )
+            .await;
+            return Err((status, message));
+        }
+    }
+
+    if let Some(project_id) = project_id {
+        if let Err((status, message)) = auth.require_project_access(project_id) {
+            emit_audit_event(
+                state,
+                Some(auth),
+                Some(project_id),
+                run_id,
+                action,
+                resource_type,
+                resource_id,
+                "denied",
+                serde_json::json!({
+                    "reason": "project_access_denied",
+                    "required_scope": scope,
+                    "scope_enforced": scope_enforced,
+                    "auth_mode": auth_mode_label(auth),
+                }),
+            )
+            .await;
+            return Err((status, message));
+        }
+    }
+
+    Ok(())
 }
 
 fn extract_cookie(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
@@ -361,7 +534,17 @@ async fn http_init_run(
     {
         // Verify the caller can access this existing run's project with write scope
         if let Ok(existing_project) = state.sqlite_store.get_run_project_id(&run_id).await {
-            auth.require_access(&existing_project, "write")?;
+            require_endpoint_access(
+                &state,
+                &auth,
+                EndpointRbacTier::Write,
+                Some(&existing_project),
+                Some(&run_id),
+                "run.init",
+                "run",
+                Some(&run_id),
+            )
+            .await?;
         }
         return Ok(Json(InitRunHttpResponse {
             run_id,
@@ -377,7 +560,17 @@ async fn http_init_run(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Enforce project scope and write permission
-    auth.require_access(&project_id, "write")?;
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Write,
+        Some(&project_id),
+        Some(&run_id),
+        "run.init",
+        "run",
+        Some(&run_id),
+    )
+    .await?;
 
     // Create run in SQLite
     state
@@ -415,6 +608,22 @@ async fn http_init_run(
     runs.insert(run_id.clone(), run_state);
 
     info!(run_id = %run_id, project = %req.project, "HTTP: Initialized run (SQLite)");
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        Some(&project_id),
+        Some(&run_id),
+        "run.init",
+        "run",
+        Some(&run_id),
+        "success",
+        serde_json::json!({
+            "project_name": req.project,
+            "source": "http_init_run",
+        }),
+    )
+    .await;
 
     Ok(Json(InitRunHttpResponse {
         run_id,
@@ -486,7 +695,17 @@ async fn http_ingest_batch(
 ) -> Result<Json<IngestBatchHttpResponse>, (StatusCode, String)> {
     // Verify the caller can access the run's project and has write scope
     if let Ok(run_project) = state.sqlite_store.get_run_project_id(&req.run_id).await {
-        auth.require_access(&run_project, "write")?;
+        require_endpoint_access(
+            &state,
+            &auth,
+            EndpointRbacTier::Write,
+            Some(&run_project),
+            Some(&req.run_id),
+            "run.ingest",
+            "run",
+            Some(&req.run_id),
+        )
+        .await?;
     }
     // Generate batch_id if not provided
     let batch_id = req
@@ -782,7 +1001,17 @@ async fn http_finish_run(
         .get_run_project_id(&run_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
-    auth.require_access(&run_project, "write")?;
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Write,
+        Some(&run_project),
+        Some(&run_id),
+        "run.finish",
+        "run",
+        Some(&run_id),
+    )
+    .await?;
 
     // Update in SQLite
     state
@@ -804,6 +1033,21 @@ async fn http_finish_run(
     }
 
     info!(run_id = %run_id, status = %req.status, "HTTP: Finished run (SQLite)");
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        Some(&run_project),
+        Some(&run_id),
+        "run.finish",
+        "run",
+        Some(&run_id),
+        "success",
+        serde_json::json!({
+            "status": req.status,
+        }),
+    )
+    .await;
 
     Ok(Json(FinishRunHttpResponse {
         status: "ok".to_string(),
@@ -831,7 +1075,17 @@ async fn http_delete_run(
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         })?;
-    auth.require_access(&run_project, "admin")?;
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Admin,
+        Some(&run_project),
+        Some(&run_id),
+        "run.delete",
+        "run",
+        Some(&run_id),
+    )
+    .await?;
 
     // Delete from SQLite (cascades to metrics, tags, params, batches)
     state
@@ -848,6 +1102,19 @@ async fn http_delete_run(
     state.store.metrics.write().await.remove(&run_id);
 
     info!(run_id = %run_id, "HTTP: Deleted run");
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        Some(&run_project),
+        Some(&run_id),
+        "run.delete",
+        "run",
+        Some(&run_id),
+        "success",
+        serde_json::json!({}),
+    )
+    .await;
 
     Ok(Json(DeleteRunHttpResponse {
         status: "ok".to_string(),
@@ -912,6 +1179,20 @@ async fn http_create_key(
     Json(req): Json<CreateKeyRequest>,
 ) -> Result<Json<CreateKeyResponse>, (StatusCode, String)> {
     if auth.is_ui_jwt() {
+        emit_audit_event(
+            &state,
+            Some(&auth),
+            req.project_id.as_deref(),
+            None,
+            "api_key.create",
+            "api_key",
+            None,
+            "denied",
+            serde_json::json!({
+                "reason": "ui_jwt_key_management_disabled",
+            }),
+        )
+        .await;
         return Err((
             StatusCode::FORBIDDEN,
             "API key management via UI JWT auth is disabled in this phase. Use API key auth for key management.".to_string(),
@@ -919,7 +1200,17 @@ async fn http_create_key(
     }
 
     // Only admin can create keys
-    auth.require_scope("admin")?;
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Admin,
+        None,
+        None,
+        "api_key.create",
+        "api_key",
+        None,
+    )
+    .await?;
 
     // Validate scopes
     let valid_scopes = ["admin", "write", "read"];
@@ -954,6 +1245,21 @@ async fn http_create_key(
         "Created new API key"
     );
 
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        key.project_id.as_deref(),
+        None,
+        "api_key.create",
+        "api_key",
+        Some(&key.id),
+        "success",
+        serde_json::json!({
+            "scopes": key.scopes.clone(),
+        }),
+    )
+    .await;
+
     Ok(Json(CreateKeyResponse {
         api_key: raw_key,
         key_id: key.id,
@@ -970,13 +1276,37 @@ async fn http_list_keys(
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<ListKeysResponse>, (StatusCode, String)> {
     if auth.is_ui_jwt() {
+        emit_audit_event(
+            &state,
+            Some(&auth),
+            None,
+            None,
+            "api_key.list",
+            "api_key",
+            None,
+            "denied",
+            serde_json::json!({
+                "reason": "ui_jwt_key_management_disabled",
+            }),
+        )
+        .await;
         return Err((
             StatusCode::FORBIDDEN,
             "API key management via UI JWT auth is disabled in this phase. Use API key auth for key management.".to_string(),
         ));
     }
 
-    auth.require_scope("admin")?;
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Admin,
+        None,
+        None,
+        "api_key.list",
+        "api_key",
+        None,
+    )
+    .await?;
 
     let project_filter = auth.project_id();
     let keys = state.key_store.list_keys(project_filter).await;
@@ -1021,13 +1351,37 @@ async fn http_revoke_key(
     axum::extract::Path(key_id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     if auth.is_ui_jwt() {
+        emit_audit_event(
+            &state,
+            Some(&auth),
+            None,
+            None,
+            "api_key.revoke",
+            "api_key",
+            Some(&key_id),
+            "denied",
+            serde_json::json!({
+                "reason": "ui_jwt_key_management_disabled",
+            }),
+        )
+        .await;
         return Err((
             StatusCode::FORBIDDEN,
             "API key management via UI JWT auth is disabled in this phase. Use API key auth for key management.".to_string(),
         ));
     }
 
-    auth.require_scope("admin")?;
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Admin,
+        None,
+        None,
+        "api_key.revoke",
+        "api_key",
+        Some(&key_id),
+    )
+    .await?;
 
     // Find the key by id and get its hash for revocation
     let keys = state.key_store.list_keys(None).await;
@@ -1037,6 +1391,18 @@ async fn http_revoke_key(
         Some(key) => {
             state.key_store.revoke_key(&key.key_hash).await;
             info!(key_id = %key_id, key_prefix = %key.key_prefix, "Revoked API key");
+            emit_audit_event(
+                &state,
+                Some(&auth),
+                key.project_id.as_deref(),
+                None,
+                "api_key.revoke",
+                "api_key",
+                Some(&key_id),
+                "success",
+                serde_json::json!({}),
+            )
+            .await;
             Ok(Json(
                 serde_json::json!({ "status": "ok", "revoked": key_id }),
             ))
@@ -1097,7 +1463,17 @@ async fn http_create_share_token(
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         })?;
-    auth.require_access(&run_project, "read")?;
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Read,
+        Some(&run_project),
+        Some(&run_id),
+        "share_token.create",
+        "run",
+        Some(&run_id),
+    )
+    .await?;
 
     // Generate a short, URL-safe token
     let token = generate_share_token();
@@ -1120,6 +1496,21 @@ async fn http_create_share_token(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     info!(run_id = %run_id, "Created share token");
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        Some(&run_project),
+        Some(&run_id),
+        "share_token.create",
+        "share_token",
+        Some(&token),
+        "success",
+        serde_json::json!({
+            "expires_at": expires_at.clone(),
+        }),
+    )
+    .await;
 
     Ok(Json(CreateShareResponse {
         share_url: format!("/api/v1/shared/{}", token),
@@ -1259,7 +1650,17 @@ async fn http_revoke_share_token(
         .get_run_project_id(&run_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
-    auth.require_access(&run_project, "read")?;
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Read,
+        Some(&run_project),
+        Some(&run_id),
+        "share_token.revoke",
+        "share_token",
+        Some(&token),
+    )
+    .await?;
 
     state
         .sqlite_store
@@ -1271,6 +1672,19 @@ async fn http_revoke_share_token(
         })?;
 
     info!(run_id = %run_id, "Revoked share token");
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        Some(&run_project),
+        Some(&run_id),
+        "share_token.revoke",
+        "share_token",
+        Some(&token),
+        "success",
+        serde_json::json!({}),
+    )
+    .await;
 
     Ok(Json(
         serde_json::json!({ "status": "ok", "revoked": token }),
@@ -1342,8 +1756,18 @@ async fn http_list_runs(
     Extension(auth): Extension<AuthContext>,
     axum::extract::Query(query): axum::extract::Query<ListRunsQuery>,
 ) -> Result<Json<ListRunsResponse>, (StatusCode, String)> {
-    // Require at least read scope
-    auth.require_scope("read")?;
+    // Require at least read scope (feature-flagged for UI JWT mode).
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Read,
+        None,
+        None,
+        "runs.list",
+        "run",
+        None,
+    )
+    .await?;
 
     let limit = query.limit.unwrap_or(100).min(1000);
     let offset = query.offset.unwrap_or(0);
@@ -1354,6 +1778,20 @@ async fn http_list_runs(
     let effective_project = if let Some(allowed_projects) = auth.allowed_project_ids() {
         if let Some(ref requested) = query.project {
             if !allowed_projects.contains(requested) {
+                emit_audit_event(
+                    &state,
+                    Some(&auth),
+                    Some(requested),
+                    None,
+                    "runs.list",
+                    "run",
+                    None,
+                    "denied",
+                    serde_json::json!({
+                        "reason": "project_membership_mismatch",
+                    }),
+                )
+                .await;
                 return Err((
                     StatusCode::FORBIDDEN,
                     format!(
@@ -1377,6 +1815,21 @@ async fn http_list_runs(
                 // If caller also passed a ?project= filter, verify it matches their scope.
                 if let Some(ref requested) = query.project {
                     if requested != scoped_project {
+                        emit_audit_event(
+                            &state,
+                            Some(&auth),
+                            Some(requested),
+                            None,
+                            "runs.list",
+                            "run",
+                            None,
+                            "denied",
+                            serde_json::json!({
+                                "reason": "api_key_project_scope_mismatch",
+                                "scoped_project": scoped_project,
+                            }),
+                        )
+                        .await;
                         return Err((
                             StatusCode::FORBIDDEN,
                             format!(
@@ -1480,7 +1933,17 @@ async fn http_get_run(
         })?;
 
     // Verify the caller can access this run's project and has read scope
-    auth.require_access(&run.project_id, "read")?;
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Read,
+        Some(&run.project_id),
+        Some(&run_id),
+        "run.read",
+        "run",
+        Some(&run_id),
+    )
+    .await?;
 
     let tags = state
         .sqlite_store
@@ -1544,7 +2007,17 @@ async fn http_get_metrics(
         .get_run_project_id(&run_id)
         .await
         .map_err(|_| (StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)))?;
-    auth.require_access(&run_project, "read")?;
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Read,
+        Some(&run_project),
+        Some(&run_id),
+        "run.metrics.read",
+        "run",
+        Some(&run_id),
+    )
+    .await?;
 
     // Parse metric names
     let names: Vec<String> = if query.names.is_empty() {
@@ -1678,7 +2151,17 @@ async fn http_compare_runs(
             })?;
 
         // Verify the caller can access this run's project and has read scope
-        auth.require_access(&run.project_id, "read")?;
+        require_endpoint_access(
+            &state,
+            &auth,
+            EndpointRbacTier::Read,
+            Some(&run.project_id),
+            Some(run_id),
+            "runs.compare",
+            "run",
+            Some(run_id),
+        )
+        .await?;
 
         let names = if req.metric_names.is_empty() {
             vec![]
