@@ -9,6 +9,7 @@ const SERVER_API_BASE_URL = process.env.MLRUNX_API_URL || DEFAULT_API_BASE_URL;
 
 export const API_KEY_STORAGE_KEY = 'mlrunx_api_key';
 export const API_URL_STORAGE_KEY = 'mlrunx_api_url';
+export const SESSION_JWT_STORAGE_KEY = 'mlrunx_session_jwt';
 export const DEFAULT_API_URL = DEFAULT_API_BASE_URL;
 
 export interface Run {
@@ -82,6 +83,7 @@ class ApiError extends Error {
 export interface StoredApiConfig {
   apiBaseUrl: string;
   apiKey: string;
+  sessionJwt: string;
 }
 
 function normalizeApiBaseUrl(value: string): string {
@@ -120,9 +122,11 @@ function removeStorage(key: string) {
 export function getStoredApiConfig(): StoredApiConfig {
   const storedBaseUrl = readStorage(API_URL_STORAGE_KEY);
   const storedApiKey = readStorage(API_KEY_STORAGE_KEY);
+  const storedSessionJwt = readStorage(SESSION_JWT_STORAGE_KEY);
   return {
     apiBaseUrl: normalizeApiBaseUrl(storedBaseUrl || DEFAULT_API_BASE_URL),
     apiKey: storedApiKey || '',
+    sessionJwt: storedSessionJwt || '',
   };
 }
 
@@ -138,11 +142,20 @@ export function saveStoredApiConfig(config: Partial<StoredApiConfig>) {
       removeStorage(API_KEY_STORAGE_KEY);
     }
   }
+  if (config.sessionJwt !== undefined) {
+    const trimmedToken = config.sessionJwt.trim();
+    if (trimmedToken) {
+      writeStorage(SESSION_JWT_STORAGE_KEY, trimmedToken);
+    } else {
+      removeStorage(SESSION_JWT_STORAGE_KEY);
+    }
+  }
 }
 
 export function clearStoredApiConfig() {
   removeStorage(API_KEY_STORAGE_KEY);
   removeStorage(API_URL_STORAGE_KEY);
+  removeStorage(SESSION_JWT_STORAGE_KEY);
 }
 
 function getApiBaseUrl(): string {
@@ -160,6 +173,11 @@ function getApiKey(): string | undefined {
   return process.env.MLRUNX_API_KEY;
 }
 
+function getSessionJwt(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  return readStorage(SESSION_JWT_STORAGE_KEY) || undefined;
+}
+
 async function fetchApi<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -170,10 +188,13 @@ async function fetchApi<T>(
     ...(options.headers || {}),
   };
 
-  // Add API key if available
+  // Prefer JWT/session token when configured; fallback to API key.
+  const sessionJwt = getSessionJwt();
   const apiKey = getApiKey();
 
-  if (apiKey) {
+  if (sessionJwt) {
+    (headers as Record<string, string>)['Authorization'] = `Bearer ${sessionJwt}`;
+  } else if (apiKey) {
     (headers as Record<string, string>)['X-API-Key'] = apiKey;
   }
 

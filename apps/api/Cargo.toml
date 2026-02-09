@@ -52,6 +52,7 @@ sha2.workspace = true
 hex.workspace = true
 rand.workspace = true
 base64 = "0.22.1"
+jsonwebtoken = "9.3.0"
 
 [dev-dependencies]
 axum = { workspace = true }

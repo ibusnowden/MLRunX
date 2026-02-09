@@ -2,7 +2,7 @@
 //!
 //! Provides API key authentication middleware and key management.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -12,11 +12,13 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use crate::storage::{ApiKeyRow, SqliteStore};
+use crate::storage::{ApiKeyRow, ProjectMembershipRow, SqliteStore};
 
 /// An API key entry stored in the system.
 #[derive(Debug, Clone)]
@@ -67,13 +69,50 @@ impl ApiKey {
     }
 }
 
+#[derive(Debug, Clone)]
+struct UiJwtConfig {
+    enabled: bool,
+    secret: Option<String>,
+    issuer: Option<String>,
+    audience: Option<String>,
+    provider: String,
+}
+
+impl UiJwtConfig {
+    fn from_env() -> Self {
+        Self {
+            enabled: env_flag("MLRUNX_UI_JWT_AUTH_ENABLED"),
+            secret: std::env::var("MLRUNX_JWT_SECRET")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            issuer: std::env::var("MLRUNX_JWT_ISSUER")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            audience: std::env::var("MLRUNX_JWT_AUDIENCE")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            provider: std::env::var("MLRUNX_JWT_PROVIDER")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| "jwt".to_string()),
+        }
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).map_or(false, |v| {
+        v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+    })
+}
+
 /// API key store with optional SQLite persistence.
-#[derive(Default)]
 pub struct ApiKeyStore {
     /// Map from key_hash to ApiKey
     keys: RwLock<HashMap<String, ApiKey>>,
     /// Optional durable backing store.
     sqlite_store: Option<Arc<SqliteStore>>,
+    /// UI JWT auth configuration (feature-flagged).
+    ui_jwt: UiJwtConfig,
     /// Whether auth is disabled (for dev/testing)
     pub auth_disabled: std::sync::atomic::AtomicBool,
 }
@@ -84,6 +123,7 @@ impl ApiKeyStore {
         Self {
             keys: RwLock::new(HashMap::new()),
             sqlite_store: None,
+            ui_jwt: UiJwtConfig::from_env(),
             auth_disabled: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -93,6 +133,7 @@ impl ApiKeyStore {
         Self {
             keys: RwLock::new(HashMap::new()),
             sqlite_store: Some(sqlite_store),
+            ui_jwt: UiJwtConfig::from_env(),
             auth_disabled: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -102,8 +143,29 @@ impl ApiKeyStore {
         Self {
             keys: RwLock::new(HashMap::new()),
             sqlite_store: None,
+            ui_jwt: UiJwtConfig::from_env(),
             auth_disabled: std::sync::atomic::AtomicBool::new(true),
         }
+    }
+
+    #[cfg(test)]
+    pub fn new_with_sqlite_and_ui_jwt(sqlite_store: Arc<SqliteStore>, jwt_secret: &str) -> Self {
+        Self {
+            keys: RwLock::new(HashMap::new()),
+            sqlite_store: Some(sqlite_store),
+            ui_jwt: UiJwtConfig {
+                enabled: true,
+                secret: Some(jwt_secret.to_string()),
+                issuer: None,
+                audience: None,
+                provider: "jwt".to_string(),
+            },
+            auth_disabled: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    pub fn is_ui_jwt_enabled(&self) -> bool {
+        self.ui_jwt.enabled
     }
 
     /// Check if auth is disabled.
@@ -114,6 +176,16 @@ impl ApiKeyStore {
 
     /// Initialize the store with bootstrap keys from environment.
     pub async fn init_from_env(&self) {
+        if self.ui_jwt.enabled {
+            if self.ui_jwt.secret.is_some() {
+                info!("UI JWT auth enabled (feature-flagged)");
+            } else {
+                warn!(
+                    "MLRUNX_UI_JWT_AUTH_ENABLED is set but MLRUNX_JWT_SECRET is missing; JWT auth path will reject tokens"
+                );
+            }
+        }
+
         // Check for dev mode (no auth required)
         if std::env::var("MLRUNX_AUTH_DISABLED").map_or(false, |v| v == "true" || v == "1") {
             self.auth_disabled
@@ -303,6 +375,119 @@ impl ApiKeyStore {
             .collect()
     }
 
+    async fn authenticate_ui_jwt(
+        &self,
+        raw_token: &str,
+    ) -> Result<(ApiKey, HashSet<String>), String> {
+        if !self.ui_jwt.enabled {
+            return Err("UI JWT auth is disabled.".to_string());
+        }
+
+        let claims = self.decode_ui_jwt_claims(raw_token)?;
+        let sqlite_store = self
+            .sqlite_store
+            .as_ref()
+            .ok_or_else(|| "SQLite-backed auth store is required for UI JWT auth.".to_string())?;
+
+        let user_id = sqlite_store
+            .get_or_create_user_identity(
+                &self.ui_jwt.provider,
+                &claims.sub,
+                claims.email.as_deref(),
+                claims.name.as_deref(),
+            )
+            .await
+            .map_err(|e| format!("Failed to resolve JWT user identity: {e}"))?;
+
+        let memberships = sqlite_store
+            .list_active_project_memberships(&user_id)
+            .await
+            .map_err(|e| format!("Failed to load project memberships: {e}"))?;
+
+        if memberships.is_empty() {
+            return Err("No active project memberships found for this user.".to_string());
+        }
+
+        let (mut scopes, allowed_projects) = Self::derive_scopes_and_projects(&memberships);
+        scopes.sort();
+
+        let now = SystemTime::now();
+        let key_prefix = format!("jwt_{}", user_id.chars().take(6).collect::<String>());
+        let api_key = ApiKey {
+            id: format!("jwt:{user_id}"),
+            key_hash: format!("jwt:{user_id}"),
+            key_prefix,
+            project_id: None,
+            name: claims.email.or(claims.name),
+            scopes,
+            created_at: now,
+            last_used_at: Some(now),
+            revoked_at: None,
+        };
+
+        Ok((api_key, allowed_projects))
+    }
+
+    fn decode_ui_jwt_claims(&self, raw_token: &str) -> Result<UiJwtClaims, String> {
+        let secret = self
+            .ui_jwt
+            .secret
+            .as_ref()
+            .ok_or_else(|| "MLRUNX_JWT_SECRET is not configured.".to_string())?;
+
+        let mut validation = Validation::new(Algorithm::HS256);
+        if let Some(ref issuer) = self.ui_jwt.issuer {
+            validation.set_issuer(&[issuer.clone()]);
+        }
+        if let Some(ref audience) = self.ui_jwt.audience {
+            validation.set_audience(&[audience.clone()]);
+        } else {
+            validation.validate_aud = false;
+        }
+
+        let token_data = decode::<UiJwtClaims>(
+            raw_token,
+            &DecodingKey::from_secret(secret.as_bytes()),
+            &validation,
+        )
+        .map_err(|e| format!("Invalid JWT token: {e}"))?;
+
+        if token_data.claims.sub.trim().is_empty() {
+            return Err("JWT token subject is empty.".to_string());
+        }
+
+        Ok(token_data.claims)
+    }
+
+    fn derive_scopes_and_projects(
+        memberships: &[ProjectMembershipRow],
+    ) -> (Vec<String>, HashSet<String>) {
+        let mut scopes: HashSet<String> = HashSet::new();
+        let mut allowed_projects: HashSet<String> = HashSet::new();
+
+        for membership in memberships {
+            allowed_projects.insert(membership.project_id.clone());
+
+            match membership.role.as_str() {
+                "owner" => {
+                    scopes.insert("read".to_string());
+                    scopes.insert("write".to_string());
+                    scopes.insert("admin".to_string());
+                }
+                "editor" => {
+                    scopes.insert("read".to_string());
+                    scopes.insert("write".to_string());
+                }
+                "viewer" => {
+                    scopes.insert("read".to_string());
+                }
+                _ => {}
+            }
+        }
+
+        (scopes.into_iter().collect(), allowed_projects)
+    }
+
     fn api_key_from_row(row: ApiKeyRow) -> ApiKey {
         let scopes = serde_json::from_str::<Vec<String>>(&row.scopes_json).unwrap_or_default();
 
@@ -332,6 +517,15 @@ fn parse_sqlite_datetime(value: &str) -> Option<SystemTime> {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct UiJwtClaims {
+    sub: String,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default, alias = "display_name")]
+    name: Option<String>,
+}
+
 /// Hash an API key using SHA-256.
 pub fn hash_api_key(key: &str) -> String {
     let mut hasher = Sha256::new();
@@ -354,6 +548,16 @@ pub struct AuthContext {
     pub api_key: ApiKey,
     /// Whether authentication is bypassed (dev mode)
     pub is_dev_mode: bool,
+    /// Optional set of project memberships (used by JWT user auth path).
+    allowed_project_ids: Option<HashSet<String>>,
+    /// Source auth mode.
+    pub auth_mode: AuthMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    ApiKey,
+    UiJwt,
 }
 
 impl AuthContext {
@@ -372,17 +576,36 @@ impl AuthContext {
                 revoked_at: None,
             },
             is_dev_mode: true,
+            allowed_project_ids: None,
+            auth_mode: AuthMode::ApiKey,
         }
     }
 
     /// Get the project_id this key is scoped to (None = global/admin).
     pub fn project_id(&self) -> Option<&str> {
+        if let Some(allowed_projects) = &self.allowed_project_ids {
+            if allowed_projects.len() == 1 {
+                return allowed_projects.iter().next().map(|p| p.as_str());
+            }
+            return None;
+        }
         self.api_key.project_id.as_deref()
     }
 
     /// Returns true if this context has global access (dev mode or admin with no project scope).
     pub fn is_global(&self) -> bool {
-        self.is_dev_mode || self.api_key.project_id.is_none()
+        self.is_dev_mode
+            || (self.allowed_project_ids.is_none() && self.api_key.project_id.is_none())
+    }
+
+    /// Returns the set of allowed projects for JWT user auth mode.
+    pub fn allowed_project_ids(&self) -> Option<&HashSet<String>> {
+        self.allowed_project_ids.as_ref()
+    }
+
+    /// Returns true when request authenticated via UI JWT path.
+    pub fn is_ui_jwt(&self) -> bool {
+        self.auth_mode == AuthMode::UiJwt
     }
 
     /// Check if the caller can access a specific project's resources.
@@ -391,6 +614,17 @@ impl AuthContext {
         if self.is_global() {
             return Ok(());
         }
+
+        if let Some(allowed_projects) = &self.allowed_project_ids {
+            if allowed_projects.contains(run_project_id) {
+                return Ok(());
+            }
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Access denied: this user cannot access runs in this project.".to_string(),
+            ));
+        }
+
         if self.api_key.can_access_project(run_project_id) {
             return Ok(());
         }
@@ -456,34 +690,46 @@ impl AuthError {
     pub fn message(&self) -> &'static str {
         match self {
             AuthError::MissingKey => {
-                "API key required. Use Authorization: Bearer <key> or X-API-Key header."
+                "Authentication required. Use X-API-Key or Authorization: Bearer <token>."
             }
-            AuthError::InvalidKey => "Invalid API key.",
+            AuthError::InvalidKey => "Invalid API key or JWT token.",
             AuthError::InsufficientScope => "Insufficient permissions.",
             AuthError::ProjectAccessDenied => "Access to project denied.",
         }
     }
 }
 
-/// Extract API key from request headers.
-pub fn extract_api_key_from_headers(parts: &Parts) -> Option<String> {
-    // Try Authorization: Bearer <key>
-    if let Some(auth_header) = parts.headers.get("authorization") {
-        if let Ok(auth_str) = auth_header.to_str() {
-            if let Some(key) = auth_str.strip_prefix("Bearer ") {
-                return Some(key.trim().to_string());
+enum RequestCredential {
+    ApiKey(String),
+    Bearer(String),
+    Missing,
+}
+
+/// Extract auth credential from request headers.
+fn extract_request_credential(parts: &Parts) -> RequestCredential {
+    // Prefer explicit X-API-Key for SDK/service callers.
+    if let Some(key_header) = parts.headers.get("x-api-key") {
+        if let Ok(key_str) = key_header.to_str() {
+            let value = key_str.trim();
+            if !value.is_empty() {
+                return RequestCredential::ApiKey(value.to_string());
             }
         }
     }
 
-    // Try X-API-Key header
-    if let Some(key_header) = parts.headers.get("x-api-key") {
-        if let Ok(key_str) = key_header.to_str() {
-            return Some(key_str.trim().to_string());
+    // Fallback to Authorization: Bearer <token>.
+    if let Some(auth_header) = parts.headers.get("authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                let value = token.trim();
+                if !value.is_empty() {
+                    return RequestCredential::Bearer(value.to_string());
+                }
+            }
         }
     }
 
-    None
+    RequestCredential::Missing
 }
 
 /// Middleware for API key authentication.
@@ -502,37 +748,68 @@ pub async fn auth_middleware(
     // Extract API key from headers
     let raw_key = {
         let (parts, body) = request.into_parts();
-        let key = extract_api_key_from_headers(&parts);
+        let key = extract_request_credential(&parts);
         request = Request::from_parts(parts, body);
         key
     };
 
-    let raw_key = raw_key.ok_or_else(|| {
-        (
-            AuthError::MissingKey.status_code(),
-            AuthError::MissingKey.message().to_string(),
-        )
-    })?;
-
-    // Validate the key
-    let api_key = key_store.validate_key(&raw_key).await.ok_or_else(|| {
-        warn!(key_prefix = %raw_key.chars().take(8).collect::<String>(), "Invalid API key");
-        (
-            AuthError::InvalidKey.status_code(),
-            AuthError::InvalidKey.message().to_string(),
-        )
-    })?;
+    let (api_key, auth_mode, allowed_project_ids) = match raw_key {
+        RequestCredential::Missing => {
+            return Err((
+                AuthError::MissingKey.status_code(),
+                AuthError::MissingKey.message().to_string(),
+            ));
+        }
+        RequestCredential::ApiKey(raw_key) => {
+            let api_key = key_store.validate_key(&raw_key).await.ok_or_else(|| {
+                warn!(key_prefix = %raw_key.chars().take(8).collect::<String>(), "Invalid API key");
+                (
+                    AuthError::InvalidKey.status_code(),
+                    AuthError::InvalidKey.message().to_string(),
+                )
+            })?;
+            (api_key, AuthMode::ApiKey, None)
+        }
+        RequestCredential::Bearer(raw_token) => {
+            // Preserve existing SDK compatibility: first treat Bearer as API key.
+            if let Some(api_key) = key_store.validate_key(&raw_token).await {
+                (api_key, AuthMode::ApiKey, None)
+            } else if key_store.is_ui_jwt_enabled() {
+                match key_store.authenticate_ui_jwt(&raw_token).await {
+                    Ok((api_key, allowed_projects)) => {
+                        (api_key, AuthMode::UiJwt, Some(allowed_projects))
+                    }
+                    Err(err) => {
+                        warn!("Invalid UI JWT token: {err}");
+                        return Err((
+                            AuthError::InvalidKey.status_code(),
+                            AuthError::InvalidKey.message().to_string(),
+                        ));
+                    }
+                }
+            } else {
+                warn!(key_prefix = %raw_token.chars().take(8).collect::<String>(), "Invalid API key");
+                return Err((
+                    AuthError::InvalidKey.status_code(),
+                    AuthError::InvalidKey.message().to_string(),
+                ));
+            }
+        }
+    };
 
     debug!(
         key_prefix = %api_key.key_prefix,
         project_id = ?api_key.project_id,
-        "Authenticated request"
+        auth_mode = ?auth_mode,
+        "Authenticated request",
     );
 
     // Insert auth context into request extensions
     request.extensions_mut().insert(AuthContext {
         api_key,
         is_dev_mode: false,
+        allowed_project_ids,
+        auth_mode,
     });
 
     Ok(next.run(request).await)
@@ -547,7 +824,17 @@ pub fn get_auth_context(extensions: &axum::http::Extensions) -> Option<&AuthCont
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonwebtoken::{EncodingKey, Header, encode};
+    use serde::Serialize;
     use std::sync::Arc;
+
+    #[derive(Debug, Serialize)]
+    struct TestJwtClaims {
+        sub: String,
+        email: Option<String>,
+        name: Option<String>,
+        exp: usize,
+    }
 
     #[test]
     fn test_hash_api_key() {
@@ -659,6 +946,82 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+    }
+
+    #[tokio::test]
+    async fn test_ui_jwt_auth_maps_memberships_to_scopes() {
+        let sqlite_store = Arc::new(SqliteStore::new(":memory:").await.unwrap());
+        let project_a = sqlite_store.get_or_create_project("proj-a").await.unwrap();
+        let project_b = sqlite_store.get_or_create_project("proj-b").await.unwrap();
+
+        let store = ApiKeyStore::new_with_sqlite_and_ui_jwt(sqlite_store.clone(), "test-secret");
+
+        let user_id = sqlite_store
+            .get_or_create_user_identity(
+                "jwt",
+                "user-subject",
+                Some("jwt@example.com"),
+                Some("JWT User"),
+            )
+            .await
+            .unwrap();
+        sqlite_store
+            .grant_project_membership(&project_a, &user_id, "viewer", None)
+            .await
+            .unwrap();
+        sqlite_store
+            .grant_project_membership(&project_b, &user_id, "editor", None)
+            .await
+            .unwrap();
+
+        let claims = TestJwtClaims {
+            sub: "user-subject".to_string(),
+            email: Some("jwt@example.com".to_string()),
+            name: Some("JWT User".to_string()),
+            exp: (chrono::Utc::now().timestamp() + 3600) as usize,
+        };
+        let token = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret("test-secret".as_bytes()),
+        )
+        .unwrap();
+
+        let (api_key, allowed_projects) = store.authenticate_ui_jwt(&token).await.unwrap();
+
+        assert!(allowed_projects.contains(&project_a));
+        assert!(allowed_projects.contains(&project_b));
+        assert!(api_key.scopes.contains(&"read".to_string()));
+        assert!(api_key.scopes.contains(&"write".to_string()));
+        assert!(!api_key.scopes.contains(&"admin".to_string()));
+    }
+
+    #[test]
+    fn test_auth_context_project_access_for_ui_jwt() {
+        let mut allowed = HashSet::new();
+        allowed.insert("project-a".to_string());
+        allowed.insert("project-b".to_string());
+
+        let ctx = AuthContext {
+            api_key: ApiKey {
+                id: "jwt:user".to_string(),
+                key_hash: "jwt:user".to_string(),
+                key_prefix: "jwt_user".to_string(),
+                project_id: None,
+                name: Some("JWT User".to_string()),
+                scopes: vec!["read".to_string()],
+                created_at: SystemTime::now(),
+                last_used_at: None,
+                revoked_at: None,
+            },
+            is_dev_mode: false,
+            allowed_project_ids: Some(allowed),
+            auth_mode: AuthMode::UiJwt,
+        };
+
+        assert!(ctx.require_project_access("project-a").is_ok());
+        assert!(ctx.require_project_access("project-b").is_ok());
+        assert!(ctx.require_project_access("project-c").is_err());
     }
 
     #[test]
