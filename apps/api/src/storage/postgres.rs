@@ -49,8 +49,9 @@ impl PostgresConfig {
     /// Create config from environment variables.
     pub fn from_env() -> Self {
         Self {
-            url: std::env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgres://mlrunx:mlrunx_dev@localhost:5432/mlrunx".to_string()),
+            url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+                "postgres://mlrunx:mlrunx_dev@localhost:5432/mlrunx".to_string()
+            }),
             max_connections: std::env::var("PG_MAX_CONNECTIONS")
                 .ok()
                 .and_then(|s| s.parse().ok())

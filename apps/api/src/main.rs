@@ -49,7 +49,7 @@ use services::{
     CardinalityTracker, IdempotencyResult, IdempotencyStore, IngestServiceImpl, MetricPayload,
     ParamPayload, TagPayload, compute_payload_hash, ingest::InMemoryStore,
 };
-use storage::{SqliteStore, MetricRow};
+use storage::{MetricRow, SqliteStore};
 
 /// Application state shared across handlers.
 #[derive(Clone)]
@@ -101,7 +101,12 @@ async fn http_init_run(
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
 
     // Check if run exists in SQLite (idempotent)
-    if state.sqlite_store.run_exists(&run_id).await.unwrap_or(false) {
+    if state
+        .sqlite_store
+        .run_exists(&run_id)
+        .await
+        .unwrap_or(false)
+    {
         // Verify the caller can access this existing run's project with write scope
         if let Ok(existing_project) = state.sqlite_store.get_run_project_id(&run_id).await {
             auth.require_access(&existing_project, "write")?;
@@ -113,7 +118,8 @@ async fn http_init_run(
     }
 
     // Get or create project in SQLite
-    let project_id = state.sqlite_store
+    let project_id = state
+        .sqlite_store
         .get_or_create_project(&req.project)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -122,17 +128,18 @@ async fn http_init_run(
     auth.require_access(&project_id, "write")?;
 
     // Create run in SQLite
-    state.sqlite_store
+    state
+        .sqlite_store
         .create_run(&run_id, &project_id, req.name.as_deref())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Set initial tags if provided
     if let Some(tags) = &req.tags {
-        let tag_pairs: Vec<(String, String)> = tags.iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        state.sqlite_store
+        let tag_pairs: Vec<(String, String)> =
+            tags.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        state
+            .sqlite_store
             .set_tags(&run_id, &tag_pairs)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -391,7 +398,8 @@ async fn http_ingest_batch(
 
     // Persist metrics to SQLite
     if accepted_metric_count > 0 {
-        let sqlite_metrics: Vec<MetricRow> = req.metrics
+        let sqlite_metrics: Vec<MetricRow> = req
+            .metrics
             .iter()
             .filter(|m| accepted_metrics.contains(&m.name))
             .map(|m| MetricRow {
@@ -402,12 +410,20 @@ async fn http_ingest_batch(
             })
             .collect();
 
-        if let Err(e) = state.sqlite_store.insert_metrics(&req.run_id, &sqlite_metrics).await {
+        if let Err(e) = state
+            .sqlite_store
+            .insert_metrics(&req.run_id, &sqlite_metrics)
+            .await
+        {
             warn!(error = %e, "Failed to persist metrics to SQLite");
         }
 
         // Also update metrics count in SQLite
-        if let Err(e) = state.sqlite_store.increment_metrics_count(&req.run_id, accepted_metric_count as i64).await {
+        if let Err(e) = state
+            .sqlite_store
+            .increment_metrics_count(&req.run_id, accepted_metric_count as i64)
+            .await
+        {
             warn!(error = %e, "Failed to update metrics count in SQLite");
         }
 
@@ -417,7 +433,11 @@ async fn http_ingest_batch(
             .entry(req.run_id.clone())
             .or_insert_with(services::RunMetrics::new);
 
-        for metric in req.metrics.iter().filter(|m| accepted_metrics.contains(&m.name)) {
+        for metric in req
+            .metrics
+            .iter()
+            .filter(|m| accepted_metrics.contains(&m.name))
+        {
             run_metrics.add_point(services::MetricPoint {
                 name: metric.name.clone(),
                 step: metric.step,
@@ -429,7 +449,8 @@ async fn http_ingest_batch(
 
     // Persist tags to SQLite
     if !accepted_tags.is_empty() {
-        let tag_pairs: Vec<(String, String)> = accepted_tags.iter()
+        let tag_pairs: Vec<(String, String)> = accepted_tags
+            .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         if let Err(e) = state.sqlite_store.set_tags(&req.run_id, &tag_pairs).await {
@@ -439,11 +460,16 @@ async fn http_ingest_batch(
 
     // Persist params to SQLite
     if param_count > 0 {
-        let param_pairs: Vec<(String, String)> = req.params
+        let param_pairs: Vec<(String, String)> = req
+            .params
             .iter()
             .map(|p| (p.name.clone(), p.value.clone()))
             .collect();
-        if let Err(e) = state.sqlite_store.insert_params(&req.run_id, &param_pairs).await {
+        if let Err(e) = state
+            .sqlite_store
+            .insert_params(&req.run_id, &param_pairs)
+            .await
+        {
             warn!(error = %e, "Failed to persist params to SQLite");
         }
     }
@@ -499,12 +525,16 @@ async fn http_finish_run(
     Json(req): Json<FinishRunHttpRequest>,
 ) -> Result<Json<FinishRunHttpResponse>, (StatusCode, String)> {
     // Verify the caller can access the run's project and has write scope
-    let run_project = state.sqlite_store.get_run_project_id(&run_id).await
+    let run_project = state
+        .sqlite_store
+        .get_run_project_id(&run_id)
+        .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     auth.require_access(&run_project, "write")?;
 
     // Update in SQLite
-    state.sqlite_store
+    state
+        .sqlite_store
         .finish_run(&run_id, &req.status)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -541,7 +571,10 @@ async fn http_delete_run(
     axum::extract::Path(run_id): axum::extract::Path<String>,
 ) -> Result<Json<DeleteRunHttpResponse>, (StatusCode, String)> {
     // Verify the caller can access the run's project and has admin scope
-    let run_project = state.sqlite_store.get_run_project_id(&run_id).await
+    let run_project = state
+        .sqlite_store
+        .get_run_project_id(&run_id)
+        .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -549,7 +582,8 @@ async fn http_delete_run(
     auth.require_access(&run_project, "admin")?;
 
     // Delete from SQLite (cascades to metrics, tags, params, batches)
-    state.sqlite_store
+    state
+        .sqlite_store
         .delete_run(&run_id)
         .await
         .map_err(|e| match e {
@@ -634,7 +668,10 @@ async fn http_create_key(
         if !valid_scopes.contains(&scope.as_str()) {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("Invalid scope '{}'. Valid scopes: admin, write, read", scope),
+                format!(
+                    "Invalid scope '{}'. Valid scopes: admin, write, read",
+                    scope
+                ),
             ));
         }
     }
@@ -727,12 +764,11 @@ async fn http_revoke_key(
         Some(key) => {
             state.key_store.revoke_key(&key.key_hash).await;
             info!(key_id = %key_id, key_prefix = %key.key_prefix, "Revoked API key");
-            Ok(Json(serde_json::json!({ "status": "ok", "revoked": key_id })))
+            Ok(Json(
+                serde_json::json!({ "status": "ok", "revoked": key_id }),
+            ))
         }
-        None => Err((
-            StatusCode::NOT_FOUND,
-            format!("Key not found: {}", key_id),
-        )),
+        None => Err((StatusCode::NOT_FOUND, format!("Key not found: {}", key_id))),
     }
 }
 
@@ -780,7 +816,10 @@ async fn http_create_share_token(
     Json(req): Json<CreateShareRequest>,
 ) -> Result<Json<CreateShareResponse>, (StatusCode, String)> {
     // Verify the caller can access the run
-    let run_project = state.sqlite_store.get_run_project_id(&run_id).await
+    let run_project = state
+        .sqlite_store
+        .get_run_project_id(&run_id)
+        .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -796,7 +835,8 @@ async fn http_create_share_token(
         expires.format("%Y-%m-%d %H:%M:%S").to_string()
     });
 
-    state.sqlite_store
+    state
+        .sqlite_store
         .create_share_token(
             &token,
             &run_id,
@@ -822,7 +862,8 @@ async fn http_get_shared_run(
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Result<Json<SharedRunResponse>, (StatusCode, String)> {
     // Validate the share token
-    let share = state.sqlite_store
+    let share = state
+        .sqlite_store
         .validate_share_token(&token)
         .await
         .map_err(|e| match e {
@@ -831,19 +872,22 @@ async fn http_get_shared_run(
         })?;
 
     // Fetch the run
-    let run = state.sqlite_store
+    let run = state
+        .sqlite_store
         .get_run(&share.run_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let tags = state.sqlite_store
+    let tags = state
+        .sqlite_store
         .get_tags(&share.run_id)
         .await
         .unwrap_or_default()
         .into_iter()
         .collect::<std::collections::HashMap<String, String>>();
 
-    let available_metrics = state.sqlite_store
+    let available_metrics = state
+        .sqlite_store
         .get_metric_names(&share.run_id)
         .await
         .unwrap_or_default();
@@ -870,7 +914,8 @@ async fn http_get_shared_metrics(
     axum::extract::Query(query): axum::extract::Query<MetricsQuery>,
 ) -> Result<Json<services::MetricsQueryResponse>, (StatusCode, String)> {
     // Validate the share token
-    let share = state.sqlite_store
+    let share = state
+        .sqlite_store
         .validate_share_token(&token)
         .await
         .map_err(|e| match e {
@@ -890,12 +935,14 @@ async fn http_get_shared_metrics(
     };
 
     // Query metrics
-    let sqlite_series = state.sqlite_store
+    let sqlite_series = state
+        .sqlite_store
         .get_metrics(&share.run_id, &names, query.max_points)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let available_metrics = state.sqlite_store
+    let available_metrics = state
+        .sqlite_store
         .get_metric_names(&share.run_id)
         .await
         .unwrap_or_default();
@@ -904,13 +951,17 @@ async fn http_get_shared_metrics(
         .into_iter()
         .map(|s| services::MetricSeries {
             name: s.name,
-            points: s.points.into_iter().map(|p| services::AggregatedPoint {
-                step: p.step,
-                mean: p.mean,
-                min: p.min,
-                max: p.max,
-                count: p.count,
-            }).collect(),
+            points: s
+                .points
+                .into_iter()
+                .map(|p| services::AggregatedPoint {
+                    step: p.step,
+                    mean: p.mean,
+                    min: p.min,
+                    max: p.max,
+                    count: p.count,
+                })
+                .collect(),
             total_points: s.total_points,
             downsampled: s.downsampled,
         })
@@ -930,11 +981,15 @@ async fn http_revoke_share_token(
     axum::extract::Path((run_id, token)): axum::extract::Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // Verify the caller can access the run
-    let run_project = state.sqlite_store.get_run_project_id(&run_id).await
+    let run_project = state
+        .sqlite_store
+        .get_run_project_id(&run_id)
+        .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     auth.require_access(&run_project, "read")?;
 
-    state.sqlite_store
+    state
+        .sqlite_store
         .revoke_share_token(&token)
         .await
         .map_err(|e| match e {
@@ -944,7 +999,9 @@ async fn http_revoke_share_token(
 
     info!(run_id = %run_id, "Revoked share token");
 
-    Ok(Json(serde_json::json!({ "status": "ok", "revoked": token })))
+    Ok(Json(
+        serde_json::json!({ "status": "ok", "revoked": token }),
+    ))
 }
 
 /// Generate a URL-safe share token (24 chars).
@@ -1028,7 +1085,10 @@ async fn http_list_runs(
                 if requested != scoped_project {
                     return Err((
                         StatusCode::FORBIDDEN,
-                        format!("Access denied: your key is scoped to project '{}', cannot query '{}'.", scoped_project, requested),
+                        format!(
+                            "Access denied: your key is scoped to project '{}', cannot query '{}'.",
+                            scoped_project, requested
+                        ),
                     ));
                 }
             }
@@ -1038,7 +1098,8 @@ async fn http_list_runs(
     };
 
     // Query from SQLite
-    let (sqlite_runs, total) = state.sqlite_store
+    let (sqlite_runs, total) = state
+        .sqlite_store
         .list_runs(
             effective_project.as_deref(),
             query.status.as_deref(),
@@ -1053,7 +1114,8 @@ async fn http_list_runs(
     let mut runs_response = Vec::new();
     for run in sqlite_runs {
         // Get tags for this run
-        let tags = state.sqlite_store
+        let tags = state
+            .sqlite_store
             .get_tags(&run.id)
             .await
             .unwrap_or_default()
@@ -1182,7 +1244,10 @@ async fn http_get_metrics(
     axum::extract::Query(query): axum::extract::Query<MetricsQuery>,
 ) -> Result<Json<services::MetricsQueryResponse>, (StatusCode, String)> {
     // Verify run exists, check project access, and require read scope
-    let run_project = state.sqlite_store.get_run_project_id(&run_id).await
+    let run_project = state
+        .sqlite_store
+        .get_run_project_id(&run_id)
+        .await
         .map_err(|_| (StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)))?;
     auth.require_access(&run_project, "read")?;
 
@@ -1198,13 +1263,15 @@ async fn http_get_metrics(
     };
 
     // Query metrics from SQLite
-    let sqlite_series = state.sqlite_store
+    let sqlite_series = state
+        .sqlite_store
         .get_metrics(&run_id, &names, query.max_points)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Get available metric names
-    let available_metrics = state.sqlite_store
+    let available_metrics = state
+        .sqlite_store
         .get_metric_names(&run_id)
         .await
         .unwrap_or_default();
@@ -1214,13 +1281,17 @@ async fn http_get_metrics(
         .into_iter()
         .map(|s| services::MetricSeries {
             name: s.name,
-            points: s.points.into_iter().map(|p| services::AggregatedPoint {
-                step: p.step,
-                mean: p.mean,
-                min: p.min,
-                max: p.max,
-                count: p.count,
-            }).collect(),
+            points: s
+                .points
+                .into_iter()
+                .map(|p| services::AggregatedPoint {
+                    step: p.step,
+                    mean: p.mean,
+                    min: p.min,
+                    max: p.max,
+                    count: p.count,
+                })
+                .collect(),
             total_points: s.total_points,
             downsampled: s.downsampled,
         })
@@ -1400,7 +1471,10 @@ fn build_http_router(state: AppState) -> Router {
         .route("/api/v1/runs/{run_id}/finish", post(http_finish_run))
         // Query API endpoints
         .route("/api/v1/runs", get(http_list_runs))
-        .route("/api/v1/runs/{run_id}", get(http_get_run).delete(http_delete_run))
+        .route(
+            "/api/v1/runs/{run_id}",
+            get(http_get_run).delete(http_delete_run),
+        )
         .route("/api/v1/runs/{run_id}/metrics", get(http_get_metrics))
         .route("/api/v1/runs/compare", post(http_compare_runs))
         // Key management endpoints (admin only)
@@ -1408,7 +1482,10 @@ fn build_http_router(state: AppState) -> Router {
         .route("/api/v1/keys/{key_id}", delete(http_revoke_key))
         // Share token management (requires auth)
         .route("/api/v1/runs/{run_id}/share", post(http_create_share_token))
-        .route("/api/v1/runs/{run_id}/share/{token}", delete(http_revoke_share_token))
+        .route(
+            "/api/v1/runs/{run_id}/share/{token}",
+            delete(http_revoke_share_token),
+        )
         .layer(middleware::from_fn_with_state(
             state.key_store.clone(),
             auth_middleware,
@@ -1420,7 +1497,10 @@ fn build_http_router(state: AppState) -> Router {
         .route("/health", get(health))
         // Shared run endpoints (public, no auth — token is the credential)
         .route("/api/v1/shared/{token}", get(http_get_shared_run))
-        .route("/api/v1/shared/{token}/metrics", get(http_get_shared_metrics));
+        .route(
+            "/api/v1/shared/{token}/metrics",
+            get(http_get_shared_metrics),
+        );
 
     // Combine routes
     Router::new()
@@ -1448,10 +1528,6 @@ async fn main() {
     // Log startup configuration
     server_config.log_startup();
 
-    // Initialize API key store
-    let key_store = Arc::new(ApiKeyStore::new());
-    key_store.init_from_env().await;
-
     // Initialize idempotency store
     let idempotency_store = Arc::new(IdempotencyStore::new());
 
@@ -1465,14 +1541,27 @@ async fn main() {
     );
 
     // Initialize SQLite store for persistence
-    let sqlite_path = std::env::var("MLRUNX_SQLITE_PATH")
-        .unwrap_or_else(|_| "mlrunx.db".to_string());
+    let sqlite_path =
+        std::env::var("MLRUNX_SQLITE_PATH").unwrap_or_else(|_| "mlrunx.db".to_string());
     let sqlite_store = Arc::new(
         SqliteStore::new(&sqlite_path)
             .await
-            .expect("Failed to initialize SQLite store")
+            .expect("Failed to initialize SQLite store"),
     );
     info!("SQLite store initialized at: {}", sqlite_path);
+
+    // Initialize API key store.
+    // Default behavior: persistent sqlite-backed store.
+    // Rollback/fallback: set MLRUNX_API_KEYS_IN_MEMORY=1 to use legacy in-memory behavior.
+    let use_in_memory_keys = std::env::var("MLRUNX_API_KEYS_IN_MEMORY")
+        .map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"));
+    let key_store = if use_in_memory_keys {
+        info!("Using in-memory API key store (MLRUNX_API_KEYS_IN_MEMORY enabled)");
+        Arc::new(ApiKeyStore::new())
+    } else {
+        Arc::new(ApiKeyStore::new_with_sqlite(sqlite_store.clone()))
+    };
+    key_store.init_from_env().await;
 
     // Create shared state
     let store = Arc::new(InMemoryStore::new());
@@ -1538,7 +1627,7 @@ mod tests {
         let sqlite_store = Arc::new(
             SqliteStore::new(":memory:")
                 .await
-                .expect("Failed to create test SQLite store")
+                .expect("Failed to create test SQLite store"),
         );
         // Use dev mode for tests (auth disabled)
         let key_store = Arc::new(ApiKeyStore::new_dev_mode());
@@ -1607,7 +1696,7 @@ mod tests {
         let sqlite_store = Arc::new(
             SqliteStore::new(":memory:")
                 .await
-                .expect("Failed to create test SQLite store")
+                .expect("Failed to create test SQLite store"),
         );
         let key_store = Arc::new(ApiKeyStore::new_dev_mode());
         let idempotency_store = Arc::new(IdempotencyStore::new());

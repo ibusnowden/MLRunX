@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
@@ -43,8 +43,7 @@ impl SqliteConfig {
     /// Create config from environment variables.
     pub fn from_env() -> Self {
         Self {
-            path: std::env::var("MLRUNX_SQLITE_PATH")
-                .unwrap_or_else(|_| "mlrunx.db".to_string()),
+            path: std::env::var("MLRUNX_SQLITE_PATH").unwrap_or_else(|_| "mlrunx.db".to_string()),
         }
     }
 }
@@ -431,7 +430,8 @@ impl SqliteStore {
 
         // Get total count
         let total: usize = {
-            let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+            let params_refs: Vec<&dyn rusqlite::ToSql> =
+                params_vec.iter().map(|p| p.as_ref()).collect();
             conn.query_row(&count_sql, params_refs.as_slice(), |row| row.get(0))?
         };
 
@@ -440,7 +440,8 @@ impl SqliteStore {
         params_vec.push(Box::new(offset as i64));
 
         // Get runs
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
             Ok(RunRow {
@@ -496,7 +497,11 @@ impl SqliteStore {
     }
 
     /// Update run metrics count.
-    pub async fn increment_metrics_count(&self, run_id: &str, count: i64) -> Result<(), SqliteError> {
+    pub async fn increment_metrics_count(
+        &self,
+        run_id: &str,
+        count: i64,
+    ) -> Result<(), SqliteError> {
         let conn = self.conn.lock().await;
 
         conn.execute(
@@ -525,7 +530,11 @@ impl SqliteStore {
     }
 
     /// Set tags for a run (upsert).
-    pub async fn set_tags(&self, run_id: &str, tags: &[(String, String)]) -> Result<(), SqliteError> {
+    pub async fn set_tags(
+        &self,
+        run_id: &str,
+        tags: &[(String, String)],
+    ) -> Result<(), SqliteError> {
         let conn = self.conn.lock().await;
 
         for (key, value) in tags {
@@ -543,7 +552,11 @@ impl SqliteStore {
     // =========================================================================
 
     /// Insert metrics batch.
-    pub async fn insert_metrics(&self, run_id: &str, metrics: &[MetricRow]) -> Result<usize, SqliteError> {
+    pub async fn insert_metrics(
+        &self,
+        run_id: &str,
+        metrics: &[MetricRow],
+    ) -> Result<usize, SqliteError> {
         let conn = self.conn.lock().await;
 
         let mut count = 0;
@@ -569,9 +582,8 @@ impl SqliteStore {
 
         // Get available metric names
         let names_to_query: Vec<String> = if names.is_empty() {
-            let mut stmt = conn.prepare(
-                "SELECT DISTINCT name FROM metrics WHERE run_id = ?1 ORDER BY name"
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT DISTINCT name FROM metrics WHERE run_id = ?1 ORDER BY name")?;
             let rows = stmt.query_map(params![run_id], |row| row.get(0))?;
             rows.collect::<Result<Vec<_>, _>>()?
         } else {
@@ -591,7 +603,7 @@ impl SqliteStore {
             let points = if total_points <= max_points {
                 // No downsampling needed
                 let mut stmt = conn.prepare(
-                    "SELECT step, value FROM metrics WHERE run_id = ?1 AND name = ?2 ORDER BY step"
+                    "SELECT step, value FROM metrics WHERE run_id = ?1 AND name = ?2 ORDER BY step",
                 )?;
                 let rows = stmt.query_map(params![run_id, name], |row| {
                     Ok(AggregatedPointRow {
@@ -633,7 +645,13 @@ impl SqliteStore {
                 ))?;
 
                 let rows = stmt.query_map(
-                    params![run_id, name, min_step, bucket_size as i64, bucket_count as i64],
+                    params![
+                        run_id,
+                        name,
+                        min_step,
+                        bucket_size as i64,
+                        bucket_count as i64
+                    ],
                     |row| {
                         Ok(AggregatedPointRow {
                             step: row.get(0)?,
@@ -642,7 +660,7 @@ impl SqliteStore {
                             max: row.get(3)?,
                             count: row.get(4)?,
                         })
-                    }
+                    },
                 )?;
                 rows.collect::<Result<Vec<_>, _>>()?
             };
@@ -662,9 +680,8 @@ impl SqliteStore {
     pub async fn get_metric_names(&self, run_id: &str) -> Result<Vec<String>, SqliteError> {
         let conn = self.conn.lock().await;
 
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT name FROM metrics WHERE run_id = ?1 ORDER BY name"
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT name FROM metrics WHERE run_id = ?1 ORDER BY name")?;
         let rows = stmt.query_map(params![run_id], |row| row.get(0))?;
 
         let names: Result<Vec<_>, _> = rows.collect();
@@ -676,7 +693,11 @@ impl SqliteStore {
     // =========================================================================
 
     /// Insert params (upsert).
-    pub async fn insert_params(&self, run_id: &str, params: &[(String, String)]) -> Result<usize, SqliteError> {
+    pub async fn insert_params(
+        &self,
+        run_id: &str,
+        params: &[(String, String)],
+    ) -> Result<usize, SqliteError> {
         let conn = self.conn.lock().await;
 
         let mut count = 0;
@@ -733,6 +754,173 @@ impl SqliteStore {
     }
 
     // =========================================================================
+    // API key operations
+    // =========================================================================
+
+    /// Insert a new API key record.
+    pub async fn insert_api_key(
+        &self,
+        id: &str,
+        key_hash: &str,
+        key_prefix: &str,
+        project_id: Option<&str>,
+        name: Option<&str>,
+        scopes_json: &str,
+    ) -> Result<(), SqliteError> {
+        let conn = self.conn.lock().await;
+
+        conn.execute(
+            r#"INSERT INTO api_keys (id, key_hash, key_prefix, project_id, name, scopes)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+            params![id, key_hash, key_prefix, project_id, name, scopes_json],
+        )?;
+
+        Ok(())
+    }
+
+    /// Ensure a bootstrap admin key exists and is active.
+    pub async fn upsert_bootstrap_api_key(
+        &self,
+        id: &str,
+        key_hash: &str,
+        key_prefix: &str,
+    ) -> Result<(), SqliteError> {
+        let conn = self.conn.lock().await;
+
+        conn.execute(
+            r#"INSERT INTO api_keys (id, key_hash, key_prefix, project_id, name, scopes, revoked_at)
+               VALUES (?1, ?2, ?3, NULL, 'bootstrap', '["admin"]', NULL)
+               ON CONFLICT(key_hash) DO UPDATE SET
+                   key_prefix = excluded.key_prefix,
+                   project_id = NULL,
+                   scopes = '["admin"]',
+                   revoked_at = NULL,
+                   updated_at = datetime('now')"#,
+            params![id, key_hash, key_prefix],
+        )?;
+
+        Ok(())
+    }
+
+    /// Fetch an API key by its hash.
+    pub async fn get_api_key_by_hash(
+        &self,
+        key_hash: &str,
+    ) -> Result<Option<ApiKeyRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let row = conn
+            .query_row(
+                r#"SELECT id, key_hash, key_prefix, project_id, name, scopes, created_at, last_used_at, revoked_at
+                   FROM api_keys
+                   WHERE key_hash = ?1"#,
+                params![key_hash],
+                |row| {
+                    Ok(ApiKeyRow {
+                        id: row.get(0)?,
+                        key_hash: row.get(1)?,
+                        key_prefix: row.get(2)?,
+                        project_id: row.get(3)?,
+                        name: row.get(4)?,
+                        scopes_json: row.get(5)?,
+                        created_at: row.get(6)?,
+                        last_used_at: row.get(7)?,
+                        revoked_at: row.get(8)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        Ok(row)
+    }
+
+    /// Update last-used timestamp for an API key.
+    pub async fn touch_api_key_last_used(&self, key_hash: &str) -> Result<(), SqliteError> {
+        let conn = self.conn.lock().await;
+
+        conn.execute(
+            "UPDATE api_keys SET last_used_at = datetime('now'), updated_at = datetime('now') WHERE key_hash = ?1",
+            params![key_hash],
+        )?;
+
+        Ok(())
+    }
+
+    /// Revoke an API key by hash.
+    pub async fn revoke_api_key_by_hash(&self, key_hash: &str) -> Result<bool, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let changes = conn.execute(
+            "UPDATE api_keys SET revoked_at = datetime('now'), updated_at = datetime('now') WHERE key_hash = ?1 AND revoked_at IS NULL",
+            params![key_hash],
+        )?;
+
+        Ok(changes > 0)
+    }
+
+    /// List API keys, optionally filtered by project.
+    pub async fn list_api_keys(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<Vec<ApiKeyRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let mut keys = Vec::new();
+
+        match project_id {
+            Some(project_id) => {
+                let mut stmt = conn.prepare(
+                    r#"SELECT id, key_hash, key_prefix, project_id, name, scopes, created_at, last_used_at, revoked_at
+                       FROM api_keys
+                       WHERE project_id = ?1
+                       ORDER BY created_at DESC"#,
+                )?;
+                let rows = stmt.query_map(params![project_id], |row| {
+                    Ok(ApiKeyRow {
+                        id: row.get(0)?,
+                        key_hash: row.get(1)?,
+                        key_prefix: row.get(2)?,
+                        project_id: row.get(3)?,
+                        name: row.get(4)?,
+                        scopes_json: row.get(5)?,
+                        created_at: row.get(6)?,
+                        last_used_at: row.get(7)?,
+                        revoked_at: row.get(8)?,
+                    })
+                })?;
+                for row in rows {
+                    keys.push(row?);
+                }
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    r#"SELECT id, key_hash, key_prefix, project_id, name, scopes, created_at, last_used_at, revoked_at
+                       FROM api_keys
+                       ORDER BY created_at DESC"#,
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok(ApiKeyRow {
+                        id: row.get(0)?,
+                        key_hash: row.get(1)?,
+                        key_prefix: row.get(2)?,
+                        project_id: row.get(3)?,
+                        name: row.get(4)?,
+                        scopes_json: row.get(5)?,
+                        created_at: row.get(6)?,
+                        last_used_at: row.get(7)?,
+                        revoked_at: row.get(8)?,
+                    })
+                })?;
+                for row in rows {
+                    keys.push(row?);
+                }
+            }
+        }
+
+        Ok(keys)
+    }
+
+    // =========================================================================
     // Share token operations
     // =========================================================================
 
@@ -759,40 +947,43 @@ impl SqliteStore {
     pub async fn validate_share_token(&self, token: &str) -> Result<ShareTokenRow, SqliteError> {
         let conn = self.conn.lock().await;
 
-        let row = conn.query_row(
-            r#"SELECT token, run_id, created_by_key_prefix, created_at, expires_at, revoked_at
+        let row = conn
+            .query_row(
+                r#"SELECT token, run_id, created_by_key_prefix, created_at, expires_at, revoked_at
                FROM share_tokens WHERE token = ?1"#,
-            params![token],
-            |row| {
-                Ok(ShareTokenRow {
-                    token: row.get(0)?,
-                    run_id: row.get(1)?,
-                    created_by_key_prefix: row.get(2)?,
-                    created_at: row.get(3)?,
-                    expires_at: row.get(4)?,
-                    revoked_at: row.get(5)?,
-                })
-            },
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => {
-                SqliteError::NotFound("Invalid or expired share link.".to_string())
-            }
-            _ => SqliteError::Database(e),
-        })?;
+                params![token],
+                |row| {
+                    Ok(ShareTokenRow {
+                        token: row.get(0)?,
+                        run_id: row.get(1)?,
+                        created_by_key_prefix: row.get(2)?,
+                        created_at: row.get(3)?,
+                        expires_at: row.get(4)?,
+                        revoked_at: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    SqliteError::NotFound("Invalid or expired share link.".to_string())
+                }
+                _ => SqliteError::Database(e),
+            })?;
 
         // Check if revoked
         if row.revoked_at.is_some() {
-            return Err(SqliteError::NotFound("This share link has been revoked.".to_string()));
+            return Err(SqliteError::NotFound(
+                "This share link has been revoked.".to_string(),
+            ));
         }
 
         // Check if expired
         if let Some(ref expires) = row.expires_at {
-            let now: String = conn.query_row(
-                "SELECT datetime('now')", [], |r| r.get(0)
-            )?;
+            let now: String = conn.query_row("SELECT datetime('now')", [], |r| r.get(0))?;
             if now > *expires {
-                return Err(SqliteError::NotFound("This share link has expired.".to_string()));
+                return Err(SqliteError::NotFound(
+                    "This share link has expired.".to_string(),
+                ));
             }
         }
 
@@ -805,7 +996,7 @@ impl SqliteStore {
 
         let mut stmt = conn.prepare(
             r#"SELECT token, run_id, created_by_key_prefix, created_at, expires_at, revoked_at
-               FROM share_tokens WHERE run_id = ?1 ORDER BY created_at DESC"#
+               FROM share_tokens WHERE run_id = ?1 ORDER BY created_at DESC"#,
         )?;
         let rows = stmt.query_map(params![run_id], |row| {
             Ok(ShareTokenRow {
@@ -832,7 +1023,9 @@ impl SqliteStore {
         )?;
 
         if changes == 0 {
-            return Err(SqliteError::NotFound("Share token not found or already revoked.".to_string()));
+            return Err(SqliteError::NotFound(
+                "Share token not found or already revoked.".to_string(),
+            ));
         }
 
         Ok(())
@@ -852,6 +1045,20 @@ pub struct RunRow {
     pub metrics_count: i64,
     pub params_count: i64,
     pub duration_seconds: Option<f64>,
+}
+
+/// An API key row from sqlite.
+#[derive(Debug, Clone)]
+pub struct ApiKeyRow {
+    pub id: String,
+    pub key_hash: String,
+    pub key_prefix: String,
+    pub project_id: Option<String>,
+    pub name: Option<String>,
+    pub scopes_json: String,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub revoked_at: Option<String>,
 }
 
 /// A share token row.
@@ -917,7 +1124,10 @@ mod tests {
         let store = create_test_store().await;
 
         let project_id = store.get_or_create_project("test-project").await.unwrap();
-        store.create_run("run-123", &project_id, Some("My Run")).await.unwrap();
+        store
+            .create_run("run-123", &project_id, Some("My Run"))
+            .await
+            .unwrap();
 
         let run = store.get_run("run-123").await.unwrap();
         assert_eq!(run.id, "run-123");
@@ -930,7 +1140,10 @@ mod tests {
         let store = create_test_store().await;
 
         let project_id = store.get_or_create_project("test-project").await.unwrap();
-        store.create_run("run-123", &project_id, None).await.unwrap();
+        store
+            .create_run("run-123", &project_id, None)
+            .await
+            .unwrap();
 
         // Insert some metrics
         let metrics: Vec<MetricRow> = (0..100)
@@ -963,13 +1176,22 @@ mod tests {
         let store = create_test_store().await;
 
         let project_id = store.get_or_create_project("test-project").await.unwrap();
-        store.create_run("run-123", &project_id, None).await.unwrap();
+        store
+            .create_run("run-123", &project_id, None)
+            .await
+            .unwrap();
 
         // Set tags
-        store.set_tags("run-123", &[
-            ("framework".to_string(), "pytorch".to_string()),
-            ("task".to_string(), "classification".to_string()),
-        ]).await.unwrap();
+        store
+            .set_tags(
+                "run-123",
+                &[
+                    ("framework".to_string(), "pytorch".to_string()),
+                    ("task".to_string(), "classification".to_string()),
+                ],
+            )
+            .await
+            .unwrap();
 
         // Get tags
         let tags = store.get_tags("run-123").await.unwrap();
@@ -981,7 +1203,10 @@ mod tests {
         let store = create_test_store().await;
 
         let project_id = store.get_or_create_project("auth-project").await.unwrap();
-        store.create_run("run-auth-123", &project_id, Some("Auth Run")).await.unwrap();
+        store
+            .create_run("run-auth-123", &project_id, Some("Auth Run"))
+            .await
+            .unwrap();
 
         let user_id = uuid::Uuid::now_v7().to_string();
         let admin_user_id = uuid::Uuid::now_v7().to_string();
@@ -1014,22 +1239,81 @@ mod tests {
                 params![user_id, key_id, project_id, "run-auth-123", "run.init", "run", "run-auth-123", "success"],
             ).unwrap();
 
-            let role: String = conn.query_row(
-                "SELECT role FROM project_memberships WHERE project_id = ?1 AND user_id = ?2",
-                params![project_id, user_id],
-                |row| row.get(0),
-            ).unwrap();
+            let role: String = conn
+                .query_row(
+                    "SELECT role FROM project_memberships WHERE project_id = ?1 AND user_id = ?2",
+                    params![project_id, user_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
             assert_eq!(role, "owner");
 
-            let audit_count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM audit_events WHERE actor_key_id = ?1",
-                params![key_id],
-                |row| row.get(0),
-            ).unwrap();
+            let audit_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM audit_events WHERE actor_key_id = ?1",
+                    params![key_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
             assert_eq!(audit_count, 1);
         }
 
         let run = store.get_run("run-auth-123").await.unwrap();
         assert_eq!(run.id, "run-auth-123");
+    }
+
+    #[tokio::test]
+    async fn test_api_key_storage_methods() {
+        let store = create_test_store().await;
+        let project_id = store.get_or_create_project("key-project").await.unwrap();
+
+        let key_id = uuid::Uuid::now_v7().to_string();
+        let key_hash = "hash-abc";
+        let key_prefix = "mlrunx_a";
+        let scopes_json = r#"["read","write"]"#;
+
+        store
+            .insert_api_key(
+                &key_id,
+                key_hash,
+                key_prefix,
+                Some(&project_id),
+                Some("key-one"),
+                scopes_json,
+            )
+            .await
+            .unwrap();
+
+        let fetched = store
+            .get_api_key_by_hash(key_hash)
+            .await
+            .unwrap()
+            .expect("key should exist");
+        assert_eq!(fetched.id, key_id);
+        assert_eq!(fetched.scopes_json, scopes_json);
+        assert!(fetched.last_used_at.is_none());
+        assert!(fetched.revoked_at.is_none());
+
+        store.touch_api_key_last_used(key_hash).await.unwrap();
+        let touched = store
+            .get_api_key_by_hash(key_hash)
+            .await
+            .unwrap()
+            .expect("key should exist");
+        assert!(touched.last_used_at.is_some());
+
+        let listed = store.list_api_keys(Some(&project_id)).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].key_hash, key_hash);
+
+        let revoked = store.revoke_api_key_by_hash(key_hash).await.unwrap();
+        assert!(revoked);
+
+        let revoked_row = store
+            .get_api_key_by_hash(key_hash)
+            .await
+            .unwrap()
+            .expect("key should exist");
+        assert!(revoked_row.revoked_at.is_some());
     }
 }
