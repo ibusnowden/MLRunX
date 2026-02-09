@@ -44,6 +44,12 @@ const CollapseIcon = ({ collapsed }: { collapsed: boolean }) => (
   </svg>
 );
 
+const CloseIcon = () => (
+  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+  </svg>
+);
+
 const LogoIcon = () => (
   <svg className="w-7 h-7" viewBox="0 0 32 32" fill="none">
     <rect width="32" height="32" rx="8" className="fill-accent" />
@@ -65,7 +71,7 @@ const BOTTOM_ITEMS = [
 export function Sidebar() {
   const pathname = usePathname();
   const { toggleTheme, isDark } = useTheme();
-  const { collapsed, toggleCollapsed } = useSidebar();
+  const { collapsed, toggleCollapsed, mobileOpen, closeMobile } = useSidebar();
 
   const isActive = (href: string) => {
     if (href === '/') return pathname === '/';
@@ -73,93 +79,104 @@ export function Sidebar() {
   };
 
   return (
-    <aside
-      className={`fixed top-0 left-0 h-screen z-50 flex flex-col border-r transition-all duration-200
-        bg-sidebar-bg border-sidebar-border
-        ${collapsed ? 'w-16' : 'w-56'}`}
-    >
-      {/* Logo */}
-      <div className={`flex items-center h-16 border-b border-sidebar-border px-4 ${collapsed ? 'justify-center' : 'gap-3'}`}>
-        <LogoIcon />
-        {!collapsed && (
-          <div className="flex flex-col">
+    <>
+      <div
+        className={`fixed inset-0 z-40 bg-black/45 transition-opacity duration-200 md:hidden ${
+          mobileOpen ? 'opacity-100' : 'pointer-events-none opacity-0'
+        }`}
+        onClick={closeMobile}
+        aria-hidden
+      />
+
+      <aside
+        className={`fixed top-0 left-0 z-50 flex h-screen w-72 flex-col border-r border-sidebar-border bg-sidebar-bg transition-transform duration-200 md:transition-all ${
+          collapsed ? 'md:w-16' : 'md:w-56'
+        } ${mobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}
+      >
+        <div className="flex items-center gap-3 h-16 border-b border-sidebar-border px-4">
+          <LogoIcon />
+          <div className={`flex flex-col ${collapsed ? 'md:hidden' : ''}`}>
             <span className="text-base font-bold text-text-primary tracking-tight">MLRunX</span>
             <span className="text-[10px] text-text-muted leading-none">Experiment Tracking</span>
           </div>
-        )}
-      </div>
+          <button
+            type="button"
+            onClick={closeMobile}
+            className="ml-auto rounded-md border border-sidebar-border p-1.5 text-sidebar-text hover:bg-sidebar-hover hover:text-sidebar-text-active transition-colors md:hidden"
+            aria-label="Close navigation menu"
+          >
+            <CloseIcon />
+          </button>
+        </div>
 
-      {/* Navigation */}
-      <nav className="flex-1 py-3 px-2 space-y-1">
-        {NAV_ITEMS.map((item) => {
-          const active = isActive(item.href);
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors
-                ${active
-                  ? 'bg-sidebar-active text-accent'
-                  : 'text-sidebar-text hover:bg-sidebar-hover hover:text-sidebar-text-active'
-                }
-                ${collapsed ? 'justify-center' : ''}
-              `}
-              title={collapsed ? item.label : undefined}
-            >
-              <item.icon />
-              {!collapsed && <span>{item.label}</span>}
-            </Link>
-          );
-        })}
-      </nav>
+        <nav className="flex-1 py-3 px-2 space-y-1">
+          {NAV_ITEMS.map((item) => {
+            const active = isActive(item.href);
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                onClick={closeMobile}
+                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                  active
+                    ? 'bg-sidebar-active text-accent'
+                    : 'text-sidebar-text hover:bg-sidebar-hover hover:text-sidebar-text-active'
+                } ${collapsed ? 'md:justify-center' : ''}`}
+                title={collapsed ? item.label : undefined}
+              >
+                <item.icon />
+                <span className={collapsed ? 'md:hidden' : ''}>{item.label}</span>
+              </Link>
+            );
+          })}
+        </nav>
 
-      {/* Bottom section */}
-      <div className="border-t border-sidebar-border py-3 px-2 space-y-1">
-        {BOTTOM_ITEMS.map((item) => {
-          const active = isActive(item.href);
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors
-                ${active
-                  ? 'bg-sidebar-active text-accent'
-                  : 'text-sidebar-text hover:bg-sidebar-hover hover:text-sidebar-text-active'
-                }
-                ${collapsed ? 'justify-center' : ''}
-              `}
-              title={collapsed ? item.label : undefined}
-            >
-              <item.icon />
-              {!collapsed && <span>{item.label}</span>}
-            </Link>
-          );
-        })}
+        <div className="border-t border-sidebar-border py-3 px-2 space-y-1">
+          {BOTTOM_ITEMS.map((item) => {
+            const active = isActive(item.href);
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                onClick={closeMobile}
+                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                  active
+                    ? 'bg-sidebar-active text-accent'
+                    : 'text-sidebar-text hover:bg-sidebar-hover hover:text-sidebar-text-active'
+                } ${collapsed ? 'md:justify-center' : ''}`}
+                title={collapsed ? item.label : undefined}
+              >
+                <item.icon />
+                <span className={collapsed ? 'md:hidden' : ''}>{item.label}</span>
+              </Link>
+            );
+          })}
 
-        {/* Theme toggle */}
-        <button
-          onClick={toggleTheme}
-          className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors w-full
-            text-sidebar-text hover:bg-sidebar-hover hover:text-sidebar-text-active
-            ${collapsed ? 'justify-center' : ''}`}
-          title={collapsed ? (isDark ? 'Light mode' : 'Dark mode') : undefined}
-        >
-          {isDark ? <SunIcon /> : <MoonIcon />}
-          {!collapsed && <span>{isDark ? 'Light Mode' : 'Dark Mode'}</span>}
-        </button>
+          <button
+            type="button"
+            onClick={toggleTheme}
+            className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors w-full text-sidebar-text hover:bg-sidebar-hover hover:text-sidebar-text-active ${
+              collapsed ? 'md:justify-center' : ''
+            }`}
+            title={collapsed ? (isDark ? 'Light mode' : 'Dark mode') : undefined}
+          >
+            {isDark ? <SunIcon /> : <MoonIcon />}
+            <span className={collapsed ? 'md:hidden' : ''}>{isDark ? 'Light Mode' : 'Dark Mode'}</span>
+          </button>
 
-        {/* Collapse toggle */}
-        <button
-          onClick={toggleCollapsed}
-          className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors w-full
-            text-sidebar-text hover:bg-sidebar-hover hover:text-sidebar-text-active
-            ${collapsed ? 'justify-center' : ''}`}
-          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        >
-          <CollapseIcon collapsed={collapsed} />
-          {!collapsed && <span>Collapse</span>}
-        </button>
-      </div>
-    </aside>
+          <button
+            type="button"
+            onClick={toggleCollapsed}
+            className={`hidden md:flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors w-full text-sidebar-text hover:bg-sidebar-hover hover:text-sidebar-text-active ${
+              collapsed ? 'justify-center' : ''
+            }`}
+            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            <CollapseIcon collapsed={collapsed} />
+            {!collapsed && <span>Collapse</span>}
+          </button>
+        </div>
+      </aside>
+    </>
   );
 }

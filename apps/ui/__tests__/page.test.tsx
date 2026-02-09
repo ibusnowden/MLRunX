@@ -22,13 +22,15 @@ describe('Home Page', () => {
     const heading = screen.getByRole('heading', { level: 1 })
     expect(heading).toBeDefined()
     expect(heading.textContent).toContain('MLRunX')
-    await screen.findByText(/no runs found/i)
+    const emptyStates = await screen.findAllByText(/no runs found/i)
+    expect(emptyStates.length).toBeGreaterThan(0)
   })
 
   it('displays the welcome message', async () => {
     render(<Page />)
     const text = screen.getByText(/experiment tracking/i)
     expect(text).toBeDefined()
-    await screen.findByText(/no runs found/i)
+    const emptyStates = await screen.findAllByText(/no runs found/i)
+    expect(emptyStates.length).toBeGreaterThan(0)
   })
 })

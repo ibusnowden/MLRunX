@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { api, Run, ListRunsResponse } from '@/lib/api';
+import { useAutoRefresh } from '@/lib/useAutoRefresh';
 
 interface RunsTableProps {
   initialData?: ListRunsResponse;
@@ -250,8 +251,10 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
     }
   }, [searchParams]);
 
-  const fetchRuns = useCallback(async () => {
-    setLoading(true);
+  const fetchRuns = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
+    if (!silent) {
+      setLoading(true);
+    }
     setError(null);
 
     try {
@@ -268,13 +271,20 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch runs');
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }, [effectiveFilters, page]);
 
   useEffect(() => {
-    fetchRuns();
+    void fetchRuns();
   }, [fetchRuns]);
+
+  useAutoRefresh(
+    () => fetchRuns({ silent: true }),
+    { intervalMs: 15000, enabled: true, runOnMount: false }
+  );
 
   const handleDeleteRun = useCallback(async (runId: string) => {
     setDeletingRunId(runId);
@@ -300,9 +310,9 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
   return (
     <div className="w-full">
       {/* Toolbar */}
-      <div className="flex flex-wrap gap-3 items-center mb-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center mb-4">
         {/* Search */}
-        <div className="relative flex-1 min-w-[280px]">
+        <div className="relative flex-1 min-w-0 sm:min-w-[280px]">
           <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-text-muted">
             <SearchIcon />
           </div>
@@ -326,7 +336,7 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
             setSearchQuery(nextQuery);
             setPage(0);
           }}
-          className="px-3 py-2.5 text-sm rounded-lg border border-border bg-surface-secondary text-text-primary focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent"
+          className="w-full sm:w-auto px-3 py-2.5 text-sm rounded-lg border border-border bg-surface-secondary text-text-primary focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent"
         >
           <option value="">All Status</option>
           <option value="running">Running</option>
@@ -342,7 +352,7 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
               setSearchQuery('');
               setPage(0);
             }}
-            className="px-3 py-2.5 text-sm rounded-lg border border-border text-text-secondary hover:bg-surface-hover hover:text-text-primary transition-colors"
+            className="w-full sm:w-auto px-3 py-2.5 text-sm rounded-lg border border-border text-text-secondary hover:bg-surface-hover hover:text-text-primary transition-colors"
           >
             Clear
           </button>
@@ -350,8 +360,10 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
 
         {/* Refresh */}
         <button
-          onClick={fetchRuns}
-          className="flex items-center gap-2 px-4 py-2.5 text-sm rounded-lg bg-accent text-white hover:bg-accent-hover transition-colors font-medium"
+          onClick={() => {
+            void fetchRuns();
+          }}
+          className="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 text-sm rounded-lg bg-accent text-white hover:bg-accent-hover transition-colors font-medium"
         >
           <RefreshIcon />
           Refresh
@@ -368,8 +380,8 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
         </div>
       )}
 
-      {/* Table */}
-      <div className="overflow-x-auto rounded-lg border border-border">
+      {/* Desktop table */}
+      <div className="hidden md:block overflow-x-auto rounded-lg border border-border">
         <table className="w-full">
           <thead>
             <tr className="bg-surface-secondary">
@@ -442,7 +454,7 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleDeleteRun(run.run_id);
+                            void handleDeleteRun(run.run_id);
                           }}
                           disabled={deletingRunId === run.run_id}
                           className="px-2 py-1 text-xs font-medium rounded bg-danger text-white hover:bg-danger/80 disabled:opacity-50 transition-colors"
@@ -479,13 +491,109 @@ export function RunsTable({ initialData, onRunClick }: RunsTableProps) {
         </table>
       </div>
 
+      {/* Mobile cards */}
+      <div className="md:hidden space-y-3">
+        {loading ? (
+          <div className="rounded-lg border border-border bg-surface p-6 text-center text-text-muted">
+            <div className="flex items-center justify-center gap-2">
+              <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+              </svg>
+              Loading runs...
+            </div>
+          </div>
+        ) : runs.length === 0 ? (
+          <div className="rounded-lg border border-border bg-surface p-6 text-center text-text-muted">
+            No runs found
+          </div>
+        ) : (
+          runs.map((run) => (
+            <div key={run.run_id} className="rounded-lg border border-border bg-surface p-4">
+              <div className="flex items-start justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => onRunClick?.(run)}
+                  className="text-left flex-1 min-w-0"
+                >
+                  <div className="font-medium text-text-primary truncate">{run.name || run.run_id.slice(0, 8)}</div>
+                  <div className="text-xs text-text-muted font-mono mt-0.5 truncate">{run.run_id}</div>
+                </button>
+
+                {deleteConfirmId === run.run_id ? (
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => {
+                        void handleDeleteRun(run.run_id);
+                      }}
+                      disabled={deletingRunId === run.run_id}
+                      className="px-2 py-1 text-xs font-medium rounded bg-danger text-white hover:bg-danger/80 disabled:opacity-50 transition-colors"
+                    >
+                      {deletingRunId === run.run_id ? '...' : 'Yes'}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setDeleteConfirmId(null);
+                      }}
+                      className="px-2 py-1 text-xs font-medium rounded bg-surface-secondary text-text-secondary hover:bg-surface-hover border border-border transition-colors"
+                    >
+                      No
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setDeleteConfirmId(run.run_id);
+                    }}
+                    className="p-1.5 rounded hover:bg-danger/10 text-text-muted hover:text-danger transition-colors"
+                    title="Delete run"
+                  >
+                    <TrashIcon />
+                  </button>
+                )}
+              </div>
+
+              <div className="mt-3 flex items-center">
+                <span
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
+                    STATUS_STYLES[run.status] || STATUS_STYLES.pending
+                  }`}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[run.status] || STATUS_DOT.pending}`} />
+                  {run.status}
+                </span>
+              </div>
+
+              <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                <div className="rounded-md bg-surface-secondary px-2.5 py-2">
+                  <div className="text-text-muted">Project</div>
+                  <div className="text-text-primary mt-0.5 truncate">{run.project_id}</div>
+                </div>
+                <div className="rounded-md bg-surface-secondary px-2.5 py-2">
+                  <div className="text-text-muted">Metrics</div>
+                  <div className="text-text-primary mt-0.5 font-mono">{run.metrics_count}</div>
+                </div>
+                <div className="rounded-md bg-surface-secondary px-2.5 py-2">
+                  <div className="text-text-muted">Duration</div>
+                  <div className="text-text-primary mt-0.5 font-mono">{formatDuration(run.duration_seconds)}</div>
+                </div>
+                <div className="rounded-md bg-surface-secondary px-2.5 py-2">
+                  <div className="text-text-muted">Created</div>
+                  <div className="text-text-primary mt-0.5 truncate">{formatDate(run.created_at)}</div>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
       {/* Pagination */}
       {totalPages > 1 && (
-        <div className="mt-4 flex items-center justify-between">
-          <div className="text-sm text-text-muted">
+        <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="text-sm text-text-muted text-center sm:text-left">
             {page * pageSize + 1}-{Math.min((page + 1) * pageSize, total)} of {total}
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center justify-center gap-1">
             <button
               onClick={() => setPage((p) => Math.max(0, p - 1))}
               disabled={page === 0}

@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { api, MetricSeries } from '@/lib/api';
 import { UPlotChart } from '@/components/charts/UPlotChart';
 import { useTheme } from '@/components/ThemeProvider';
+import { useAutoRefresh } from '@/lib/useAutoRefresh';
 
 // Icons
 const ExpandIcon = () => (
@@ -77,36 +78,46 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
     }
   }, [selectedMetric]);
 
-  useEffect(() => {
-    async function fetchComparison() {
-      if (runIds.length === 0) {
-        setRuns([]);
-        setCommonMetrics([]);
-        setSelectedMetric('');
-        setLoading(false);
-        return;
-      }
+  const fetchComparison = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
+    if (runIds.length === 0) {
+      setRuns([]);
+      setCommonMetrics([]);
+      setSelectedMetric('');
+      setLoading(false);
+      return;
+    }
 
+    if (!silent) {
       setLoading(true);
-      setError(null);
+    }
+    setError(null);
 
-      try {
-        const response = await api.compareRuns(runIds, [], COMPARE_MAX_POINTS);
-        setRuns(response.runs);
-        setCommonMetrics(response.common_metrics);
-        setSelectedMetric((prev) => {
-          if (response.common_metrics.length === 0) return '';
-          if (prev && response.common_metrics.includes(prev)) return prev;
-          return response.common_metrics[0];
-        });
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to compare runs');
-      } finally {
+    try {
+      const response = await api.compareRuns(runIds, [], COMPARE_MAX_POINTS);
+      setRuns(response.runs);
+      setCommonMetrics(response.common_metrics);
+      setSelectedMetric((prev) => {
+        if (response.common_metrics.length === 0) return '';
+        if (prev && response.common_metrics.includes(prev)) return prev;
+        return response.common_metrics[0];
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to compare runs');
+    } finally {
+      if (!silent) {
         setLoading(false);
       }
     }
-    fetchComparison();
   }, [runIds]);
+
+  useEffect(() => {
+    void fetchComparison();
+  }, [fetchComparison]);
+
+  useAutoRefresh(
+    () => fetchComparison({ silent: true }),
+    { enabled: runIds.length > 0, intervalMs: 30000, runOnMount: false }
+  );
 
   if (runIds.length === 0) {
     return (
@@ -173,14 +184,14 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
   });
 
   return (
-    <div className="bg-surface rounded-xl border border-border p-6">
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-semibold text-text-primary">Compare Runs</h2>
+    <div className="bg-surface rounded-xl border border-border p-4 sm:p-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
+        <h2 className="text-lg sm:text-xl font-semibold text-text-primary">Compare Runs</h2>
         {commonMetrics.length > 0 && (
           <select
             value={selectedMetric}
             onChange={(e) => setSelectedMetric(e.target.value)}
-            className="px-3 py-2 border border-border rounded-lg text-text-primary bg-surface-secondary focus:outline-none focus:ring-2 focus:ring-accent"
+            className="w-full sm:w-auto px-3 py-2 border border-border rounded-lg text-text-primary bg-surface-secondary focus:outline-none focus:ring-2 focus:ring-accent"
           >
             {commonMetrics.map((name) => (
               <option key={name} value={name}>

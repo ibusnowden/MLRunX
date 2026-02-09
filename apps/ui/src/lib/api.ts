@@ -4,7 +4,12 @@
  * Provides type-safe API calls to the MLRunX backend.
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const DEFAULT_API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const SERVER_API_BASE_URL = process.env.MLRUNX_API_URL || DEFAULT_API_BASE_URL;
+
+export const API_KEY_STORAGE_KEY = 'mlrunx_api_key';
+export const API_URL_STORAGE_KEY = 'mlrunx_api_url';
+export const DEFAULT_API_URL = DEFAULT_API_BASE_URL;
 
 export interface Run {
   run_id: string;
@@ -74,20 +79,99 @@ class ApiError extends Error {
   }
 }
 
+export interface StoredApiConfig {
+  apiBaseUrl: string;
+  apiKey: string;
+}
+
+function normalizeApiBaseUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return DEFAULT_API_BASE_URL;
+  return trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed;
+}
+
+function readStorage(key: string): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStorage(key: string, value: string) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Ignore storage failures in restricted environments.
+  }
+}
+
+function removeStorage(key: string) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // Ignore storage failures in restricted environments.
+  }
+}
+
+export function getStoredApiConfig(): StoredApiConfig {
+  const storedBaseUrl = readStorage(API_URL_STORAGE_KEY);
+  const storedApiKey = readStorage(API_KEY_STORAGE_KEY);
+  return {
+    apiBaseUrl: normalizeApiBaseUrl(storedBaseUrl || DEFAULT_API_BASE_URL),
+    apiKey: storedApiKey || '',
+  };
+}
+
+export function saveStoredApiConfig(config: Partial<StoredApiConfig>) {
+  if (config.apiBaseUrl !== undefined) {
+    writeStorage(API_URL_STORAGE_KEY, normalizeApiBaseUrl(config.apiBaseUrl));
+  }
+  if (config.apiKey !== undefined) {
+    const trimmedKey = config.apiKey.trim();
+    if (trimmedKey) {
+      writeStorage(API_KEY_STORAGE_KEY, trimmedKey);
+    } else {
+      removeStorage(API_KEY_STORAGE_KEY);
+    }
+  }
+}
+
+export function clearStoredApiConfig() {
+  removeStorage(API_KEY_STORAGE_KEY);
+  removeStorage(API_URL_STORAGE_KEY);
+}
+
+function getApiBaseUrl(): string {
+  if (typeof window !== 'undefined') {
+    const stored = readStorage(API_URL_STORAGE_KEY);
+    return normalizeApiBaseUrl(stored || DEFAULT_API_BASE_URL);
+  }
+  return normalizeApiBaseUrl(SERVER_API_BASE_URL);
+}
+
+function getApiKey(): string | undefined {
+  if (typeof window !== 'undefined') {
+    return readStorage(API_KEY_STORAGE_KEY) || undefined;
+  }
+  return process.env.MLRUNX_API_KEY;
+}
+
 async function fetchApi<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const url = `${API_BASE}${endpoint}`;
+  const url = `${getApiBaseUrl()}${endpoint}`;
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
     ...(options.headers || {}),
   };
 
   // Add API key if available
-  const apiKey = typeof window !== 'undefined'
-    ? localStorage.getItem('mlrunx_api_key')
-    : process.env.MLRUNX_API_KEY;
+  const apiKey = getApiKey();
 
   if (apiKey) {
     (headers as Record<string, string>)['X-API-Key'] = apiKey;
