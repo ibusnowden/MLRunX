@@ -246,6 +246,26 @@ impl SqliteStore {
             CREATE INDEX IF NOT EXISTS idx_audit_events_occurred ON audit_events(occurred_at DESC);
             CREATE INDEX IF NOT EXISTS idx_audit_events_project ON audit_events(project_id, occurred_at DESC);
 
+            -- UI auth sessions table (feature-flagged JWT/session auth for UI).
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                csrf_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_seen_at TEXT,
+                expires_at TEXT NOT NULL,
+                revoked_at TEXT,
+                replaced_by_session_id TEXT,
+                user_agent TEXT,
+                client_ip TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (replaced_by_session_id) REFERENCES auth_sessions(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expires_at);
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_token_hash ON auth_sessions(token_hash);
+
             -- Share tokens table (public read-only links)
             CREATE TABLE IF NOT EXISTS share_tokens (
                 token TEXT PRIMARY KEY,
@@ -379,6 +399,82 @@ impl SqliteStore {
 
         let memberships: Result<Vec<_>, _> = rows.collect();
         Ok(memberships?)
+    }
+
+    /// Create a UI auth session.
+    pub async fn insert_auth_session(
+        &self,
+        id: &str,
+        user_id: &str,
+        token_hash: &str,
+        csrf_hash: &str,
+        expires_at: &str,
+        user_agent: Option<&str>,
+        client_ip: Option<&str>,
+    ) -> Result<(), SqliteError> {
+        let conn = self.conn.lock().await;
+
+        conn.execute(
+            "INSERT INTO auth_sessions (id, user_id, token_hash, csrf_hash, expires_at, user_agent, client_ip) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, user_id, token_hash, csrf_hash, expires_at, user_agent, client_ip],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get an active (not revoked, not expired) auth session by token hash.
+    pub async fn get_active_auth_session_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<AuthSessionRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        conn.query_row(
+            r#"
+            SELECT id, user_id, token_hash, csrf_hash, expires_at, revoked_at
+            FROM auth_sessions
+            WHERE token_hash = ?1
+              AND revoked_at IS NULL
+              AND expires_at > datetime('now')
+            LIMIT 1
+            "#,
+            params![token_hash],
+            |row| {
+                Ok(AuthSessionRow {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    token_hash: row.get(2)?,
+                    csrf_hash: row.get(3)?,
+                    expires_at: row.get(4)?,
+                    revoked_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(SqliteError::from)
+    }
+
+    /// Update an auth session last-seen timestamp.
+    pub async fn touch_auth_session(&self, session_id: &str) -> Result<(), SqliteError> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE auth_sessions SET last_seen_at = datetime('now'), updated_at = datetime('now') WHERE id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Revoke an auth session by token hash.
+    pub async fn revoke_auth_session_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<bool, SqliteError> {
+        let conn = self.conn.lock().await;
+        let changed = conn.execute(
+            "UPDATE auth_sessions SET revoked_at = datetime('now'), updated_at = datetime('now') WHERE token_hash = ?1 AND revoked_at IS NULL",
+            params![token_hash],
+        )?;
+        Ok(changed > 0)
     }
 
     // =========================================================================
@@ -1152,6 +1248,17 @@ pub struct ApiKeyRow {
 pub struct ProjectMembershipRow {
     pub project_id: String,
     pub role: String,
+}
+
+/// A UI auth session row.
+#[derive(Debug, Clone)]
+pub struct AuthSessionRow {
+    pub id: String,
+    pub user_id: String,
+    pub token_hash: String,
+    pub csrf_hash: String,
+    pub expires_at: String,
+    pub revoked_at: Option<String>,
 }
 
 /// A share token row.

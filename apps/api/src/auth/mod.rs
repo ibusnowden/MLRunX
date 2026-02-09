@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use axum::{
     extract::{Request, State},
-    http::{StatusCode, request::Parts},
+    http::{Method, StatusCode, request::Parts},
     middleware::Next,
     response::Response,
 };
@@ -76,10 +76,35 @@ struct UiJwtConfig {
     issuer: Option<String>,
     audience: Option<String>,
     provider: String,
+    session_cookie_name: String,
+    csrf_cookie_name: String,
+    session_ttl_seconds: u64,
+    cookie_secure: bool,
+    cookie_same_site: String,
 }
 
 impl UiJwtConfig {
     fn from_env() -> Self {
+        let session_ttl_seconds = std::env::var("MLRUNX_UI_SESSION_TTL_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(900);
+
+        let cookie_same_site = std::env::var("MLRUNX_UI_COOKIE_SAMESITE")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| {
+                if v.eq_ignore_ascii_case("strict") {
+                    "Strict".to_string()
+                } else if v.eq_ignore_ascii_case("none") {
+                    "None".to_string()
+                } else {
+                    "Lax".to_string()
+                }
+            })
+            .unwrap_or_else(|| "Lax".to_string());
+
         Self {
             enabled: env_flag("MLRUNX_UI_JWT_AUTH_ENABLED"),
             secret: std::env::var("MLRUNX_JWT_SECRET")
@@ -95,8 +120,35 @@ impl UiJwtConfig {
                 .ok()
                 .filter(|v| !v.trim().is_empty())
                 .unwrap_or_else(|| "jwt".to_string()),
+            session_cookie_name: std::env::var("MLRUNX_UI_SESSION_COOKIE_NAME")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| "mlrunx_ui_session".to_string()),
+            csrf_cookie_name: std::env::var("MLRUNX_UI_CSRF_COOKIE_NAME")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| "mlrunx_ui_csrf".to_string()),
+            session_ttl_seconds,
+            cookie_secure: env_flag("MLRUNX_UI_COOKIE_SECURE"),
+            cookie_same_site,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct UiSessionIssue {
+    pub session_token: String,
+    pub csrf_token: String,
+    pub expires_at: String,
+    pub user_id: String,
+    pub allowed_project_ids: Vec<String>,
+}
+
+struct ResolvedUiIdentity {
+    user_id: String,
+    user_name: Option<String>,
+    allowed_project_ids: HashSet<String>,
+    scopes: Vec<String>,
 }
 
 fn env_flag(name: &str) -> bool {
@@ -159,6 +211,11 @@ impl ApiKeyStore {
                 issuer: None,
                 audience: None,
                 provider: "jwt".to_string(),
+                session_cookie_name: "mlrunx_ui_session".to_string(),
+                csrf_cookie_name: "mlrunx_ui_csrf".to_string(),
+                session_ttl_seconds: 900,
+                cookie_secure: false,
+                cookie_same_site: "Lax".to_string(),
             },
             auth_disabled: std::sync::atomic::AtomicBool::new(false),
         }
@@ -166,6 +223,26 @@ impl ApiKeyStore {
 
     pub fn is_ui_jwt_enabled(&self) -> bool {
         self.ui_jwt.enabled
+    }
+
+    pub fn ui_session_cookie_name(&self) -> &str {
+        &self.ui_jwt.session_cookie_name
+    }
+
+    pub fn ui_csrf_cookie_name(&self) -> &str {
+        &self.ui_jwt.csrf_cookie_name
+    }
+
+    pub fn ui_session_ttl_seconds(&self) -> u64 {
+        self.ui_jwt.session_ttl_seconds
+    }
+
+    pub fn ui_cookie_secure(&self) -> bool {
+        self.ui_jwt.cookie_secure
+    }
+
+    pub fn ui_cookie_same_site(&self) -> &str {
+        &self.ui_jwt.cookie_same_site
     }
 
     /// Check if auth is disabled.
@@ -375,10 +452,159 @@ impl ApiKeyStore {
             .collect()
     }
 
+    pub async fn create_ui_session_from_jwt(
+        &self,
+        raw_jwt: &str,
+        user_agent: Option<&str>,
+        client_ip: Option<&str>,
+    ) -> Result<UiSessionIssue, String> {
+        if !self.ui_jwt.enabled {
+            return Err("UI JWT auth is disabled.".to_string());
+        }
+
+        let sqlite_store = self
+            .sqlite_store
+            .as_ref()
+            .ok_or_else(|| "SQLite-backed auth store is required for UI JWT auth.".to_string())?;
+
+        let identity = self.resolve_ui_identity_from_jwt(raw_jwt).await?;
+
+        let session_token = generate_session_token();
+        let csrf_token = generate_session_token();
+        let token_hash = hash_api_key(&session_token);
+        let csrf_hash = hash_api_key(&csrf_token);
+        let expires_at = (chrono::Utc::now()
+            + chrono::Duration::seconds(self.ui_jwt.session_ttl_seconds as i64))
+        .naive_utc()
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+        let session_id = uuid::Uuid::now_v7().to_string();
+
+        sqlite_store
+            .insert_auth_session(
+                &session_id,
+                &identity.user_id,
+                &token_hash,
+                &csrf_hash,
+                &expires_at,
+                user_agent,
+                client_ip,
+            )
+            .await
+            .map_err(|e| format!("Failed to persist UI session: {e}"))?;
+
+        let mut allowed_project_ids: Vec<String> =
+            identity.allowed_project_ids.into_iter().collect();
+        allowed_project_ids.sort();
+
+        Ok(UiSessionIssue {
+            session_token,
+            csrf_token,
+            expires_at,
+            user_id: identity.user_id,
+            allowed_project_ids,
+        })
+    }
+
     async fn authenticate_ui_jwt(
         &self,
         raw_token: &str,
     ) -> Result<(ApiKey, HashSet<String>), String> {
+        let identity = self.resolve_ui_identity_from_jwt(raw_token).await?;
+        let api_key = Self::build_ui_auth_api_key(&identity, "jwt");
+        Ok((api_key, identity.allowed_project_ids))
+    }
+
+    async fn authenticate_ui_session(
+        &self,
+        raw_session_token: &str,
+        csrf_token: Option<&str>,
+        require_csrf: bool,
+    ) -> Result<(ApiKey, HashSet<String>), String> {
+        if !self.ui_jwt.enabled {
+            return Err("UI JWT auth is disabled.".to_string());
+        }
+
+        let sqlite_store = self.sqlite_store.as_ref().ok_or_else(|| {
+            "SQLite-backed auth store is required for UI session auth.".to_string()
+        })?;
+
+        let token_hash = hash_api_key(raw_session_token);
+        let session = sqlite_store
+            .get_active_auth_session_by_token_hash(&token_hash)
+            .await
+            .map_err(|e| format!("Failed to resolve UI session: {e}"))?
+            .ok_or_else(|| "Invalid or expired UI session.".to_string())?;
+
+        if require_csrf {
+            let provided = csrf_token
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| "Missing CSRF token for mutating request.".to_string())?;
+            if hash_api_key(provided) != session.csrf_hash {
+                return Err("Invalid CSRF token.".to_string());
+            }
+        }
+
+        let (scopes, allowed_project_ids) = self
+            .resolve_memberships_for_user(&session.user_id)
+            .await
+            .map_err(|e| format!("Failed to resolve UI session memberships: {e}"))?;
+
+        if let Err(err) = sqlite_store.touch_auth_session(&session.id).await {
+            warn!("Failed to update UI session last_seen_at: {err}");
+        }
+
+        let identity = ResolvedUiIdentity {
+            user_id: session.user_id,
+            user_name: None,
+            allowed_project_ids,
+            scopes,
+        };
+        let api_key = Self::build_ui_auth_api_key(&identity, "session");
+        Ok((api_key, identity.allowed_project_ids))
+    }
+
+    pub async fn revoke_ui_session(
+        &self,
+        raw_session_token: &str,
+        csrf_token: Option<&str>,
+    ) -> Result<(), String> {
+        if !self.ui_jwt.enabled {
+            return Ok(());
+        }
+
+        let sqlite_store = self.sqlite_store.as_ref().ok_or_else(|| {
+            "SQLite-backed auth store is required for UI session auth.".to_string()
+        })?;
+
+        let token_hash = hash_api_key(raw_session_token);
+        if let Some(session) = sqlite_store
+            .get_active_auth_session_by_token_hash(&token_hash)
+            .await
+            .map_err(|e| format!("Failed to resolve UI session: {e}"))?
+        {
+            let provided = csrf_token
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| "Missing CSRF token.".to_string())?;
+            if hash_api_key(provided) != session.csrf_hash {
+                return Err("Invalid CSRF token.".to_string());
+            }
+        }
+
+        sqlite_store
+            .revoke_auth_session_by_token_hash(&token_hash)
+            .await
+            .map_err(|e| format!("Failed to revoke UI session: {e}"))?;
+
+        Ok(())
+    }
+
+    async fn resolve_ui_identity_from_jwt(
+        &self,
+        raw_token: &str,
+    ) -> Result<ResolvedUiIdentity, String> {
         if !self.ui_jwt.enabled {
             return Err("UI JWT auth is disabled.".to_string());
         }
@@ -399,8 +625,27 @@ impl ApiKeyStore {
             .await
             .map_err(|e| format!("Failed to resolve JWT user identity: {e}"))?;
 
+        let (scopes, allowed_project_ids) = self.resolve_memberships_for_user(&user_id).await?;
+
+        Ok(ResolvedUiIdentity {
+            user_id,
+            user_name: claims.email.or(claims.name),
+            allowed_project_ids,
+            scopes,
+        })
+    }
+
+    async fn resolve_memberships_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<(Vec<String>, HashSet<String>), String> {
+        let sqlite_store = self
+            .sqlite_store
+            .as_ref()
+            .ok_or_else(|| "SQLite-backed auth store is required for UI auth.".to_string())?;
+
         let memberships = sqlite_store
-            .list_active_project_memberships(&user_id)
+            .list_active_project_memberships(user_id)
             .await
             .map_err(|e| format!("Failed to load project memberships: {e}"))?;
 
@@ -410,22 +655,26 @@ impl ApiKeyStore {
 
         let (mut scopes, allowed_projects) = Self::derive_scopes_and_projects(&memberships);
         scopes.sort();
+        Ok((scopes, allowed_projects))
+    }
 
+    fn build_ui_auth_api_key(identity: &ResolvedUiIdentity, mode_prefix: &str) -> ApiKey {
         let now = SystemTime::now();
-        let key_prefix = format!("jwt_{}", user_id.chars().take(6).collect::<String>());
-        let api_key = ApiKey {
-            id: format!("jwt:{user_id}"),
-            key_hash: format!("jwt:{user_id}"),
+        let key_prefix = format!(
+            "{mode_prefix}_{}",
+            identity.user_id.chars().take(6).collect::<String>()
+        );
+        ApiKey {
+            id: format!("{mode_prefix}:{}", identity.user_id),
+            key_hash: format!("{mode_prefix}:{}", identity.user_id),
             key_prefix,
             project_id: None,
-            name: claims.email.or(claims.name),
-            scopes,
+            name: identity.user_name.clone(),
+            scopes: identity.scopes.clone(),
             created_at: now,
             last_used_at: Some(now),
             revoked_at: None,
-        };
-
-        Ok((api_key, allowed_projects))
+        }
     }
 
     fn decode_ui_jwt_claims(&self, raw_token: &str) -> Result<UiJwtClaims, String> {
@@ -539,6 +788,15 @@ pub fn generate_api_key() -> String {
     let mut rng = rand::rng();
     let bytes: Vec<u8> = (0..32).map(|_| rng.random()).collect();
     format!("mlrunx_{}", hex::encode(bytes))
+}
+
+/// Generate a random token for UI session/csrf cookies.
+pub fn generate_session_token() -> String {
+    use base64::Engine;
+    use rand::Rng;
+    let mut rng = rand::rng();
+    let bytes: Vec<u8> = (0..32).map(|_| rng.random()).collect();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 /// Authenticated user context extracted from request.
@@ -690,9 +948,9 @@ impl AuthError {
     pub fn message(&self) -> &'static str {
         match self {
             AuthError::MissingKey => {
-                "Authentication required. Use X-API-Key or Authorization: Bearer <token>."
+                "Authentication required. Use X-API-Key, Authorization: Bearer <token>, or a valid UI session cookie."
             }
-            AuthError::InvalidKey => "Invalid API key or JWT token.",
+            AuthError::InvalidKey => "Invalid API key, JWT token, or UI session.",
             AuthError::InsufficientScope => "Insufficient permissions.",
             AuthError::ProjectAccessDenied => "Access to project denied.",
         }
@@ -702,11 +960,20 @@ impl AuthError {
 enum RequestCredential {
     ApiKey(String),
     Bearer(String),
+    UiSession {
+        session_token: String,
+        csrf_token: Option<String>,
+        require_csrf: bool,
+    },
     Missing,
 }
 
 /// Extract auth credential from request headers.
-fn extract_request_credential(parts: &Parts) -> RequestCredential {
+fn extract_request_credential(
+    parts: &Parts,
+    key_store: &ApiKeyStore,
+    method: &Method,
+) -> RequestCredential {
     // Prefer explicit X-API-Key for SDK/service callers.
     if let Some(key_header) = parts.headers.get("x-api-key") {
         if let Ok(key_str) = key_header.to_str() {
@@ -729,7 +996,48 @@ fn extract_request_credential(parts: &Parts) -> RequestCredential {
         }
     }
 
+    if key_store.is_ui_jwt_enabled() {
+        if let Some(session_token) = extract_cookie(parts, key_store.ui_session_cookie_name()) {
+            return RequestCredential::UiSession {
+                session_token,
+                csrf_token: extract_header_token(parts, "x-csrf-token"),
+                require_csrf: requires_csrf(method),
+            };
+        }
+    }
+
     RequestCredential::Missing
+}
+
+fn extract_header_token(parts: &Parts, header_name: &str) -> Option<String> {
+    parts
+        .headers
+        .get(header_name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn extract_cookie(parts: &Parts, cookie_name: &str) -> Option<String> {
+    let cookie_header = parts.headers.get("cookie")?.to_str().ok()?;
+    cookie_header.split(';').find_map(|part| {
+        let mut kv = part.trim().splitn(2, '=');
+        let name = kv.next()?.trim();
+        let value = kv.next()?.trim();
+        if name == cookie_name && !value.is_empty() {
+            Some(value.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn requires_csrf(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    )
 }
 
 /// Middleware for API key authentication.
@@ -748,7 +1056,7 @@ pub async fn auth_middleware(
     // Extract API key from headers
     let raw_key = {
         let (parts, body) = request.into_parts();
-        let key = extract_request_credential(&parts);
+        let key = extract_request_credential(&parts, key_store.as_ref(), &parts.method);
         request = Request::from_parts(parts, body);
         key
     };
@@ -795,6 +1103,26 @@ pub async fn auth_middleware(
                 ));
             }
         }
+        RequestCredential::UiSession {
+            session_token,
+            csrf_token,
+            require_csrf,
+        } => match key_store
+            .authenticate_ui_session(&session_token, csrf_token.as_deref(), require_csrf)
+            .await
+        {
+            Ok((api_key, allowed_projects)) => (api_key, AuthMode::UiJwt, Some(allowed_projects)),
+            Err(err) => {
+                warn!("Invalid UI session: {err}");
+                if err.contains("CSRF") {
+                    return Err((StatusCode::FORBIDDEN, "Invalid CSRF token.".to_string()));
+                }
+                return Err((
+                    AuthError::InvalidKey.status_code(),
+                    AuthError::InvalidKey.message().to_string(),
+                ));
+            }
+        },
     };
 
     debug!(
@@ -862,6 +1190,14 @@ mod tests {
 
         // Keys should be reasonable length
         assert!(key1.len() > 40);
+    }
+
+    #[test]
+    fn test_generate_session_token() {
+        let token1 = generate_session_token();
+        let token2 = generate_session_token();
+        assert_ne!(token1, token2);
+        assert!(token1.len() > 32);
     }
 
     #[tokio::test]
@@ -994,6 +1330,56 @@ mod tests {
         assert!(api_key.scopes.contains(&"read".to_string()));
         assert!(api_key.scopes.contains(&"write".to_string()));
         assert!(!api_key.scopes.contains(&"admin".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_ui_session_auth_requires_csrf_for_mutating_requests() {
+        let sqlite_store = Arc::new(SqliteStore::new(":memory:").await.unwrap());
+        let project_a = sqlite_store.get_or_create_project("proj-a").await.unwrap();
+        let store = ApiKeyStore::new_with_sqlite_and_ui_jwt(sqlite_store.clone(), "test-secret");
+
+        let user_id = sqlite_store
+            .get_or_create_user_identity(
+                "jwt",
+                "user-subject",
+                Some("jwt@example.com"),
+                Some("JWT User"),
+            )
+            .await
+            .unwrap();
+        sqlite_store
+            .grant_project_membership(&project_a, &user_id, "editor", None)
+            .await
+            .unwrap();
+
+        let claims = TestJwtClaims {
+            sub: "user-subject".to_string(),
+            email: Some("jwt@example.com".to_string()),
+            name: Some("JWT User".to_string()),
+            exp: (chrono::Utc::now().timestamp() + 3600) as usize,
+        };
+        let token = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret("test-secret".as_bytes()),
+        )
+        .unwrap();
+
+        let issue = store
+            .create_ui_session_from_jwt(&token, Some("test-agent"), Some("127.0.0.1"))
+            .await
+            .unwrap();
+
+        let no_csrf = store
+            .authenticate_ui_session(&issue.session_token, None, true)
+            .await;
+        assert!(no_csrf.is_err());
+
+        let ok = store
+            .authenticate_ui_session(&issue.session_token, Some(&issue.csrf_token), true)
+            .await
+            .unwrap();
+        assert!(ok.1.contains(&project_a));
     }
 
     #[test]

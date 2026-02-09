@@ -9,7 +9,7 @@ const SERVER_API_BASE_URL = process.env.MLRUNX_API_URL || DEFAULT_API_BASE_URL;
 
 export const API_KEY_STORAGE_KEY = 'mlrunx_api_key';
 export const API_URL_STORAGE_KEY = 'mlrunx_api_url';
-export const SESSION_JWT_STORAGE_KEY = 'mlrunx_session_jwt';
+export const UI_CSRF_COOKIE_NAME = 'mlrunx_ui_csrf';
 export const DEFAULT_API_URL = DEFAULT_API_BASE_URL;
 
 export interface Run {
@@ -83,7 +83,22 @@ class ApiError extends Error {
 export interface StoredApiConfig {
   apiBaseUrl: string;
   apiKey: string;
-  sessionJwt: string;
+}
+
+export interface UiAuthLoginResult {
+  status: string;
+  user_id: string;
+  expires_at: string;
+  project_count: number;
+}
+
+export interface UiAuthSessionResult {
+  authenticated: boolean;
+  auth_mode: string;
+  scopes: string[];
+  project_ids: string[];
+  key_prefix: string;
+  is_dev_mode: boolean;
 }
 
 function normalizeApiBaseUrl(value: string): string {
@@ -122,11 +137,9 @@ function removeStorage(key: string) {
 export function getStoredApiConfig(): StoredApiConfig {
   const storedBaseUrl = readStorage(API_URL_STORAGE_KEY);
   const storedApiKey = readStorage(API_KEY_STORAGE_KEY);
-  const storedSessionJwt = readStorage(SESSION_JWT_STORAGE_KEY);
   return {
     apiBaseUrl: normalizeApiBaseUrl(storedBaseUrl || DEFAULT_API_BASE_URL),
     apiKey: storedApiKey || '',
-    sessionJwt: storedSessionJwt || '',
   };
 }
 
@@ -142,20 +155,11 @@ export function saveStoredApiConfig(config: Partial<StoredApiConfig>) {
       removeStorage(API_KEY_STORAGE_KEY);
     }
   }
-  if (config.sessionJwt !== undefined) {
-    const trimmedToken = config.sessionJwt.trim();
-    if (trimmedToken) {
-      writeStorage(SESSION_JWT_STORAGE_KEY, trimmedToken);
-    } else {
-      removeStorage(SESSION_JWT_STORAGE_KEY);
-    }
-  }
 }
 
 export function clearStoredApiConfig() {
   removeStorage(API_KEY_STORAGE_KEY);
   removeStorage(API_URL_STORAGE_KEY);
-  removeStorage(SESSION_JWT_STORAGE_KEY);
 }
 
 function getApiBaseUrl(): string {
@@ -173,14 +177,30 @@ function getApiKey(): string | undefined {
   return process.env.MLRUNX_API_KEY;
 }
 
-function getSessionJwt(): string | undefined {
-  if (typeof window === 'undefined') return undefined;
-  return readStorage(SESSION_JWT_STORAGE_KEY) || undefined;
+function readCookie(name: string): string | undefined {
+  if (typeof document === 'undefined') return undefined;
+  const match = document.cookie
+    .split(';')
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${name}=`));
+  if (!match) return undefined;
+  return decodeURIComponent(match.slice(name.length + 1));
+}
+
+function isMutatingMethod(method: string | undefined): boolean {
+  if (!method) return false;
+  const normalized = method.toUpperCase();
+  return normalized === 'POST' || normalized === 'PUT' || normalized === 'PATCH' || normalized === 'DELETE';
+}
+
+interface FetchApiOptions {
+  skipApiKey?: boolean;
 }
 
 async function fetchApi<T>(
   endpoint: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
+  fetchOptions: FetchApiOptions = {}
 ): Promise<T> {
   const url = `${getApiBaseUrl()}${endpoint}`;
   const headers: HeadersInit = {
@@ -188,19 +208,24 @@ async function fetchApi<T>(
     ...(options.headers || {}),
   };
 
-  // Prefer JWT/session token when configured; fallback to API key.
-  const sessionJwt = getSessionJwt();
   const apiKey = getApiKey();
-
-  if (sessionJwt) {
-    (headers as Record<string, string>)['Authorization'] = `Bearer ${sessionJwt}`;
-  } else if (apiKey) {
+  if (!fetchOptions.skipApiKey && apiKey) {
     (headers as Record<string, string>)['X-API-Key'] = apiKey;
   }
+
+  if (isMutatingMethod(options.method)) {
+    const csrfToken = readCookie(UI_CSRF_COOKIE_NAME);
+    if (csrfToken) {
+      (headers as Record<string, string>)['X-CSRF-Token'] = csrfToken;
+    }
+  }
+
+  const includeCredentials = fetchOptions.skipApiKey || !apiKey;
 
   const response = await fetch(url, {
     ...options,
     headers,
+    credentials: includeCredentials ? 'include' : 'same-origin',
   });
 
   if (!response.ok) {
@@ -212,6 +237,29 @@ async function fetchApi<T>(
 }
 
 export const api = {
+  async loginUiSession(jwt: string): Promise<UiAuthLoginResult> {
+    return fetchApi<UiAuthLoginResult>(
+      '/api/v1/ui-auth/login',
+      {
+        method: 'POST',
+        body: JSON.stringify({ jwt }),
+      },
+      { skipApiKey: true }
+    );
+  },
+
+  async getUiSession(): Promise<UiAuthSessionResult> {
+    return fetchApi<UiAuthSessionResult>('/api/v1/ui-auth/session', {}, { skipApiKey: true });
+  },
+
+  async logoutUiSession(): Promise<{ status: string }> {
+    return fetchApi<{ status: string }>(
+      '/api/v1/ui-auth/logout',
+      { method: 'POST' },
+      { skipApiKey: true }
+    );
+  },
+
   /**
    * List runs with optional filtering and pagination.
    */
