@@ -659,6 +659,13 @@ async fn http_create_key(
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<CreateKeyRequest>,
 ) -> Result<Json<CreateKeyResponse>, (StatusCode, String)> {
+    if auth.is_ui_jwt() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "API key management via UI JWT auth is disabled in this phase. Use API key auth for key management.".to_string(),
+        ));
+    }
+
     // Only admin can create keys
     auth.require_scope("admin")?;
 
@@ -710,6 +717,13 @@ async fn http_list_keys(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<ListKeysResponse>, (StatusCode, String)> {
+    if auth.is_ui_jwt() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "API key management via UI JWT auth is disabled in this phase. Use API key auth for key management.".to_string(),
+        ));
+    }
+
     auth.require_scope("admin")?;
 
     let project_filter = auth.project_id();
@@ -754,6 +768,13 @@ async fn http_revoke_key(
     Extension(auth): Extension<AuthContext>,
     axum::extract::Path(key_id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if auth.is_ui_jwt() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "API key management via UI JWT auth is disabled in this phase. Use API key auth for key management.".to_string(),
+        ));
+    }
+
     auth.require_scope("admin")?;
 
     // Find the key by id and get its hash for revocation
@@ -1075,26 +1096,48 @@ async fn http_list_runs(
     let limit = query.limit.unwrap_or(100).min(1000);
     let offset = query.offset.unwrap_or(0);
 
-    // Enforce project scope: scoped keys can only list runs in their project.
-    // If the caller has a project_id, use it (overriding any query param).
-    // Admin/dev keys can still filter by any project or see all.
-    let effective_project = match auth.project_id() {
-        Some(scoped_project) => {
-            // If caller also passed a ?project= filter, verify it matches their scope
-            if let Some(ref requested) = query.project {
-                if requested != scoped_project {
-                    return Err((
-                        StatusCode::FORBIDDEN,
-                        format!(
-                            "Access denied: your key is scoped to project '{}', cannot query '{}'.",
-                            scoped_project, requested
-                        ),
-                    ));
-                }
+    // Enforce project scope:
+    // - API key scoped callers: existing behavior.
+    // - UI JWT callers: project must be one of the user's active memberships.
+    let effective_project = if let Some(allowed_projects) = auth.allowed_project_ids() {
+        if let Some(ref requested) = query.project {
+            if !allowed_projects.contains(requested) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "Access denied: this user is not a member of project '{}'.",
+                        requested
+                    ),
+                ));
             }
-            Some(scoped_project.to_string())
+            Some(requested.clone())
+        } else if allowed_projects.len() == 1 {
+            allowed_projects.iter().next().cloned()
+        } else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Multiple project memberships found. Provide ?project=<project_id>.".to_string(),
+            ));
         }
-        None => query.project.clone(), // Admin: use whatever was requested
+    } else {
+        match auth.project_id() {
+            Some(scoped_project) => {
+                // If caller also passed a ?project= filter, verify it matches their scope.
+                if let Some(ref requested) = query.project {
+                    if requested != scoped_project {
+                        return Err((
+                            StatusCode::FORBIDDEN,
+                            format!(
+                                "Access denied: your key is scoped to project '{}', cannot query '{}'.",
+                                scoped_project, requested
+                            ),
+                        ));
+                    }
+                }
+                Some(scoped_project.to_string())
+            }
+            None => query.project.clone(), // Admin/dev: use whatever was requested.
+        }
     };
 
     // Query from SQLite

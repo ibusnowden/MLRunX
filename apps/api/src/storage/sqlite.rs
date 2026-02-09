@@ -296,6 +296,92 @@ impl SqliteStore {
     }
 
     // =========================================================================
+    // User / membership operations
+    // =========================================================================
+
+    /// Get or create a user identity by provider + subject.
+    pub async fn get_or_create_user_identity(
+        &self,
+        auth_provider: &str,
+        external_subject: &str,
+        email: Option<&str>,
+        display_name: Option<&str>,
+    ) -> Result<String, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT id FROM users WHERE auth_provider = ?1 AND external_subject = ?2",
+                params![auth_provider, external_subject],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(user_id) = existing {
+            conn.execute(
+                "UPDATE users SET email = COALESCE(?1, email), display_name = COALESCE(?2, display_name), updated_at = datetime('now') WHERE id = ?3",
+                params![email, display_name, user_id],
+            )?;
+            return Ok(user_id);
+        }
+
+        let user_id = uuid::Uuid::now_v7().to_string();
+        conn.execute(
+            "INSERT INTO users (id, email, display_name, auth_provider, external_subject) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![user_id, email, display_name, auth_provider, external_subject],
+        )?;
+
+        Ok(user_id)
+    }
+
+    /// Grant a project membership role to a user.
+    pub async fn grant_project_membership(
+        &self,
+        project_id: &str,
+        user_id: &str,
+        role: &str,
+        granted_by_user_id: Option<&str>,
+    ) -> Result<(), SqliteError> {
+        let conn = self.conn.lock().await;
+
+        conn.execute(
+            "UPDATE project_memberships SET revoked_at = datetime('now'), updated_at = datetime('now') WHERE project_id = ?1 AND user_id = ?2 AND revoked_at IS NULL",
+            params![project_id, user_id],
+        )?;
+
+        conn.execute(
+            "INSERT INTO project_memberships (id, project_id, user_id, role, granted_by_user_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![uuid::Uuid::now_v7().to_string(), project_id, user_id, role, granted_by_user_id],
+        )?;
+
+        Ok(())
+    }
+
+    /// List active project memberships for a user.
+    pub async fn list_active_project_memberships(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ProjectMembershipRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let mut stmt = conn.prepare(
+            r#"SELECT project_id, role
+               FROM project_memberships
+               WHERE user_id = ?1 AND revoked_at IS NULL
+               ORDER BY created_at DESC"#,
+        )?;
+        let rows = stmt.query_map(params![user_id], |row| {
+            Ok(ProjectMembershipRow {
+                project_id: row.get(0)?,
+                role: row.get(1)?,
+            })
+        })?;
+
+        let memberships: Result<Vec<_>, _> = rows.collect();
+        Ok(memberships?)
+    }
+
+    // =========================================================================
     // Run operations
     // =========================================================================
 
@@ -1061,6 +1147,13 @@ pub struct ApiKeyRow {
     pub revoked_at: Option<String>,
 }
 
+/// A project membership row.
+#[derive(Debug, Clone)]
+pub struct ProjectMembershipRow {
+    pub project_id: String,
+    pub role: String,
+}
+
 /// A share token row.
 #[derive(Debug, Clone)]
 pub struct ShareTokenRow {
@@ -1315,5 +1408,35 @@ mod tests {
             .unwrap()
             .expect("key should exist");
         assert!(revoked_row.revoked_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_user_identity_and_memberships() {
+        let store = create_test_store().await;
+        let project_id = store.get_or_create_project("jwt-project").await.unwrap();
+
+        let user_id = store
+            .get_or_create_user_identity(
+                "jwt",
+                "subject-123",
+                Some("jwt@example.com"),
+                Some("JWT User"),
+            )
+            .await
+            .unwrap();
+
+        store
+            .grant_project_membership(&project_id, &user_id, "viewer", None)
+            .await
+            .unwrap();
+
+        let memberships = store
+            .list_active_project_memberships(&user_id)
+            .await
+            .unwrap();
+
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].project_id, project_id);
+        assert_eq!(memberships[0].role, "viewer");
     }
 }

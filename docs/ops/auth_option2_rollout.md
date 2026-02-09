@@ -58,6 +58,15 @@ Safety rules:
 - Dual auth mode: UI can use JWT/session, SDK continues API keys.
 - Gate with feature flag (default off).
 
+Implementation notes:
+- Feature flag: `MLRUNX_UI_JWT_AUTH_ENABLED=true`
+- JWT secret: `MLRUNX_JWT_SECRET=<hs256-secret>`
+- Optional claim validation: `MLRUNX_JWT_ISSUER`, `MLRUNX_JWT_AUDIENCE`
+- JWT user identity is mapped to `users` + `project_memberships`; role -> scopes:
+  - `viewer` => `read`
+  - `editor` => `read`,`write`
+  - `owner` => `read`,`write`,`admin`
+
 ## PR 4: Endpoint RBAC Enforcement (Feature-Flagged Rollout)
 
 Branch: `feat/pr4-rbac-endpoint-enforcement`

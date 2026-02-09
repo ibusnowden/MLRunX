@@ -18,6 +18,6 @@ pub use postgres::{
     RunStatus, RunSummary,
 };
 pub use sqlite::{
-    AggregatedPointRow, ApiKeyRow, MetricRow, MetricSeriesRow, RunRow, SqliteConfig, SqliteError,
-    SqliteStore,
+    AggregatedPointRow, ApiKeyRow, MetricRow, MetricSeriesRow, ProjectMembershipRow, RunRow,
+    SqliteConfig, SqliteError, SqliteStore,
 };

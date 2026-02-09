@@ -11,12 +11,14 @@ import {
 export default function SettingsPage() {
   const [apiBaseUrl, setApiBaseUrl] = useState(DEFAULT_API_URL);
   const [apiKey, setApiKey] = useState('');
+  const [sessionJwt, setSessionJwt] = useState('');
   const [status, setStatus] = useState<string | null>(null);
 
   useEffect(() => {
     const config = getStoredApiConfig();
     setApiBaseUrl(config.apiBaseUrl);
     setApiKey(config.apiKey);
+    setSessionJwt(config.sessionJwt);
   }, []);
 
   const handleSave = (event: FormEvent) => {
@@ -24,6 +26,7 @@ export default function SettingsPage() {
     saveStoredApiConfig({
       apiBaseUrl,
       apiKey,
+      sessionJwt,
     });
     setStatus(`Saved at ${new Date().toLocaleTimeString()}`);
   };
@@ -32,6 +35,7 @@ export default function SettingsPage() {
     clearStoredApiConfig();
     setApiBaseUrl(DEFAULT_API_URL);
     setApiKey('');
+    setSessionJwt('');
     setStatus(`Reset to defaults at ${new Date().toLocaleTimeString()}`);
   };
 
@@ -79,7 +83,25 @@ export default function SettingsPage() {
               className="w-full rounded-lg border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent"
             />
             <p className="mt-1.5 text-xs text-text-muted">
-              The UI sends this as <code>X-API-Key</code>.
+              Used when no JWT is configured. Sent as <code>X-API-Key</code>.
+            </p>
+          </div>
+
+          <div>
+            <label htmlFor="session-jwt" className="block text-sm font-medium text-text-primary mb-1.5">
+              Session JWT (Optional)
+            </label>
+            <textarea
+              id="session-jwt"
+              value={sessionJwt}
+              onChange={(event) => setSessionJwt(event.target.value)}
+              placeholder="Paste UI session JWT token"
+              autoComplete="off"
+              rows={4}
+              className="w-full rounded-lg border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent"
+            />
+            <p className="mt-1.5 text-xs text-text-muted">
+              Feature-flagged path: when set, UI sends <code>Authorization: Bearer &lt;jwt&gt;</code> instead of API key.
             </p>
           </div>
 
