@@ -150,16 +150,20 @@ export function UPlotChart({
       // Check if the wrapper (outer div) has an explicit height set by
       // a fullscreen parent. Only then override the default height prop.
       const wrapperHeight = wrapperEl ? wrapperEl.clientHeight : 0;
-      // Use wrapper height only if it's significantly larger than the prop
-      // (i.e. fullscreen is stretching it), otherwise stick to the prop.
-      const effectiveHeight = wrapperHeight > height + 60 ? wrapperHeight - 50 : height;
+      const legendHeight = showLegend && series.length > 0 ? 52 : 0;
+      // Use wrapper height only when a parent stretches us (fullscreen/expanded).
+      // Keep fixed-height behavior for normal inline charts.
+      const effectiveHeight =
+        wrapperHeight > height + 60
+          ? Math.max(220, Math.floor(wrapperHeight - legendHeight))
+          : height;
       setDimensions({ width, height: effectiveHeight });
     });
 
     observer.observe(containerRef.current);
     if (wrapperEl) observer.observe(wrapperEl);
     return () => observer.disconnect();
-  }, [height]);
+  }, [height, showLegend, series.length]);
 
   // Create/update chart
   useEffect(() => {
@@ -341,12 +345,12 @@ export function UPlotChart({
   }, []);
 
   return (
-    <div className={`rounded-lg overflow-hidden ${darkTheme ? 'bg-[#0d1117]' : 'bg-white'}`}>
+    <div className={`h-full rounded-lg overflow-hidden flex flex-col ${darkTheme ? 'bg-[#0d1117]' : 'bg-white'}`}>
       {/* Chart container */}
       <div
         ref={containerRef}
-        className="w-full"
-        style={{ height, backgroundColor: bgColor }}
+        className="w-full flex-shrink-0"
+        style={{ height: dimensions.height || height, backgroundColor: bgColor }}
       />
 
       {/* Custom Legend */}
