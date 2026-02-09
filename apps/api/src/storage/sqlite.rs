@@ -166,6 +166,87 @@ impl SqliteStore {
             );
             CREATE INDEX IF NOT EXISTS idx_batches_run ON batches(run_id);
 
+            -- Users table (Option-2 auth foundation)
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                email TEXT,
+                display_name TEXT,
+                auth_provider TEXT NOT NULL DEFAULT 'local',
+                external_subject TEXT,
+                is_service_account INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                disabled_at TEXT,
+                UNIQUE(auth_provider, external_subject)
+            );
+            CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+            -- Project memberships table (owner/editor/viewer)
+            CREATE TABLE IF NOT EXISTS project_memberships (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('owner', 'editor', 'viewer')),
+                granted_by_user_id TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                revoked_at TEXT,
+                FOREIGN KEY (project_id) REFERENCES projects(id),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (granted_by_user_id) REFERENCES users(id)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_project_memberships_active_unique
+                ON project_memberships(project_id, user_id)
+                WHERE revoked_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_project_memberships_user
+                ON project_memberships(user_id, project_id);
+
+            -- API keys table (persistent backing store for PR2)
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id TEXT PRIMARY KEY,
+                key_hash TEXT NOT NULL UNIQUE,
+                key_prefix TEXT NOT NULL,
+                project_id TEXT,
+                created_by_user_id TEXT,
+                name TEXT,
+                description TEXT,
+                scopes TEXT NOT NULL DEFAULT '[]',
+                metadata TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_used_at TEXT,
+                revoked_at TEXT,
+                expires_at TEXT,
+                FOREIGN KEY (project_id) REFERENCES projects(id),
+                FOREIGN KEY (created_by_user_id) REFERENCES users(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id);
+            CREATE INDEX IF NOT EXISTS idx_api_keys_created_by_user ON api_keys(created_by_user_id);
+
+            -- Audit events table
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
+                actor_user_id TEXT,
+                actor_key_id TEXT,
+                project_id TEXT,
+                run_id TEXT,
+                action TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                resource_id TEXT,
+                outcome TEXT NOT NULL DEFAULT 'success',
+                request_id TEXT,
+                client_ip TEXT,
+                user_agent TEXT,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY (actor_user_id) REFERENCES users(id),
+                FOREIGN KEY (actor_key_id) REFERENCES api_keys(id),
+                FOREIGN KEY (project_id) REFERENCES projects(id),
+                FOREIGN KEY (run_id) REFERENCES runs(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_audit_events_occurred ON audit_events(occurred_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_audit_events_project ON audit_events(project_id, occurred_at DESC);
+
             -- Share tokens table (public read-only links)
             CREATE TABLE IF NOT EXISTS share_tokens (
                 token TEXT PRIMARY KEY,
@@ -893,5 +974,62 @@ mod tests {
         // Get tags
         let tags = store.get_tags("run-123").await.unwrap();
         assert_eq!(tags.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_auth_foundation_tables_read_write() {
+        let store = create_test_store().await;
+
+        let project_id = store.get_or_create_project("auth-project").await.unwrap();
+        store.create_run("run-auth-123", &project_id, Some("Auth Run")).await.unwrap();
+
+        let user_id = uuid::Uuid::now_v7().to_string();
+        let admin_user_id = uuid::Uuid::now_v7().to_string();
+        let key_id = uuid::Uuid::now_v7().to_string();
+
+        {
+            let conn = store.conn.lock().await;
+
+            conn.execute(
+                "INSERT INTO users (id, email, display_name, auth_provider, external_subject) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![admin_user_id, "admin@example.com", "Admin User", "local", "admin-sub"],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO users (id, email, display_name, auth_provider, external_subject) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![user_id, "user@example.com", "Regular User", "local", "user-sub"],
+            ).unwrap();
+
+            conn.execute(
+                "INSERT INTO project_memberships (id, project_id, user_id, role, granted_by_user_id) VALUES (?1, ?2, ?3, 'owner', ?4)",
+                params![uuid::Uuid::now_v7().to_string(), project_id, user_id, admin_user_id],
+            ).unwrap();
+
+            conn.execute(
+                "INSERT INTO api_keys (id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![key_id, "hash123", "mlrunx_a", project_id, user_id, "project-key", "[\"read\",\"write\"]"],
+            ).unwrap();
+
+            conn.execute(
+                "INSERT INTO audit_events (actor_user_id, actor_key_id, project_id, run_id, action, resource_type, resource_id, outcome) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![user_id, key_id, project_id, "run-auth-123", "run.init", "run", "run-auth-123", "success"],
+            ).unwrap();
+
+            let role: String = conn.query_row(
+                "SELECT role FROM project_memberships WHERE project_id = ?1 AND user_id = ?2",
+                params![project_id, user_id],
+                |row| row.get(0),
+            ).unwrap();
+            assert_eq!(role, "owner");
+
+            let audit_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM audit_events WHERE actor_key_id = ?1",
+                params![key_id],
+                |row| row.get(0),
+            ).unwrap();
+            assert_eq!(audit_count, 1);
+        }
+
+        let run = store.get_run("run-auth-123").await.unwrap();
+        assert_eq!(run.id, "run-auth-123");
     }
 }
