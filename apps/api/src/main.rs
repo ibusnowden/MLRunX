@@ -1469,6 +1469,7 @@ async fn main() {
         .unwrap_or_else(|_| "mlrunx.db".to_string());
     let sqlite_store = Arc::new(
         SqliteStore::new(&sqlite_path)
+            .await
             .expect("Failed to initialize SQLite store")
     );
     info!("SQLite store initialized at: {}", sqlite_path);
@@ -1531,11 +1532,12 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    fn test_app() -> Router {
+    async fn test_app() -> Router {
         let store = Arc::new(InMemoryStore::new());
         // Use in-memory SQLite for tests
         let sqlite_store = Arc::new(
             SqliteStore::new(":memory:")
+                .await
                 .expect("Failed to create test SQLite store")
         );
         // Use dev mode for tests (auth disabled)
@@ -1554,7 +1556,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_root_endpoint() {
-        let app = test_app();
+        let app = test_app().await;
         let response = app
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
@@ -1565,7 +1567,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_endpoint() {
-        let app = test_app();
+        let app = test_app().await;
         let response = app
             .oneshot(
                 Request::builder()
@@ -1581,7 +1583,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_init_run_http() {
-        let app = test_app();
+        let app = test_app().await;
         let response = app
             .oneshot(
                 Request::builder()
@@ -1604,6 +1606,7 @@ mod tests {
         let store = Arc::new(InMemoryStore::new());
         let sqlite_store = Arc::new(
             SqliteStore::new(":memory:")
+                .await
                 .expect("Failed to create test SQLite store")
         );
         let key_store = Arc::new(ApiKeyStore::new_dev_mode());

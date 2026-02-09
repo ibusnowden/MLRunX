@@ -34,7 +34,7 @@ help:
 	@echo "  make fmt          - Format code"
 	@echo "  make test         - Run unit tests"
 	@echo "  make test-contract    - Run contract tests (proto validation)"
-	@echo "  make test-integration - Run integration tests (requires infra)"
+	@echo "  make test-integration - Run integration tests (local API + runner)"
 	@echo "  make ci           - Run full CI suite locally"
 	@echo ""
 	@echo "Benchmarks:"
@@ -202,11 +202,21 @@ test-contract: proto-check
 # Integration Tests
 # =============================================================================
 
-test-integration: infra-up
+test-integration:
 	@echo "Running integration tests..."
-	@echo "Waiting for services to be ready..."
-	@sleep 5
-	uv run pytest tests/integration/ -m integration -v 2>/dev/null || echo "No integration tests yet"
+	@TMP_DB="/tmp/mlrunx-integration-$$RANDOM.db"; \
+	LOG_FILE="/tmp/mlrunx-api-integration.log"; \
+	rm -f "$$TMP_DB" "$$TMP_DB-shm" "$$TMP_DB-wal"; \
+	MLRUNX_AUTH_DISABLED=true MLRUNX_SQLITE_PATH="$$TMP_DB" cargo run --bin mlrunx-api > "$$LOG_FILE" 2>&1 & \
+	API_PID=$$!; \
+	cleanup() { \
+		kill "$$API_PID" >/dev/null 2>&1 || true; \
+		wait "$$API_PID" >/dev/null 2>&1 || true; \
+		rm -f "$$TMP_DB" "$$TMP_DB-shm" "$$TMP_DB-wal"; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	sleep 5; \
+	uv run --with requests python tests/integration/runner.py --api-url http://localhost:3001 --timeout 60
 	@echo "Integration tests complete"
 
 # =============================================================================

@@ -58,7 +58,7 @@ pub struct SqliteStore {
 
 impl SqliteStore {
     /// Create a new SQLite store, initializing the database schema.
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, SqliteError> {
+    pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self, SqliteError> {
         let conn = Connection::open(path)?;
 
         // Enable WAL mode for better concurrent read/write performance
@@ -70,26 +70,20 @@ impl SqliteStore {
         };
 
         // Initialize schema
-        tokio::task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(store.init_schema())
-        })?;
+        store.init_schema().await?;
 
         info!("SQLite store initialized");
         Ok(store)
     }
 
     /// Create an in-memory SQLite store (useful for testing).
-    pub fn new_in_memory() -> Result<Self, SqliteError> {
+    pub async fn new_in_memory() -> Result<Self, SqliteError> {
         let conn = Connection::open_in_memory()?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
 
-        tokio::task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(store.init_schema())
-        })?;
+        store.init_schema().await?;
 
         Ok(store)
     }
@@ -318,36 +312,41 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
 
         let mut sql = String::from(
-            "SELECT id, project_id, name, status, created_at, updated_at,
-                    finished_at, metrics_count, params_count,
-                    (julianday(COALESCE(finished_at, updated_at)) - julianday(created_at)) * 86400.0
-             FROM runs WHERE 1=1"
+            "SELECT r.id, r.project_id, r.name, r.status, r.created_at, r.updated_at,
+                    r.finished_at, r.metrics_count, r.params_count,
+                    (julianday(COALESCE(r.finished_at, r.updated_at)) - julianday(r.created_at)) * 86400.0
+             FROM runs r
+             LEFT JOIN projects p ON r.project_id = p.id
+             WHERE 1=1"
         );
-        let mut count_sql = String::from("SELECT COUNT(*) FROM runs WHERE 1=1");
+        let mut count_sql = String::from(
+            "SELECT COUNT(*) FROM runs r LEFT JOIN projects p ON r.project_id = p.id WHERE 1=1",
+        );
 
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![];
 
         if let Some(p) = project {
-            sql.push_str(" AND project_id = ?");
-            count_sql.push_str(" AND project_id = ?");
+            sql.push_str(" AND (r.project_id = ? OR p.name = ?)");
+            count_sql.push_str(" AND (r.project_id = ? OR p.name = ?)");
+            params_vec.push(Box::new(p.to_string()));
             params_vec.push(Box::new(p.to_string()));
         }
 
         if let Some(s) = status {
-            sql.push_str(" AND status = ?");
-            count_sql.push_str(" AND status = ?");
+            sql.push_str(" AND r.status = ?");
+            count_sql.push_str(" AND r.status = ?");
             params_vec.push(Box::new(s.to_string()));
         }
 
         if let Some(q) = query {
             let pattern = format!("%{}%", q);
-            sql.push_str(" AND (name LIKE ? OR id LIKE ?)");
-            count_sql.push_str(" AND (name LIKE ? OR id LIKE ?)");
+            sql.push_str(" AND (r.name LIKE ? OR r.id LIKE ?)");
+            count_sql.push_str(" AND (r.name LIKE ? OR r.id LIKE ?)");
             params_vec.push(Box::new(pattern.clone()));
             params_vec.push(Box::new(pattern));
         }
 
-        sql.push_str(" ORDER BY created_at DESC LIMIT ? OFFSET ?");
+        sql.push_str(" ORDER BY r.created_at DESC LIMIT ? OFFSET ?");
 
         // Get total count
         let total: usize = {
@@ -817,22 +816,13 @@ pub struct MetricSeriesRow {
 mod tests {
     use super::*;
 
-    fn create_test_store() -> SqliteStore {
-        // Create a runtime for the async init
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let conn = Connection::open_in_memory().unwrap();
-            let store = SqliteStore {
-                conn: Arc::new(Mutex::new(conn)),
-            };
-            store.init_schema().await.unwrap();
-            store
-        })
+    async fn create_test_store() -> SqliteStore {
+        SqliteStore::new_in_memory().await.unwrap()
     }
 
     #[tokio::test]
     async fn test_create_project() {
-        let store = create_test_store();
+        let store = create_test_store().await;
 
         let id1 = store.get_or_create_project("test-project").await.unwrap();
         let id2 = store.get_or_create_project("test-project").await.unwrap();
@@ -843,7 +833,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_run() {
-        let store = create_test_store();
+        let store = create_test_store().await;
 
         let project_id = store.get_or_create_project("test-project").await.unwrap();
         store.create_run("run-123", &project_id, Some("My Run")).await.unwrap();
@@ -856,7 +846,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_and_query_metrics() {
-        let store = create_test_store();
+        let store = create_test_store().await;
 
         let project_id = store.get_or_create_project("test-project").await.unwrap();
         store.create_run("run-123", &project_id, None).await.unwrap();
@@ -889,7 +879,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tags() {
-        let store = create_test_store();
+        let store = create_test_store().await;
 
         let project_id = store.get_or_create_project("test-project").await.unwrap();
         store.create_run("run-123", &project_id, None).await.unwrap();
