@@ -33,7 +33,10 @@ use std::sync::Arc;
 use axum::{
     Extension, Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{
+        HeaderMap, HeaderValue, Method, StatusCode,
+        header::{self, HeaderName},
+    },
     middleware,
     routing::{delete, get, post},
 };
@@ -43,7 +46,7 @@ use tower_http::{cors::CorsLayer, decompression::RequestDecompressionLayer};
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use auth::{ApiKeyStore, AuthContext, auth_middleware};
+use auth::{ApiKeyStore, AuthContext, AuthMode, auth_middleware};
 use mlrunx_proto::mlrunx::v1::ingest_service_server::IngestServiceServer;
 use services::{
     CardinalityTracker, IdempotencyResult, IdempotencyStore, IngestServiceImpl, MetricPayload,
@@ -71,6 +74,255 @@ async fn health() -> &'static str {
 
 async fn root() -> &'static str {
     "MLRunX API v0.1.0"
+}
+
+#[derive(Debug, Deserialize)]
+struct UiAuthLoginRequest {
+    jwt: String,
+}
+
+#[derive(Debug, Serialize)]
+struct UiAuthLoginResponse {
+    status: String,
+    user_id: String,
+    expires_at: String,
+    project_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct UiAuthSessionResponse {
+    authenticated: bool,
+    auth_mode: String,
+    scopes: Vec<String>,
+    project_ids: Vec<String>,
+    key_prefix: String,
+    is_dev_mode: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct UiAuthLogoutResponse {
+    status: String,
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).map_or(false, |v| {
+        v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+    })
+}
+
+fn extract_cookie(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
+    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookie_header.split(';').find_map(|part| {
+        let mut kv = part.trim().splitn(2, '=');
+        let name = kv.next()?.trim();
+        let value = kv.next()?.trim();
+        if name == cookie_name && !value.is_empty() {
+            Some(value.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn infer_client_ip(headers: &HeaderMap) -> Option<String> {
+    if let Some(forwarded) = header_string(headers, "x-forwarded-for") {
+        let first = forwarded
+            .split(',')
+            .next()
+            .map(str::trim)
+            .unwrap_or_default();
+        if !first.is_empty() {
+            return Some(first.to_string());
+        }
+    }
+    header_string(headers, "x-real-ip")
+}
+
+fn build_cookie(
+    name: &str,
+    value: &str,
+    ttl_seconds: u64,
+    http_only: bool,
+    secure: bool,
+    same_site: &str,
+) -> String {
+    let mut cookie = format!("{name}={value}; Path=/; Max-Age={ttl_seconds}; SameSite={same_site}");
+    if http_only {
+        cookie.push_str("; HttpOnly");
+    }
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+fn build_clear_cookie(name: &str, secure: bool, same_site: &str) -> String {
+    let mut cookie = format!(
+        "{name}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite={same_site}"
+    );
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+async fn http_ui_auth_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<UiAuthLoginRequest>,
+) -> Result<(HeaderMap, Json<UiAuthLoginResponse>), (StatusCode, String)> {
+    if req.jwt.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "JWT is required.".to_string()));
+    }
+
+    let user_agent = header_string(&headers, "user-agent");
+    let client_ip = infer_client_ip(&headers);
+
+    let issue = state
+        .key_store
+        .create_ui_session_from_jwt(&req.jwt, user_agent.as_deref(), client_ip.as_deref())
+        .await
+        .map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
+
+    let secure_cookie = state.key_store.ui_cookie_secure();
+    let same_site = state.key_store.ui_cookie_same_site();
+    let ttl = state.key_store.ui_session_ttl_seconds();
+
+    let session_cookie = build_cookie(
+        state.key_store.ui_session_cookie_name(),
+        &issue.session_token,
+        ttl,
+        true,
+        secure_cookie,
+        same_site,
+    );
+    let csrf_cookie = build_cookie(
+        state.key_store.ui_csrf_cookie_name(),
+        &issue.csrf_token,
+        ttl,
+        false,
+        secure_cookie,
+        same_site,
+    );
+
+    let mut response_headers = HeaderMap::new();
+    response_headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&session_cookie).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to set session cookie: {e}"),
+            )
+        })?,
+    );
+    response_headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&csrf_cookie).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to set csrf cookie: {e}"),
+            )
+        })?,
+    );
+
+    Ok((
+        response_headers,
+        Json(UiAuthLoginResponse {
+            status: "ok".to_string(),
+            user_id: issue.user_id,
+            expires_at: issue.expires_at,
+            project_count: issue.allowed_project_ids.len(),
+        }),
+    ))
+}
+
+async fn http_ui_auth_session(
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<UiAuthSessionResponse>, (StatusCode, String)> {
+    let mut project_ids: Vec<String> = auth
+        .allowed_project_ids()
+        .map(|ids| ids.iter().cloned().collect())
+        .unwrap_or_default();
+    project_ids.sort();
+
+    Ok(Json(UiAuthSessionResponse {
+        authenticated: true,
+        auth_mode: match auth.auth_mode {
+            AuthMode::ApiKey => "api_key".to_string(),
+            AuthMode::UiJwt => "ui_session".to_string(),
+        },
+        scopes: auth.api_key.scopes.clone(),
+        project_ids,
+        key_prefix: auth.api_key.key_prefix.clone(),
+        is_dev_mode: auth.is_dev_mode,
+    }))
+}
+
+async fn http_ui_auth_logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<(HeaderMap, Json<UiAuthLogoutResponse>), (StatusCode, String)> {
+    let session_cookie_name = state.key_store.ui_session_cookie_name().to_string();
+    let csrf_cookie_name = state.key_store.ui_csrf_cookie_name().to_string();
+    let same_site = state.key_store.ui_cookie_same_site().to_string();
+    let secure_cookie = state.key_store.ui_cookie_secure();
+
+    let session_token = extract_cookie(&headers, &session_cookie_name);
+    let csrf_token = header_string(&headers, "x-csrf-token");
+
+    if let Some(token) = session_token {
+        state
+            .key_store
+            .revoke_ui_session(&token, csrf_token.as_deref())
+            .await
+            .map_err(|e| {
+                let status = if e.contains("CSRF") {
+                    StatusCode::FORBIDDEN
+                } else {
+                    StatusCode::UNAUTHORIZED
+                };
+                (status, e)
+            })?;
+    }
+
+    let clear_session_cookie = build_clear_cookie(&session_cookie_name, secure_cookie, &same_site);
+    let clear_csrf_cookie = build_clear_cookie(&csrf_cookie_name, secure_cookie, &same_site);
+
+    let mut response_headers = HeaderMap::new();
+    response_headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear_session_cookie).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to clear session cookie: {e}"),
+            )
+        })?,
+    );
+    response_headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear_csrf_cookie).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to clear csrf cookie: {e}"),
+            )
+        })?,
+    );
+
+    Ok((
+        response_headers,
+        Json(UiAuthLogoutResponse {
+            status: "ok".to_string(),
+        }),
+    ))
 }
 
 /// Request to initialize a run via HTTP.
@@ -1503,11 +1755,50 @@ async fn http_compare_runs(
 // =============================================================================
 
 fn build_http_router(state: AppState) -> Router {
-    let cors = CorsLayer::permissive();
+    let cors = if env_flag("MLRUNX_UI_JWT_AUTH_ENABLED") {
+        let mut allowed_origins: Vec<HeaderValue> = std::env::var("MLRUNX_UI_ALLOWED_ORIGINS")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .filter_map(|origin| HeaderValue::from_str(origin).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if allowed_origins.is_empty() {
+            allowed_origins.push(HeaderValue::from_static("http://localhost:3000"));
+            allowed_origins.push(HeaderValue::from_static("http://127.0.0.1:3000"));
+        }
+
+        CorsLayer::new()
+            .allow_credentials(true)
+            .allow_origin(allowed_origins)
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::DELETE,
+                Method::OPTIONS,
+            ])
+            .allow_headers([
+                header::CONTENT_TYPE,
+                header::AUTHORIZATION,
+                HeaderName::from_static("x-api-key"),
+                HeaderName::from_static("x-csrf-token"),
+            ])
+    } else {
+        CorsLayer::permissive()
+    };
     let decompression = RequestDecompressionLayer::new();
 
     // Routes that require authentication
     let protected_routes = Router::new()
+        // UI auth session endpoints (JWT/session path)
+        .route("/api/v1/ui-auth/session", get(http_ui_auth_session))
+        .route("/api/v1/ui-auth/logout", post(http_ui_auth_logout))
         // SDK HTTP transport endpoints (ingestion)
         .route("/api/v1/runs", post(http_init_run))
         .route("/api/v1/ingest/batch", post(http_ingest_batch))
@@ -1538,6 +1829,8 @@ fn build_http_router(state: AppState) -> Router {
     let public_routes = Router::new()
         .route("/", get(root))
         .route("/health", get(health))
+        // UI auth bootstrap endpoint: exchange JWT for secure session cookies.
+        .route("/api/v1/ui-auth/login", post(http_ui_auth_login))
         // Shared run endpoints (public, no auth — token is the credential)
         .route("/api/v1/shared/{token}", get(http_get_shared_run))
         .route(

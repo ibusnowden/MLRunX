@@ -62,6 +62,16 @@ Implementation notes:
 - Feature flag: `MLRUNX_UI_JWT_AUTH_ENABLED=true`
 - JWT secret: `MLRUNX_JWT_SECRET=<hs256-secret>`
 - Optional claim validation: `MLRUNX_JWT_ISSUER`, `MLRUNX_JWT_AUDIENCE`
+- UI session cookies (safe browser mode):
+  - `POST /api/v1/ui-auth/login` exchanges JWT for `HttpOnly` session cookie + CSRF cookie.
+  - Session data is stored server-side in `auth_sessions` (token hash + csrf hash + expiry + revocation).
+  - UI no longer persists JWT in `localStorage`.
+  - Mutating cookie-authenticated routes require `X-CSRF-Token`.
+  - Optional env controls:
+    - `MLRUNX_UI_ALLOWED_ORIGINS` (comma-separated)
+    - `MLRUNX_UI_SESSION_TTL_SECONDS` (default `900`)
+    - `MLRUNX_UI_SESSION_COOKIE_NAME`, `MLRUNX_UI_CSRF_COOKIE_NAME`
+    - `MLRUNX_UI_COOKIE_SECURE`, `MLRUNX_UI_COOKIE_SAMESITE`
 - JWT user identity is mapped to `users` + `project_memberships`; role -> scopes:
   - `viewer` => `read`
   - `editor` => `read`,`write`
