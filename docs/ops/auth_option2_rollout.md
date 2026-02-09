@@ -94,6 +94,19 @@ Safety rules:
 - Feature flags per endpoint group.
 - Canary rollout first, then full enablement.
 
+Implementation notes:
+- Endpoint checks now flow through a shared RBAC gate in API handlers.
+- Scope enforcement flags:
+  - `MLRUNX_RBAC_ENDPOINT_ENFORCEMENT_ENABLED` (master gate, default `true`)
+  - `MLRUNX_RBAC_READ_ENFORCEMENT_ENABLED` (default `true`)
+  - `MLRUNX_RBAC_WRITE_ENFORCEMENT_ENABLED` (default `true`)
+  - `MLRUNX_RBAC_ADMIN_ENFORCEMENT_ENABLED` (default `true`)
+- API-key callers keep existing behavior (always scope-enforced).
+- UI JWT/session callers can be rolled out per endpoint tier using the flags above.
+- `audit_events` are emitted for:
+  - RBAC denials (scope or project mismatch)
+  - Sensitive successes (`run.init`, `run.finish`, `run.delete`, `api_key.create`, `api_key.revoke`, `share_token.create`, `share_token.revoke`)
+
 ## Deployment Notes
 
 - Keep API-key auth as the baseline safety net until PR 4 is fully rolled out.

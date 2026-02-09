@@ -401,6 +401,27 @@ impl SqliteStore {
         Ok(memberships?)
     }
 
+    /// Insert a security/audit event.
+    pub async fn insert_audit_event(
+        &self,
+        actor_user_id: Option<&str>,
+        actor_key_id: Option<&str>,
+        project_id: Option<&str>,
+        run_id: Option<&str>,
+        action: &str,
+        resource_type: &str,
+        resource_id: Option<&str>,
+        outcome: &str,
+        metadata_json: Option<&str>,
+    ) -> Result<(), SqliteError> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO audit_events (actor_user_id, actor_key_id, project_id, run_id, action, resource_type, resource_id, outcome, metadata) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, '{}'))",
+            params![actor_user_id, actor_key_id, project_id, run_id, action, resource_type, resource_id, outcome, metadata_json],
+        )?;
+        Ok(())
+    }
+
     /// Create a UI auth session.
     pub async fn insert_auth_session(
         &self,
@@ -1460,6 +1481,52 @@ mod tests {
 
         let run = store.get_run("run-auth-123").await.unwrap();
         assert_eq!(run.id, "run-auth-123");
+    }
+
+    #[tokio::test]
+    async fn test_insert_audit_event_method() {
+        let store = create_test_store().await;
+        let project_id = store.get_or_create_project("audit-project").await.unwrap();
+        store
+            .create_run("run-audit-123", &project_id, Some("Audit Run"))
+            .await
+            .unwrap();
+
+        let user_id = uuid::Uuid::now_v7().to_string();
+        {
+            let conn = store.conn.lock().await;
+            conn.execute(
+                "INSERT INTO users (id, email, display_name, auth_provider, external_subject) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![user_id, "audit@example.com", "Audit User", "local", "audit-sub"],
+            )
+            .unwrap();
+        }
+
+        store
+            .insert_audit_event(
+                Some(&user_id),
+                None,
+                Some(&project_id),
+                Some("run-audit-123"),
+                "run.delete",
+                "run",
+                Some("run-audit-123"),
+                "denied",
+                Some(r#"{"reason":"rbac_denied"}"#),
+            )
+            .await
+            .unwrap();
+
+        let conn = store.conn.lock().await;
+        let (outcome, metadata): (String, String) = conn
+            .query_row(
+                "SELECT outcome, metadata FROM audit_events WHERE action = 'run.delete' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(outcome, "denied");
+        assert!(metadata.contains("rbac_denied"));
     }
 
     #[tokio::test]
