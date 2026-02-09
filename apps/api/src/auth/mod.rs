@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use axum::{
     extract::{Request, State},
@@ -14,6 +15,8 @@ use axum::{
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
+
+use crate::storage::{ApiKeyRow, SqliteStore};
 
 /// An API key entry stored in the system.
 #[derive(Debug, Clone)]
@@ -64,12 +67,13 @@ impl ApiKey {
     }
 }
 
-/// In-memory API key store for alpha development.
-/// In production, this would be backed by PostgreSQL.
-#[derive(Debug, Default)]
+/// API key store with optional SQLite persistence.
+#[derive(Default)]
 pub struct ApiKeyStore {
     /// Map from key_hash to ApiKey
     keys: RwLock<HashMap<String, ApiKey>>,
+    /// Optional durable backing store.
+    sqlite_store: Option<Arc<SqliteStore>>,
     /// Whether auth is disabled (for dev/testing)
     pub auth_disabled: std::sync::atomic::AtomicBool,
 }
@@ -79,6 +83,16 @@ impl ApiKeyStore {
     pub fn new() -> Self {
         Self {
             keys: RwLock::new(HashMap::new()),
+            sqlite_store: None,
+            auth_disabled: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Create a key store backed by SQLite for durable key storage.
+    pub fn new_with_sqlite(sqlite_store: Arc<SqliteStore>) -> Self {
+        Self {
+            keys: RwLock::new(HashMap::new()),
+            sqlite_store: Some(sqlite_store),
             auth_disabled: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -87,6 +101,7 @@ impl ApiKeyStore {
     pub fn new_dev_mode() -> Self {
         Self {
             keys: RwLock::new(HashMap::new()),
+            sqlite_store: None,
             auth_disabled: std::sync::atomic::AtomicBool::new(true),
         }
     }
@@ -115,6 +130,15 @@ impl ApiKeyStore {
                     Some("bootstrap".to_string()),
                     vec!["admin".to_string()],
                 );
+
+                if let Some(sqlite_store) = &self.sqlite_store {
+                    if let Err(err) = sqlite_store
+                        .upsert_bootstrap_api_key(&key.id, &key.key_hash, &key.key_prefix)
+                        .await
+                    {
+                        warn!("Failed to persist bootstrap API key: {err}");
+                    }
+                }
 
                 let mut keys = self.keys.write().await;
                 keys.insert(key.key_hash.clone(), key);
@@ -151,12 +175,39 @@ impl ApiKeyStore {
     pub async fn validate_key(&self, raw_key: &str) -> Option<ApiKey> {
         let key_hash = hash_api_key(raw_key);
 
+        // Primary path: durable sqlite store.
+        if let Some(sqlite_store) = &self.sqlite_store {
+            match sqlite_store.get_api_key_by_hash(&key_hash).await {
+                Ok(Some(row)) => {
+                    if row.revoked_at.is_some() {
+                        return None;
+                    }
+
+                    let mut key = Self::api_key_from_row(row);
+                    if let Err(err) = sqlite_store.touch_api_key_last_used(&key_hash).await {
+                        warn!("Failed to update API key last_used_at: {err}");
+                    } else {
+                        key.last_used_at = Some(SystemTime::now());
+                    }
+
+                    let mut keys = self.keys.write().await;
+                    keys.insert(key_hash, key.clone());
+                    return Some(key);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    warn!("Failed to validate API key from sqlite, falling back to memory: {err}");
+                }
+            }
+        }
+
+        // Fallback path: in-memory store.
         let mut keys = self.keys.write().await;
 
         if let Some(key) = keys.get_mut(&key_hash) {
             if key.is_valid() {
                 // Update last used time
-                key.last_used_at = Some(std::time::SystemTime::now());
+                key.last_used_at = Some(SystemTime::now());
                 return Some(key.clone());
             }
         }
@@ -175,6 +226,24 @@ impl ApiKeyStore {
         let raw_key = generate_api_key();
         let key = self.create_key_from_raw(&raw_key, project_id, name, scopes);
 
+        if let Some(sqlite_store) = &self.sqlite_store {
+            let scopes_json =
+                serde_json::to_string(&key.scopes).unwrap_or_else(|_| "[]".to_string());
+            if let Err(err) = sqlite_store
+                .insert_api_key(
+                    &key.id,
+                    &key.key_hash,
+                    &key.key_prefix,
+                    key.project_id.as_deref(),
+                    key.name.as_deref(),
+                    &scopes_json,
+                )
+                .await
+            {
+                warn!("Failed to persist API key, using in-memory fallback: {err}");
+            }
+        }
+
         let mut keys = self.keys.write().await;
         keys.insert(key.key_hash.clone(), key.clone());
 
@@ -183,10 +252,26 @@ impl ApiKeyStore {
 
     /// Revoke an API key.
     pub async fn revoke_key(&self, key_hash: &str) -> bool {
+        if let Some(sqlite_store) = &self.sqlite_store {
+            match sqlite_store.revoke_api_key_by_hash(key_hash).await {
+                Ok(true) => {
+                    let mut keys = self.keys.write().await;
+                    if let Some(key) = keys.get_mut(key_hash) {
+                        key.revoked_at = Some(SystemTime::now());
+                    }
+                    return true;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    warn!("Failed to revoke API key in sqlite, falling back to memory: {err}");
+                }
+            }
+        }
+
         let mut keys = self.keys.write().await;
 
         if let Some(key) = keys.get_mut(key_hash) {
-            key.revoked_at = Some(std::time::SystemTime::now());
+            key.revoked_at = Some(SystemTime::now());
             return true;
         }
 
@@ -195,6 +280,15 @@ impl ApiKeyStore {
 
     /// List all keys for a project.
     pub async fn list_keys(&self, project_id: Option<&str>) -> Vec<ApiKey> {
+        if let Some(sqlite_store) = &self.sqlite_store {
+            match sqlite_store.list_api_keys(project_id).await {
+                Ok(rows) => return rows.into_iter().map(Self::api_key_from_row).collect(),
+                Err(err) => {
+                    warn!("Failed to list API keys from sqlite, falling back to memory: {err}");
+                }
+            }
+        }
+
         let keys = self.keys.read().await;
 
         keys.values()
@@ -207,6 +301,34 @@ impl ApiKeyStore {
             })
             .cloned()
             .collect()
+    }
+
+    fn api_key_from_row(row: ApiKeyRow) -> ApiKey {
+        let scopes = serde_json::from_str::<Vec<String>>(&row.scopes_json).unwrap_or_default();
+
+        ApiKey {
+            id: row.id,
+            key_hash: row.key_hash,
+            key_prefix: row.key_prefix,
+            project_id: row.project_id,
+            name: row.name,
+            scopes,
+            created_at: parse_sqlite_datetime(&row.created_at).unwrap_or_else(SystemTime::now),
+            last_used_at: row.last_used_at.as_deref().and_then(parse_sqlite_datetime),
+            revoked_at: row.revoked_at.as_deref().and_then(parse_sqlite_datetime),
+        }
+    }
+}
+
+fn parse_sqlite_datetime(value: &str) -> Option<SystemTime> {
+    let naive = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok()?;
+    let timestamp =
+        chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc).timestamp();
+
+    if timestamp >= 0 {
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp as u64))
+    } else {
+        SystemTime::UNIX_EPOCH.checked_sub(Duration::from_secs((-timestamp) as u64))
     }
 }
 
@@ -425,6 +547,7 @@ pub fn get_auth_context(extensions: &axum::http::Extensions) -> Option<&AuthCont
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_hash_api_key() {
@@ -500,6 +623,42 @@ mod tests {
 
         // Should be invalid after revocation
         assert!(store.validate_key(&raw_key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_backed_key_persistence() {
+        let db_path = std::env::temp_dir().join(format!("mlrunx-auth-{}.db", uuid::Uuid::now_v7()));
+
+        let sqlite_store = Arc::new(SqliteStore::new(&db_path).await.unwrap());
+        let project_id = sqlite_store
+            .get_or_create_project("persist-project")
+            .await
+            .unwrap();
+
+        let store = ApiKeyStore::new_with_sqlite(sqlite_store.clone());
+        let (raw_key, key) = store
+            .create_key(
+                Some(project_id.clone()),
+                Some("persistent-key".to_string()),
+                vec!["read".to_string()],
+            )
+            .await;
+
+        assert!(store.validate_key(&raw_key).await.is_some());
+        drop(store);
+        drop(sqlite_store);
+
+        // Re-open the same sqlite file to simulate restart and ensure the key still validates.
+        let sqlite_store_reopened = Arc::new(SqliteStore::new(&db_path).await.unwrap());
+        let reopened_store = ApiKeyStore::new_with_sqlite(sqlite_store_reopened);
+
+        assert!(reopened_store.validate_key(&raw_key).await.is_some());
+        assert!(reopened_store.revoke_key(&key.key_hash).await);
+        assert!(reopened_store.validate_key(&raw_key).await.is_none());
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
     }
 
     #[test]

@@ -8,9 +8,6 @@ pub mod postgres;
 pub mod sqlite;
 
 pub use clickhouse::{ClickHouseClient, MetricsRepository};
-pub use sqlite::{
-    AggregatedPointRow, MetricRow, MetricSeriesRow, RunRow, SqliteConfig, SqliteError, SqliteStore,
-};
 pub use minio::{
     ArtifactLocation, ArtifactStore, MinioClient, MinioConfig, MinioError, PresignedUrl,
 };
@@ -19,4 +16,8 @@ pub use postgres::{
     CreateProjectInput, CreateRunInput, ListRunsFilter, Parameter, ParameterRepository,
     ParameterValue, PostgresConfig, PostgresError, Project, ProjectRepository, Run, RunRepository,
     RunStatus, RunSummary,
+};
+pub use sqlite::{
+    AggregatedPointRow, ApiKeyRow, MetricRow, MetricSeriesRow, RunRow, SqliteConfig, SqliteError,
+    SqliteStore,
 };

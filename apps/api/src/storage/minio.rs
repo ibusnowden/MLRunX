@@ -68,7 +68,8 @@ impl MinioConfig {
             secret_key: std::env::var("MINIO_SECRET_KEY")
                 .or_else(|_| std::env::var("AWS_SECRET_ACCESS_KEY"))
                 .unwrap_or_else(|_| "mlrunx_dev".to_string()),
-            bucket: std::env::var("MINIO_BUCKET").unwrap_or_else(|_| "mlrunx-artifacts".to_string()),
+            bucket: std::env::var("MINIO_BUCKET")
+                .unwrap_or_else(|_| "mlrunx-artifacts".to_string()),
             path_style: std::env::var("MINIO_PATH_STYLE")
                 .map(|v| v.to_lowercase() == "true")
                 .unwrap_or(true),
