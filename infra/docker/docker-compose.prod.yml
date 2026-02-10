@@ -1,0 +1,93 @@
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.rust
+      target: api
+      args:
+        RUST_VERSION: ${RUST_VERSION:-1.88}
+    container_name: mlrunx-api
+    expose:
+      - "3001"
+      - "50051"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,mlrunx_api=debug}
+      API_HOST: 0.0.0.0
+      API_HTTP_PORT: "3001"
+      API_GRPC_PORT: "50051"
+      MLRUNX_SQLITE_PATH: ${MLRUNX_SQLITE_PATH:-/data/mlrunx.db}
+
+      MLRUNX_AUTH_DISABLED: ${MLRUNX_AUTH_DISABLED:-false}
+      MLRUNX_API_KEY: ${MLRUNX_API_KEY:-}
+
+      MLRUNX_UI_JWT_AUTH_ENABLED: ${MLRUNX_UI_JWT_AUTH_ENABLED:-true}
+      MLRUNX_JWT_SECRET: ${MLRUNX_JWT_SECRET:?Set MLRUNX_JWT_SECRET in .env.prod}
+      MLRUNX_UI_ALLOWED_ORIGINS: https://${MLRUNX_DOMAIN:?Set MLRUNX_DOMAIN in .env.prod}
+      MLRUNX_UI_COOKIE_SECURE: ${MLRUNX_UI_COOKIE_SECURE:-true}
+      MLRUNX_UI_COOKIE_SAMESITE: ${MLRUNX_UI_COOKIE_SAMESITE:-Lax}
+      MLRUNX_UI_SESSION_TTL_SECONDS: ${MLRUNX_UI_SESSION_TTL_SECONDS:-900}
+      MLRUNX_UI_SESSION_COOKIE_NAME: ${MLRUNX_UI_SESSION_COOKIE_NAME:-mlrunx_ui_session}
+      MLRUNX_UI_CSRF_COOKIE_NAME: ${MLRUNX_UI_CSRF_COOKIE_NAME:-mlrunx_ui_csrf}
+      MLRUNX_JWT_ISSUER: ${MLRUNX_JWT_ISSUER:-}
+      MLRUNX_JWT_AUDIENCE: ${MLRUNX_JWT_AUDIENCE:-}
+
+      MLRUNX_RBAC_ENDPOINT_ENFORCEMENT_ENABLED: ${MLRUNX_RBAC_ENDPOINT_ENFORCEMENT_ENABLED:-true}
+      MLRUNX_RBAC_READ_ENFORCEMENT_ENABLED: ${MLRUNX_RBAC_READ_ENFORCEMENT_ENABLED:-false}
+      MLRUNX_RBAC_WRITE_ENFORCEMENT_ENABLED: ${MLRUNX_RBAC_WRITE_ENFORCEMENT_ENABLED:-false}
+      MLRUNX_RBAC_ADMIN_ENFORCEMENT_ENABLED: ${MLRUNX_RBAC_ADMIN_ENFORCEMENT_ENABLED:-false}
+    volumes:
+      - mlrunx-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  ui:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.ui
+      args:
+        NEXT_PUBLIC_API_URL: https://${MLRUNX_DOMAIN:?Set MLRUNX_DOMAIN in .env.prod}
+    container_name: mlrunx-ui
+    expose:
+      - "3000"
+    environment:
+      # Internal network API URL for server-side rendering paths.
+      MLRUNX_API_URL: http://api:3001
+      # Runtime fallback for server-rendered paths.
+      NEXT_PUBLIC_API_URL: https://${MLRUNX_DOMAIN}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: mlrunx-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      MLRUNX_DOMAIN: ${MLRUNX_DOMAIN:?Set MLRUNX_DOMAIN in .env.prod}
+    volumes:
+      - ./Caddyfile.prod:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      ui:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mlrunx-data:
+  caddy-data:
+  caddy-config:
