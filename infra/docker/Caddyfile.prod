@@ -1,0 +1,15 @@
+{$MLRUNX_DOMAIN} {
+    encode zstd gzip
+
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        X-Frame-Options SAMEORIGIN
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+
+    @api path /api/* /health
+    reverse_proxy @api api:3001
+
+    reverse_proxy ui:3000
+}
