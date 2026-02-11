@@ -65,7 +65,7 @@ const NAV_ITEMS = [
 ];
 
 const BOTTOM_ITEMS = [
-  { href: '/settings', label: 'Settings', icon: SettingsIcon },
+  { href: '/settings', label: 'Access', icon: SettingsIcon },
 ];
 
 export function Sidebar() {

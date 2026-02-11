@@ -20,7 +20,7 @@ function getPageTitle(pathname: string): string {
   if (pathname === '/') return 'Runs';
   if (pathname.startsWith('/runs/')) return 'Run Details';
   if (pathname === '/compare') return 'Compare';
-  if (pathname === '/settings') return 'Settings';
+  if (pathname === '/settings') return 'Access Console';
   return 'MLRunX';
 }
 

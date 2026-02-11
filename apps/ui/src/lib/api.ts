@@ -101,6 +101,36 @@ export interface UiAuthSessionResult {
   is_dev_mode: boolean;
 }
 
+export interface CreateApiKeyRequest {
+  project_id?: string;
+  name?: string;
+  scopes: string[];
+}
+
+export interface CreateApiKeyResponse {
+  api_key: string;
+  key_id: string;
+  key_prefix: string;
+  project_id: string | null;
+  name: string | null;
+  scopes: string[];
+}
+
+export interface ApiKeyInfo {
+  key_id: string;
+  key_prefix: string;
+  project_id: string | null;
+  name: string | null;
+  scopes: string[];
+  created_at: string;
+  last_used_at: string | null;
+  is_revoked: boolean;
+}
+
+export interface ListApiKeysResponse {
+  keys: ApiKeyInfo[];
+}
+
 function normalizeApiBaseUrl(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return DEFAULT_API_BASE_URL;
@@ -256,6 +286,29 @@ export const api = {
     return fetchApi<{ status: string }>(
       '/api/v1/ui-auth/logout',
       { method: 'POST' },
+      { skipApiKey: true }
+    );
+  },
+
+  async createApiKey(request: CreateApiKeyRequest): Promise<CreateApiKeyResponse> {
+    return fetchApi<CreateApiKeyResponse>(
+      '/api/v1/keys',
+      {
+        method: 'POST',
+        body: JSON.stringify(request),
+      },
+      { skipApiKey: true }
+    );
+  },
+
+  async listApiKeys(): Promise<ListApiKeysResponse> {
+    return fetchApi<ListApiKeysResponse>('/api/v1/keys', {}, { skipApiKey: true });
+  },
+
+  async revokeApiKey(keyId: string): Promise<{ status: string; revoked: string }> {
+    return fetchApi<{ status: string; revoked: string }>(
+      `/api/v1/keys/${encodeURIComponent(keyId)}`,
+      { method: 'DELETE' },
       { skipApiKey: true }
     );
   },
