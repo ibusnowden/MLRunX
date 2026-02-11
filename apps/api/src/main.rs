@@ -1172,50 +1172,20 @@ struct ListKeysResponse {
     keys: Vec<KeyInfoResponse>,
 }
 
-/// Create a new API key (admin only).
-async fn http_create_key(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthContext>,
-    Json(req): Json<CreateKeyRequest>,
-) -> Result<Json<CreateKeyResponse>, (StatusCode, String)> {
-    if auth.is_ui_jwt() {
-        emit_audit_event(
-            &state,
-            Some(&auth),
-            req.project_id.as_deref(),
-            None,
-            "api_key.create",
-            "api_key",
-            None,
-            "denied",
-            serde_json::json!({
-                "reason": "ui_jwt_key_management_disabled",
-            }),
-        )
-        .await;
+fn normalize_requested_scopes(scopes: &[String]) -> Result<Vec<String>, (StatusCode, String)> {
+    if scopes.is_empty() {
         return Err((
-            StatusCode::FORBIDDEN,
-            "API key management via UI JWT auth is disabled in this phase. Use API key auth for key management.".to_string(),
+            StatusCode::BAD_REQUEST,
+            "At least one scope is required.".to_string(),
         ));
     }
 
-    // Only admin can create keys
-    require_endpoint_access(
-        &state,
-        &auth,
-        EndpointRbacTier::Admin,
-        None,
-        None,
-        "api_key.create",
-        "api_key",
-        None,
-    )
-    .await?;
-
-    // Validate scopes
     let valid_scopes = ["admin", "write", "read"];
-    for scope in &req.scopes {
-        if !valid_scopes.contains(&scope.as_str()) {
+    let mut normalized: Vec<String> = Vec::new();
+
+    for scope in scopes {
+        let value = scope.trim().to_ascii_lowercase();
+        if !valid_scopes.contains(&value.as_str()) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 format!(
@@ -1224,24 +1194,207 @@ async fn http_create_key(
                 ),
             ));
         }
+        if !normalized.iter().any(|existing| existing == &value) {
+            normalized.push(value);
+        }
     }
 
-    if req.scopes.is_empty() {
+    Ok(normalized)
+}
+
+fn resolve_ui_key_project_id(
+    auth: &AuthContext,
+    requested_project_id: Option<&str>,
+) -> Result<String, (StatusCode, String)> {
+    let allowed_projects = auth.allowed_project_ids().ok_or((
+        StatusCode::FORBIDDEN,
+        "UI session is missing project memberships.".to_string(),
+    ))?;
+
+    if let Some(project_id) = requested_project_id {
+        if allowed_projects.contains(project_id) {
+            return Ok(project_id.to_string());
+        }
         return Err((
-            StatusCode::BAD_REQUEST,
-            "At least one scope is required.".to_string(),
+            StatusCode::FORBIDDEN,
+            format!(
+                "Access denied: cannot manage API keys for project '{}'.",
+                project_id
+            ),
         ));
+    }
+
+    if allowed_projects.len() == 1 {
+        if let Some(project_id) = allowed_projects.iter().next() {
+            return Ok(project_id.clone());
+        }
+    }
+
+    Err((
+        StatusCode::BAD_REQUEST,
+        "project_id is required when your account has multiple project memberships.".to_string(),
+    ))
+}
+
+fn ensure_requested_scopes_within_caller(
+    auth: &AuthContext,
+    requested_scopes: &[String],
+) -> Result<(), (StatusCode, String)> {
+    for scope in requested_scopes {
+        if !auth.api_key.has_scope(scope) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!(
+                    "Insufficient permissions: your UI session cannot grant '{}' scope.",
+                    scope
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn filter_keys_to_ui_memberships(auth: &AuthContext, keys: Vec<auth::ApiKey>) -> Vec<auth::ApiKey> {
+    let Some(allowed_projects) = auth.allowed_project_ids() else {
+        return Vec::new();
+    };
+
+    keys.into_iter()
+        .filter(|key| {
+            key.project_id
+                .as_ref()
+                .map_or(false, |project_id| allowed_projects.contains(project_id))
+        })
+        .collect()
+}
+
+/// Create a new API key.
+async fn http_create_key(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<CreateKeyRequest>,
+) -> Result<Json<CreateKeyResponse>, (StatusCode, String)> {
+    let normalized_scopes = normalize_requested_scopes(&req.scopes)?;
+    let mut target_project_id = req.project_id.clone();
+
+    if auth.is_ui_jwt() {
+        if let Err((status, message)) = auth.require_scope("write") {
+            emit_audit_event(
+                &state,
+                Some(&auth),
+                req.project_id.as_deref(),
+                None,
+                "api_key.create",
+                "api_key",
+                None,
+                "denied",
+                serde_json::json!({
+                    "reason": "scope_denied",
+                    "required_scope": "write",
+                    "auth_mode": auth_mode_label(&auth),
+                }),
+            )
+            .await;
+            return Err((status, message));
+        }
+
+        if normalized_scopes.iter().any(|scope| scope == "admin") {
+            emit_audit_event(
+                &state,
+                Some(&auth),
+                req.project_id.as_deref(),
+                None,
+                "api_key.create",
+                "api_key",
+                None,
+                "denied",
+                serde_json::json!({
+                    "reason": "admin_scope_not_allowed_for_ui_session",
+                    "auth_mode": auth_mode_label(&auth),
+                }),
+            )
+            .await;
+            return Err((
+                StatusCode::FORBIDDEN,
+                "UI session key creation cannot grant admin scope. Use read/write scopes."
+                    .to_string(),
+            ));
+        }
+
+        if let Err((status, message)) =
+            ensure_requested_scopes_within_caller(&auth, &normalized_scopes)
+        {
+            emit_audit_event(
+                &state,
+                Some(&auth),
+                req.project_id.as_deref(),
+                None,
+                "api_key.create",
+                "api_key",
+                None,
+                "denied",
+                serde_json::json!({
+                    "reason": "requested_scope_not_granted_to_ui_session",
+                    "requested_scopes": normalized_scopes.clone(),
+                    "caller_scopes": auth.api_key.scopes.clone(),
+                    "auth_mode": auth_mode_label(&auth),
+                }),
+            )
+            .await;
+            return Err((status, message));
+        }
+
+        let resolved_project_id = match resolve_ui_key_project_id(&auth, req.project_id.as_deref())
+        {
+            Ok(project_id) => project_id,
+            Err((status, message)) => {
+                emit_audit_event(
+                    &state,
+                    Some(&auth),
+                    req.project_id.as_deref(),
+                    None,
+                    "api_key.create",
+                    "api_key",
+                    None,
+                    "denied",
+                    serde_json::json!({
+                        "reason": "project_access_denied",
+                        "requested_project_id": req.project_id.clone(),
+                        "auth_mode": auth_mode_label(&auth),
+                    }),
+                )
+                .await;
+                return Err((status, message));
+            }
+        };
+        target_project_id = Some(resolved_project_id);
+    } else {
+        require_endpoint_access(
+            &state,
+            &auth,
+            EndpointRbacTier::Admin,
+            None,
+            None,
+            "api_key.create",
+            "api_key",
+            None,
+        )
+        .await?;
     }
 
     let (raw_key, key) = state
         .key_store
-        .create_key(req.project_id.clone(), req.name.clone(), req.scopes.clone())
+        .create_key(
+            target_project_id.clone(),
+            req.name.clone(),
+            normalized_scopes.clone(),
+        )
         .await;
 
     info!(
         key_prefix = %key.key_prefix,
-        project_id = ?req.project_id,
-        scopes = ?req.scopes,
+        project_id = ?target_project_id,
+        scopes = ?normalized_scopes,
         "Created new API key"
     );
 
@@ -1255,7 +1408,7 @@ async fn http_create_key(
         Some(&key.id),
         "success",
         serde_json::json!({
-            "scopes": key.scopes.clone(),
+            "scopes": normalized_scopes,
         }),
     )
     .await;
@@ -1270,46 +1423,48 @@ async fn http_create_key(
     }))
 }
 
-/// List API keys (admin sees all, scoped users see their project's keys).
+/// List API keys visible to the caller.
 async fn http_list_keys(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<ListKeysResponse>, (StatusCode, String)> {
-    if auth.is_ui_jwt() {
-        emit_audit_event(
+    let keys = if auth.is_ui_jwt() {
+        if let Err((status, message)) = auth.require_scope("read") {
+            emit_audit_event(
+                &state,
+                Some(&auth),
+                None,
+                None,
+                "api_key.list",
+                "api_key",
+                None,
+                "denied",
+                serde_json::json!({
+                    "reason": "scope_denied",
+                    "required_scope": "read",
+                    "auth_mode": auth_mode_label(&auth),
+                }),
+            )
+            .await;
+            return Err((status, message));
+        }
+        let all_keys = state.key_store.list_keys(None).await;
+        filter_keys_to_ui_memberships(&auth, all_keys)
+    } else {
+        require_endpoint_access(
             &state,
-            Some(&auth),
+            &auth,
+            EndpointRbacTier::Admin,
             None,
             None,
             "api_key.list",
             "api_key",
             None,
-            "denied",
-            serde_json::json!({
-                "reason": "ui_jwt_key_management_disabled",
-            }),
         )
-        .await;
-        return Err((
-            StatusCode::FORBIDDEN,
-            "API key management via UI JWT auth is disabled in this phase. Use API key auth for key management.".to_string(),
-        ));
-    }
-
-    require_endpoint_access(
-        &state,
-        &auth,
-        EndpointRbacTier::Admin,
-        None,
-        None,
-        "api_key.list",
-        "api_key",
-        None,
-    )
-    .await?;
-
-    let project_filter = auth.project_id();
-    let keys = state.key_store.list_keys(project_filter).await;
+        .await?;
+        let project_filter = auth.project_id();
+        state.key_store.list_keys(project_filter).await
+    };
 
     let keys_response: Vec<KeyInfoResponse> = keys
         .into_iter()
@@ -1350,41 +1505,45 @@ async fn http_revoke_key(
     Extension(auth): Extension<AuthContext>,
     axum::extract::Path(key_id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if auth.is_ui_jwt() {
-        emit_audit_event(
+    let keys = if auth.is_ui_jwt() {
+        if let Err((status, message)) = auth.require_scope("write") {
+            emit_audit_event(
+                &state,
+                Some(&auth),
+                None,
+                None,
+                "api_key.revoke",
+                "api_key",
+                Some(&key_id),
+                "denied",
+                serde_json::json!({
+                    "reason": "scope_denied",
+                    "required_scope": "write",
+                    "auth_mode": auth_mode_label(&auth),
+                }),
+            )
+            .await;
+            return Err((status, message));
+        }
+        let all_keys = state.key_store.list_keys(None).await;
+        filter_keys_to_ui_memberships(&auth, all_keys)
+    } else {
+        require_endpoint_access(
             &state,
-            Some(&auth),
+            &auth,
+            EndpointRbacTier::Admin,
             None,
             None,
             "api_key.revoke",
             "api_key",
             Some(&key_id),
-            "denied",
-            serde_json::json!({
-                "reason": "ui_jwt_key_management_disabled",
-            }),
         )
-        .await;
-        return Err((
-            StatusCode::FORBIDDEN,
-            "API key management via UI JWT auth is disabled in this phase. Use API key auth for key management.".to_string(),
-        ));
-    }
-
-    require_endpoint_access(
-        &state,
-        &auth,
-        EndpointRbacTier::Admin,
-        None,
-        None,
-        "api_key.revoke",
-        "api_key",
-        Some(&key_id),
-    )
-    .await?;
+        .await?;
+        let project_filter = auth.project_id();
+        state.key_store.list_keys(project_filter).await
+    };
 
     // Find the key by id and get its hash for revocation
-    let keys = state.key_store.list_keys(None).await;
     let target = keys.iter().find(|k| k.id == key_id);
 
     match target {
@@ -2437,7 +2596,10 @@ async fn main() {
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
+    use http_body_util::BodyExt;
+    use jsonwebtoken::{EncodingKey, Header as JwtHeader, encode};
+    use serde::Serialize;
     use tower::ServiceExt;
 
     async fn test_app() -> Router {
@@ -2460,6 +2622,168 @@ mod tests {
             cardinality_tracker,
         };
         build_http_router(state)
+    }
+
+    struct UiSessionHarness {
+        app: Router,
+        key_store: Arc<ApiKeyStore>,
+        primary_project_id: String,
+        secondary_project_id: String,
+        jwt_secret: String,
+        jwt_subject: String,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct TestJwtClaims {
+        sub: String,
+        exp: usize,
+        email: String,
+        name: String,
+    }
+
+    #[derive(Debug)]
+    struct SessionCookies {
+        cookie_header: String,
+        csrf_token: String,
+    }
+
+    async fn ui_session_harness_with_role(role: &str) -> UiSessionHarness {
+        let store = Arc::new(InMemoryStore::new());
+        let sqlite_store = Arc::new(
+            SqliteStore::new(":memory:")
+                .await
+                .expect("Failed to create test SQLite store"),
+        );
+        let jwt_secret = "test-ui-session-secret".to_string();
+        let key_store = Arc::new(ApiKeyStore::new_with_sqlite_and_ui_jwt(
+            sqlite_store.clone(),
+            &jwt_secret,
+        ));
+        let idempotency_store = Arc::new(IdempotencyStore::new());
+        let cardinality_tracker = Arc::new(CardinalityTracker::default());
+
+        let jwt_subject = "user-123".to_string();
+        let user_id = sqlite_store
+            .get_or_create_user_identity(
+                "jwt",
+                &jwt_subject,
+                Some("user@example.com"),
+                Some("User"),
+            )
+            .await
+            .expect("Failed to create user");
+
+        let primary_project_id = sqlite_store
+            .get_or_create_project("project-primary")
+            .await
+            .expect("Failed to create primary project");
+        sqlite_store
+            .grant_project_membership(&primary_project_id, &user_id, role, None)
+            .await
+            .expect("Failed to grant primary membership");
+
+        let secondary_project_id = sqlite_store
+            .get_or_create_project("project-secondary")
+            .await
+            .expect("Failed to create secondary project");
+
+        let state = AppState {
+            store,
+            sqlite_store,
+            key_store: key_store.clone(),
+            idempotency_store,
+            cardinality_tracker,
+        };
+
+        UiSessionHarness {
+            app: build_http_router(state),
+            key_store,
+            primary_project_id,
+            secondary_project_id,
+            jwt_secret,
+            jwt_subject,
+        }
+    }
+
+    fn build_test_jwt(secret: &str, subject: &str) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("System clock is before UNIX_EPOCH")
+            .as_secs();
+        let claims = TestJwtClaims {
+            sub: subject.to_string(),
+            exp: (now + 3600) as usize,
+            email: "user@example.com".to_string(),
+            name: "User".to_string(),
+        };
+        encode(
+            &JwtHeader::default(),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("Failed to encode test JWT")
+    }
+
+    fn extract_cookie_value(set_cookie_header: &str, cookie_name: &str) -> Option<String> {
+        let first_part = set_cookie_header.split(';').next()?.trim();
+        let mut parts = first_part.splitn(2, '=');
+        let name = parts.next()?.trim();
+        let value = parts.next()?.trim();
+        if name == cookie_name && !value.is_empty() {
+            Some(value.to_string())
+        } else {
+            None
+        }
+    }
+
+    async fn login_ui_session(app: &Router, jwt: &str) -> SessionCookies {
+        let login_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ui-auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::json!({ "jwt": jwt }).to_string()))
+                    .expect("Failed to build login request"),
+            )
+            .await
+            .expect("Login request failed");
+
+        assert_eq!(login_response.status(), StatusCode::OK);
+
+        let mut session_cookie: Option<String> = None;
+        let mut csrf_cookie: Option<String> = None;
+
+        for value in login_response.headers().get_all(header::SET_COOKIE).iter() {
+            let set_cookie = value.to_str().expect("Invalid set-cookie header");
+            if let Some(token) = extract_cookie_value(set_cookie, "mlrunx_ui_session") {
+                session_cookie = Some(token);
+            }
+            if let Some(token) = extract_cookie_value(set_cookie, "mlrunx_ui_csrf") {
+                csrf_cookie = Some(token);
+            }
+        }
+
+        let session_token = session_cookie.expect("Session cookie was not set");
+        let csrf_token = csrf_cookie.expect("CSRF cookie was not set");
+
+        SessionCookies {
+            cookie_header: format!(
+                "mlrunx_ui_session={session_token}; mlrunx_ui_csrf={csrf_token}"
+            ),
+            csrf_token,
+        }
+    }
+
+    async fn response_text(response: axum::response::Response) -> String {
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("Failed to read response body")
+            .to_bytes();
+        String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8")
     }
 
     #[tokio::test]
@@ -2551,5 +2875,234 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_ui_session_can_create_list_and_revoke_project_keys() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let (_, foreign_key) = harness
+            .key_store
+            .create_key(
+                Some(harness.secondary_project_id.clone()),
+                Some("foreign-key".to_string()),
+                vec!["read".to_string()],
+            )
+            .await;
+
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let create_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/keys")
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": harness.primary_project_id.clone(),
+                            "name": "sdk-write",
+                            "scopes": ["read", "write"]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create key request"),
+            )
+            .await
+            .expect("Create key request failed");
+        assert_eq!(create_response.status(), StatusCode::OK);
+        let created_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_response).await)
+                .expect("Create key response should be JSON");
+        let created_key_id = created_payload["key_id"]
+            .as_str()
+            .expect("Create key response must include key_id")
+            .to_string();
+        assert!(
+            created_payload["api_key"]
+                .as_str()
+                .expect("Create key response must include api_key")
+                .starts_with("mlrunx_")
+        );
+
+        let list_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/keys")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .body(Body::empty())
+                    .expect("Failed to build list keys request"),
+            )
+            .await
+            .expect("List keys request failed");
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_payload: serde_json::Value =
+            serde_json::from_str(&response_text(list_response).await)
+                .expect("List keys response should be JSON");
+        let keys = list_payload["keys"]
+            .as_array()
+            .expect("keys must be an array");
+        assert!(keys.iter().any(|k| {
+            k["key_id"]
+                .as_str()
+                .map_or(false, |key_id| key_id == created_key_id.as_str())
+        }));
+        assert!(keys.iter().all(|k| {
+            k["key_id"]
+                .as_str()
+                .map_or(true, |key_id| key_id != foreign_key.id.as_str())
+        }));
+
+        let revoke_uri = format!("/api/v1/keys/{created_key_id}");
+        let revoke_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(revoke_uri.as_str())
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::empty())
+                    .expect("Failed to build revoke key request"),
+            )
+            .await
+            .expect("Revoke key request failed");
+        assert_eq!(revoke_response.status(), StatusCode::OK);
+
+        let list_after_revoke = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/keys")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .body(Body::empty())
+                    .expect("Failed to build list keys request"),
+            )
+            .await
+            .expect("List keys request failed");
+        assert_eq!(list_after_revoke.status(), StatusCode::OK);
+        let list_after_revoke_payload: serde_json::Value =
+            serde_json::from_str(&response_text(list_after_revoke).await)
+                .expect("List keys response should be JSON");
+        let keys_after_revoke = list_after_revoke_payload["keys"]
+            .as_array()
+            .expect("keys must be an array");
+        let revoked = keys_after_revoke.iter().find(|k| {
+            k["key_id"]
+                .as_str()
+                .map_or(false, |key_id| key_id == created_key_id.as_str())
+        });
+        assert!(revoked.is_some(), "Created key should still be listed");
+        assert_eq!(
+            revoked.and_then(|k| k["is_revoked"].as_bool()),
+            Some(true),
+            "Created key should be marked revoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ui_session_cannot_create_key_for_unscoped_project() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/keys")
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": harness.secondary_project_id.clone(),
+                            "name": "not-allowed",
+                            "scopes": ["read"]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create key request"),
+            )
+            .await
+            .expect("Create key request failed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_ui_session_cannot_grant_scope_not_in_membership() {
+        let harness = ui_session_harness_with_role("viewer").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/keys")
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": harness.primary_project_id.clone(),
+                            "name": "viewer-write",
+                            "scopes": ["write"]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create key request"),
+            )
+            .await
+            .expect("Create key request failed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_ui_session_cannot_create_admin_scoped_key() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/keys")
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": harness.primary_project_id.clone(),
+                            "name": "owner-admin",
+                            "scopes": ["admin"]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create key request"),
+            )
+            .await
+            .expect("Create key request failed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
