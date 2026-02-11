@@ -1,0 +1,12 @@
+#!/bin/sh
+
+# Block committing Markdown files (.md)
+staged_md=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.md$')
+if [ -n "$staged_md" ]; then
+  echo "Error: committing Markdown files is disabled for this repo."
+  echo "Unstage these files before committing:"
+  echo "$staged_md"
+  exit 1
+fi
+
+exit 0
