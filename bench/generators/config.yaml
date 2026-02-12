@@ -1,0 +1,81 @@
+# Synthetic data generator configuration
+# See: BENCH-001 specification
+
+defaults:
+  runs: 1000
+  metrics_per_run: 10
+  points_per_metric: 100
+  project: "benchmark"
+
+# Metric patterns for realistic training data
+metric_patterns:
+  loss:
+    type: exponential_decay
+    start: 2.0
+    end: 0.1
+    noise: 0.05
+  accuracy:
+    type: sigmoid
+    start: 0.1
+    end: 0.95
+    inflection: 0.5
+    noise: 0.02
+  learning_rate:
+    type: constant
+    value: 0.001
+  throughput:
+    type: gaussian
+    mean: 1000
+    std: 50
+  gpu_memory:
+    type: random_walk
+    start: 4000
+    max_delta: 100
+    bounds: [2000, 8000]
+
+# Tag options for variety
+tags:
+  model:
+    - resnet50
+    - bert-base
+    - gpt2
+    - vit-large
+    - llama-7b
+  dataset:
+    - imagenet
+    - cifar10
+    - squad
+    - wikitext
+    - openwebtext
+  optimizer:
+    - adam
+    - sgd
+    - adamw
+    - lion
+  framework:
+    - pytorch
+    - tensorflow
+    - jax
+
+# Parameter templates
+params:
+  lr: [0.001, 0.0001, 0.00001]
+  batch_size: [16, 32, 64, 128]
+  epochs: [10, 50, 100]
+  weight_decay: [0.0, 0.01, 0.1]
+  warmup_steps: [0, 100, 500, 1000]
+
+# Scale configurations
+scale:
+  nightly:
+    runs: 1000
+    metrics_per_run: 5
+    points_per_metric: 100
+  release:
+    runs: 10000
+    metrics_per_run: 10
+    points_per_metric: 500
+  stress:
+    runs: 100000
+    metrics_per_run: 20
+    points_per_metric: 1000
