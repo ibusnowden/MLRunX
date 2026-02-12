@@ -76,9 +76,9 @@ COPY --from=builder /app/target/release/mlrunx-api /usr/local/bin/
 
 # Default environment
 ENV RUST_LOG=info,mlrunx_api=debug
-ENV MLRUNX_HTTP_HOST=0.0.0.0
-ENV MLRUNX_HTTP_PORT=3001
-ENV MLRUNX_GRPC_PORT=50051
+ENV API_HOST=0.0.0.0
+ENV API_HTTP_PORT=3001
+ENV API_GRPC_PORT=50051
 ENV MLRUNX_SQLITE_PATH=/data/mlrunx.db
 
 EXPOSE 3001 50051
