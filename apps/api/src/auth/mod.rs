@@ -75,6 +75,8 @@ struct UiJwtConfig {
     secret: Option<String>,
     public_key_pem: Option<String>,
     algorithm: UiJwtAlgorithm,
+    auto_provision_project: bool,
+    personal_project_prefix: String,
     issuer: Option<String>,
     audience: Option<String>,
     provider: String,
@@ -165,6 +167,14 @@ impl UiJwtConfig {
             secret,
             public_key_pem,
             algorithm,
+            auto_provision_project: std::env::var("MLRUNX_UI_AUTO_PROVISION_PROJECT")
+                .ok()
+                .map_or(true, |value| env_flag_value(&value)),
+            personal_project_prefix: std::env::var("MLRUNX_UI_PERSONAL_PROJECT_PREFIX")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "personal".to_string()),
             issuer: std::env::var("MLRUNX_JWT_ISSUER")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
@@ -207,9 +217,11 @@ struct ResolvedUiIdentity {
 }
 
 fn env_flag(name: &str) -> bool {
-    std::env::var(name).map_or(false, |v| {
-        v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
-    })
+    std::env::var(name).map_or(false, |v| env_flag_value(&v))
+}
+
+fn env_flag_value(value: &str) -> bool {
+    value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,6 +348,8 @@ impl ApiKeyStore {
                 secret: Some(jwt_secret.to_string()),
                 public_key_pem: None,
                 algorithm: UiJwtAlgorithm::Hs256,
+                auto_provision_project: true,
+                personal_project_prefix: "personal".to_string(),
                 issuer: None,
                 audience: None,
                 provider: "jwt".to_string(),
@@ -689,7 +703,7 @@ impl ApiKeyStore {
         }
 
         let (scopes, allowed_project_ids) = self
-            .resolve_memberships_for_user(&session.user_id)
+            .resolve_memberships_for_user(&session.user_id, None, None)
             .await
             .map_err(|e| format!("Failed to resolve UI session memberships: {e}"))?;
 
@@ -767,7 +781,9 @@ impl ApiKeyStore {
             .await
             .map_err(|e| format!("Failed to resolve JWT user identity: {e}"))?;
 
-        let (scopes, allowed_project_ids) = self.resolve_memberships_for_user(&user_id).await?;
+        let (scopes, allowed_project_ids) = self
+            .resolve_memberships_for_user(&user_id, claims.email.as_deref(), claims.name.as_deref())
+            .await?;
 
         Ok(ResolvedUiIdentity {
             user_id,
@@ -780,16 +796,28 @@ impl ApiKeyStore {
     async fn resolve_memberships_for_user(
         &self,
         user_id: &str,
+        email: Option<&str>,
+        display_name: Option<&str>,
     ) -> Result<(Vec<String>, HashSet<String>), String> {
         let sqlite_store = self
             .sqlite_store
             .as_ref()
             .ok_or_else(|| "SQLite-backed auth store is required for UI auth.".to_string())?;
 
-        let memberships = sqlite_store
+        let mut memberships = sqlite_store
             .list_active_project_memberships(user_id)
             .await
             .map_err(|e| format!("Failed to load project memberships: {e}"))?;
+
+        if memberships.is_empty() && self.ui_jwt.auto_provision_project {
+            self.auto_provision_personal_project(user_id, email, display_name)
+                .await?;
+
+            memberships = sqlite_store
+                .list_active_project_memberships(user_id)
+                .await
+                .map_err(|e| format!("Failed to load memberships after auto-provision: {e}"))?;
+        }
 
         if memberships.is_empty() {
             return Err("No active project memberships found for this user.".to_string());
@@ -798,6 +826,93 @@ impl ApiKeyStore {
         let (mut scopes, allowed_projects) = Self::derive_scopes_and_projects(&memberships);
         scopes.sort();
         Ok((scopes, allowed_projects))
+    }
+
+    async fn auto_provision_personal_project(
+        &self,
+        user_id: &str,
+        email: Option<&str>,
+        display_name: Option<&str>,
+    ) -> Result<(), String> {
+        let sqlite_store = self
+            .sqlite_store
+            .as_ref()
+            .ok_or_else(|| "SQLite-backed auth store is required for UI auth.".to_string())?;
+
+        let project_name = self.personal_project_name(user_id, email, display_name);
+        let project_id = sqlite_store
+            .get_or_create_project(&project_name)
+            .await
+            .map_err(|e| format!("Failed to create personal project: {e}"))?;
+
+        sqlite_store
+            .grant_project_membership(&project_id, user_id, "owner", Some(user_id))
+            .await
+            .map_err(|e| format!("Failed to grant personal project membership: {e}"))?;
+
+        info!(
+            user_id = %user_id,
+            project_id = %project_id,
+            project_name = %project_name,
+            "Auto-provisioned personal project membership for UI user",
+        );
+
+        Ok(())
+    }
+
+    fn personal_project_name(
+        &self,
+        user_id: &str,
+        email: Option<&str>,
+        display_name: Option<&str>,
+    ) -> String {
+        let prefix = Self::slugify_personal_project_component(&self.ui_jwt.personal_project_prefix);
+        let prefix = if prefix.is_empty() {
+            "personal".to_string()
+        } else {
+            prefix
+        };
+
+        let hint_source = email
+            .and_then(|value| value.split('@').next())
+            .or(display_name)
+            .unwrap_or("user");
+        let hint = Self::slugify_personal_project_component(hint_source);
+        let hint = if hint.is_empty() {
+            "user".to_string()
+        } else {
+            hint
+        };
+
+        let user_suffix: String = user_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(8)
+            .collect();
+        let suffix = if user_suffix.is_empty() {
+            "account".to_string()
+        } else {
+            user_suffix.to_ascii_lowercase()
+        };
+
+        format!("{prefix}-{hint}-{suffix}")
+    }
+
+    fn slugify_personal_project_component(value: &str) -> String {
+        let mut normalized = String::with_capacity(value.len());
+        let mut previous_dash = false;
+
+        for ch in value.trim().chars() {
+            if ch.is_ascii_alphanumeric() {
+                normalized.push(ch.to_ascii_lowercase());
+                previous_dash = false;
+            } else if !previous_dash {
+                normalized.push('-');
+                previous_dash = true;
+            }
+        }
+
+        normalized.trim_matches('-').to_string()
     }
 
     fn build_ui_auth_api_key(identity: &ResolvedUiIdentity, mode_prefix: &str) -> ApiKey {
@@ -1549,6 +1664,40 @@ mod tests {
         assert!(api_key.scopes.contains(&"read".to_string()));
         assert!(api_key.scopes.contains(&"write".to_string()));
         assert!(!api_key.scopes.contains(&"admin".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_ui_jwt_auth_auto_provisions_personal_project_membership() {
+        let sqlite_store = Arc::new(SqliteStore::new(":memory:").await.unwrap());
+        let store = ApiKeyStore::new_with_sqlite_and_ui_jwt(sqlite_store.clone(), "test-secret");
+
+        let claims = TestJwtClaims {
+            sub: "new-user-subject".to_string(),
+            email: Some("new.user@example.com".to_string()),
+            name: Some("New User".to_string()),
+            exp: (chrono::Utc::now().timestamp() + 3600) as usize,
+        };
+        let token = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret("test-secret".as_bytes()),
+        )
+        .unwrap();
+
+        let (api_key, allowed_projects) = store.authenticate_ui_jwt(&token).await.unwrap();
+        assert_eq!(allowed_projects.len(), 1);
+        assert!(api_key.scopes.contains(&"read".to_string()));
+        assert!(api_key.scopes.contains(&"write".to_string()));
+        assert!(api_key.scopes.contains(&"admin".to_string()));
+
+        let (_, user_id) = api_key.id.split_once(':').unwrap();
+        let memberships = sqlite_store
+            .list_active_project_memberships(user_id)
+            .await
+            .unwrap();
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].role, "owner");
+        assert!(allowed_projects.contains(&memberships[0].project_id));
     }
 
     #[tokio::test]
