@@ -9,7 +9,7 @@ import { exchangeOAuthCodeForSessionIfPresent } from '@/lib/auth/supabase';
 function AuthCallbackContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const nextPath = useMemo(() => sanitizeNextPath(searchParams.get('next'), '/settings'), [searchParams]);
+  const nextPath = useMemo(() => sanitizeNextPath(searchParams.get('next'), '/onboarding'), [searchParams]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {

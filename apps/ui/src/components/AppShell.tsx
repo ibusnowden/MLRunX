@@ -20,6 +20,7 @@ const MenuIcon = () => (
 
 function getPageTitle(pathname: string): string {
   if (pathname === '/') return 'Runs';
+  if (pathname === '/onboarding') return 'Onboarding';
   if (pathname.startsWith('/runs/')) return 'Run Details';
   if (pathname === '/compare') return 'Compare';
   if (pathname === '/settings') return 'Access Console';
