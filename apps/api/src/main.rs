@@ -103,7 +103,8 @@ async fn root() -> &'static str {
 
 #[derive(Debug, Deserialize)]
 struct UiAuthLoginRequest {
-    jwt: String,
+    #[serde(default)]
+    jwt: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -314,6 +315,17 @@ fn infer_client_ip(headers: &HeaderMap) -> Option<String> {
     header_string(headers, "x-real-ip")
 }
 
+fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
+    let auth = header_string(headers, "authorization")?;
+    let token = auth.strip_prefix("Bearer ")?;
+    let token = token.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
 fn build_cookie(
     name: &str,
     value: &str,
@@ -347,16 +359,26 @@ async fn http_ui_auth_login(
     headers: HeaderMap,
     Json(req): Json<UiAuthLoginRequest>,
 ) -> Result<(HeaderMap, Json<UiAuthLoginResponse>), (StatusCode, String)> {
-    if req.jwt.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "JWT is required.".to_string()));
-    }
+    let jwt = req
+        .jwt
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| extract_bearer_token(&headers))
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "JWT is required (body `jwt` or Authorization: Bearer <token>).".to_string(),
+            )
+        })?;
 
     let user_agent = header_string(&headers, "user-agent");
     let client_ip = infer_client_ip(&headers);
 
     let issue = state
         .key_store
-        .create_ui_session_from_jwt(&req.jwt, user_agent.as_deref(), client_ip.as_deref())
+        .create_ui_session_from_jwt(&jwt, user_agent.as_deref(), client_ip.as_deref())
         .await
         .map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
 
@@ -2714,6 +2736,47 @@ mod tests {
         }
     }
 
+    async fn login_ui_session_with_bearer(app: &Router, jwt: &str) -> SessionCookies {
+        let login_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ui-auth/login")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("Failed to build bearer login request"),
+            )
+            .await
+            .expect("Bearer login request failed");
+
+        assert_eq!(login_response.status(), StatusCode::OK);
+
+        let mut session_cookie: Option<String> = None;
+        let mut csrf_cookie: Option<String> = None;
+
+        for value in login_response.headers().get_all(header::SET_COOKIE).iter() {
+            let set_cookie = value.to_str().expect("Invalid set-cookie header");
+            if let Some(token) = extract_cookie_value(set_cookie, "mlrunx_ui_session") {
+                session_cookie = Some(token);
+            }
+            if let Some(token) = extract_cookie_value(set_cookie, "mlrunx_ui_csrf") {
+                csrf_cookie = Some(token);
+            }
+        }
+
+        let session_token = session_cookie.expect("Session cookie was not set");
+        let csrf_token = csrf_cookie.expect("CSRF cookie was not set");
+
+        SessionCookies {
+            cookie_header: format!(
+                "mlrunx_ui_session={session_token}; mlrunx_ui_csrf={csrf_token}"
+            ),
+            csrf_token,
+        }
+    }
+
     async fn response_text(response: axum::response::Response) -> String {
         let body = response
             .into_body()
@@ -2769,6 +2832,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_ui_auth_login_accepts_bearer_token() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+
+        let cookies = login_ui_session_with_bearer(&harness.app, &jwt).await;
+        assert!(cookies.cookie_header.contains("mlrunx_ui_session="));
+        assert!(!cookies.csrf_token.is_empty());
     }
 
     #[tokio::test]

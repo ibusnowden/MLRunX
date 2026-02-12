@@ -73,6 +73,8 @@ impl ApiKey {
 struct UiJwtConfig {
     enabled: bool,
     secret: Option<String>,
+    public_key_pem: Option<String>,
+    algorithm: UiJwtAlgorithm,
     issuer: Option<String>,
     audience: Option<String>,
     provider: String,
@@ -81,6 +83,40 @@ struct UiJwtConfig {
     session_ttl_seconds: u64,
     cookie_secure: bool,
     cookie_same_site: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiJwtAlgorithm {
+    Hs256,
+    Rs256,
+}
+
+impl UiJwtAlgorithm {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "hs256" => Some(Self::Hs256),
+            "rs256" => Some(Self::Rs256),
+            _ => None,
+        }
+    }
+
+    fn env_value(self) -> &'static str {
+        match self {
+            Self::Hs256 => "HS256",
+            Self::Rs256 => "RS256",
+        }
+    }
+
+    fn jsonwebtoken_algorithm(self) -> Algorithm {
+        match self {
+            Self::Hs256 => Algorithm::HS256,
+            Self::Rs256 => Algorithm::RS256,
+        }
+    }
+}
+
+fn normalize_pem_env(raw: &str) -> String {
+    raw.trim().replace("\\n", "\n")
 }
 
 impl UiJwtConfig {
@@ -105,11 +141,30 @@ impl UiJwtConfig {
             })
             .unwrap_or_else(|| "Lax".to_string());
 
+        let secret = std::env::var("MLRUNX_JWT_SECRET")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let public_key_pem = std::env::var("MLRUNX_JWT_PUBLIC_KEY_PEM")
+            .ok()
+            .map(|v| normalize_pem_env(&v))
+            .filter(|v| !v.trim().is_empty());
+        let algorithm = std::env::var("MLRUNX_JWT_ALGORITHM")
+            .ok()
+            .as_deref()
+            .and_then(UiJwtAlgorithm::parse)
+            .unwrap_or_else(|| {
+                if public_key_pem.is_some() {
+                    UiJwtAlgorithm::Rs256
+                } else {
+                    UiJwtAlgorithm::Hs256
+                }
+            });
+
         Self {
             enabled,
-            secret: std::env::var("MLRUNX_JWT_SECRET")
-                .ok()
-                .filter(|v| !v.trim().is_empty()),
+            secret,
+            public_key_pem,
+            algorithm,
             issuer: std::env::var("MLRUNX_JWT_ISSUER")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
@@ -279,6 +334,8 @@ impl ApiKeyStore {
             ui_jwt: UiJwtConfig {
                 enabled: true,
                 secret: Some(jwt_secret.to_string()),
+                public_key_pem: None,
+                algorithm: UiJwtAlgorithm::Hs256,
                 issuer: None,
                 audience: None,
                 provider: "jwt".to_string(),
@@ -331,11 +388,26 @@ impl ApiKeyStore {
         );
 
         if self.ui_jwt.enabled {
-            if self.ui_jwt.secret.is_some() {
-                info!("UI JWT auth enabled (feature-flagged)");
+            let configured = match self.ui_jwt.algorithm {
+                UiJwtAlgorithm::Hs256 => self.ui_jwt.secret.is_some(),
+                UiJwtAlgorithm::Rs256 => self.ui_jwt.public_key_pem.is_some(),
+            };
+
+            if configured {
+                info!(
+                    algorithm = self.ui_jwt.algorithm.env_value(),
+                    provider = %self.ui_jwt.provider,
+                    "UI JWT auth enabled (feature-flagged)"
+                );
             } else {
+                let missing = match self.ui_jwt.algorithm {
+                    UiJwtAlgorithm::Hs256 => "MLRUNX_JWT_SECRET",
+                    UiJwtAlgorithm::Rs256 => "MLRUNX_JWT_PUBLIC_KEY_PEM",
+                };
                 warn!(
-                    "UI JWT auth is enabled but MLRUNX_JWT_SECRET is missing; JWT auth path will reject tokens"
+                    algorithm = self.ui_jwt.algorithm.env_value(),
+                    missing,
+                    "UI JWT auth is enabled but JWT verifier material is missing; JWT auth path will reject tokens"
                 );
             }
         }
@@ -688,7 +760,7 @@ impl ApiKeyStore {
         let user_id = sqlite_store
             .get_or_create_user_identity(
                 &self.ui_jwt.provider,
-                &claims.sub,
+                claims.subject(),
                 claims.email.as_deref(),
                 claims.name.as_deref(),
             )
@@ -748,13 +820,7 @@ impl ApiKeyStore {
     }
 
     fn decode_ui_jwt_claims(&self, raw_token: &str) -> Result<UiJwtClaims, String> {
-        let secret = self
-            .ui_jwt
-            .secret
-            .as_ref()
-            .ok_or_else(|| "MLRUNX_JWT_SECRET is not configured.".to_string())?;
-
-        let mut validation = Validation::new(Algorithm::HS256);
+        let mut validation = Validation::new(self.ui_jwt.algorithm.jsonwebtoken_algorithm());
         if let Some(ref issuer) = self.ui_jwt.issuer {
             validation.set_issuer(&[issuer.clone()]);
         }
@@ -764,14 +830,29 @@ impl ApiKeyStore {
             validation.validate_aud = false;
         }
 
-        let token_data = decode::<UiJwtClaims>(
-            raw_token,
-            &DecodingKey::from_secret(secret.as_bytes()),
-            &validation,
-        )
-        .map_err(|e| format!("Invalid JWT token: {e}"))?;
+        let decoding_key = match self.ui_jwt.algorithm {
+            UiJwtAlgorithm::Hs256 => {
+                let secret = self
+                    .ui_jwt
+                    .secret
+                    .as_ref()
+                    .ok_or_else(|| "MLRUNX_JWT_SECRET is not configured.".to_string())?;
+                DecodingKey::from_secret(secret.as_bytes())
+            }
+            UiJwtAlgorithm::Rs256 => {
+                let pem =
+                    self.ui_jwt.public_key_pem.as_ref().ok_or_else(|| {
+                        "MLRUNX_JWT_PUBLIC_KEY_PEM is not configured.".to_string()
+                    })?;
+                DecodingKey::from_rsa_pem(pem.as_bytes())
+                    .map_err(|e| format!("Invalid RSA public key PEM: {e}"))?
+            }
+        };
 
-        if token_data.claims.sub.trim().is_empty() {
+        let token_data = decode::<UiJwtClaims>(raw_token, &decoding_key, &validation)
+            .map_err(|e| format!("Invalid JWT token: {e}"))?;
+
+        if token_data.claims.subject().is_empty() {
             return Err("JWT token subject is empty.".to_string());
         }
 
@@ -838,11 +919,24 @@ fn parse_sqlite_datetime(value: &str) -> Option<SystemTime> {
 
 #[derive(Debug, Deserialize)]
 struct UiJwtClaims {
-    sub: String,
+    #[serde(default)]
+    sub: Option<String>,
+    #[serde(default)]
+    user_id: Option<String>,
     #[serde(default)]
     email: Option<String>,
-    #[serde(default, alias = "display_name")]
+    #[serde(default, alias = "display_name", alias = "preferred_username")]
     name: Option<String>,
+}
+
+impl UiJwtClaims {
+    fn subject(&self) -> &str {
+        self.sub
+            .as_deref()
+            .or(self.user_id.as_deref())
+            .map(str::trim)
+            .unwrap_or_default()
+    }
 }
 
 /// Hash an API key using SHA-256.
@@ -1265,6 +1359,24 @@ mod tests {
             Some(RuntimeAuthMode::Hybrid)
         );
         assert_eq!(RuntimeAuthMode::parse("unknown"), None);
+    }
+
+    #[test]
+    fn test_ui_jwt_algorithm_parsing() {
+        assert_eq!(UiJwtAlgorithm::parse("HS256"), Some(UiJwtAlgorithm::Hs256));
+        assert_eq!(UiJwtAlgorithm::parse("rs256"), Some(UiJwtAlgorithm::Rs256));
+        assert_eq!(UiJwtAlgorithm::parse("hs512"), None);
+    }
+
+    #[test]
+    fn test_ui_jwt_claim_subject_fallback() {
+        let claims = UiJwtClaims {
+            sub: None,
+            user_id: Some("provider-user-123".to_string()),
+            email: None,
+            name: None,
+        };
+        assert_eq!(claims.subject(), "provider-user-123");
     }
 
     #[test]
