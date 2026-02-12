@@ -155,26 +155,44 @@ jobs:
       - name: Verify tag matches SDK versions
         run: |
           python - <<'PY'
-          import pathlib
-          import tomllib
           import os
+          import pathlib
+          import re
           import sys
+          import tomllib
+
+          def parse_init_version(path: pathlib.Path) -> str:
+              text = path.read_text()
+              match = re.search(r'^__version__\s*=\s*"([^"]+)"\s*$', text, re.MULTILINE)
+              if not match:
+                  print(f"Could not find __version__ assignment in {path}")
+                  sys.exit(1)
+              return match.group(1)
 
           tag = os.environ["GITHUB_REF"].removeprefix("refs/tags/v")
           sdk_pyproject = pathlib.Path("sdks/python/pyproject.toml")
           integrations_pyproject = pathlib.Path("sdks/integrations/pyproject.toml")
+          sdk_init = pathlib.Path("sdks/python/src/mlrunx/__init__.py")
+          integrations_init = pathlib.Path("sdks/integrations/src/mlrunx_integrations/__init__.py")
 
           sdk_version = tomllib.loads(sdk_pyproject.read_text())["project"]["version"]
           integrations_version = tomllib.loads(integrations_pyproject.read_text())["project"]["version"]
+          sdk_init_version = parse_init_version(sdk_init)
+          integrations_init_version = parse_init_version(integrations_init)
 
-          if sdk_version != tag:
-              print(f"sdks/python version {sdk_version} does not match tag {tag}")
-              sys.exit(1)
-          if integrations_version != tag:
-              print(f"sdks/integrations version {integrations_version} does not match tag {tag}")
-              sys.exit(1)
+          checks = [
+              ("sdks/python/pyproject.toml", sdk_version),
+              ("sdks/integrations/pyproject.toml", integrations_version),
+              ("sdks/python/src/mlrunx/__init__.py", sdk_init_version),
+              ("sdks/integrations/src/mlrunx_integrations/__init__.py", integrations_init_version),
+          ]
 
-          print(f"Tag/version match: {tag}")
+          for label, version in checks:
+              if version != tag:
+                  print(f"{label} version {version} does not match tag {tag}")
+                  sys.exit(1)
+
+          print(f"Tag/version match across pyproject + __init__: {tag}")
           PY
 
       - name: Install workspace dependencies
