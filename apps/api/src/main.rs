@@ -693,20 +693,28 @@ async fn http_ingest_batch(
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<IngestBatchHttpRequest>,
 ) -> Result<Json<IngestBatchHttpResponse>, (StatusCode, String)> {
-    // Verify the caller can access the run's project and has write scope
-    if let Ok(run_project) = state.sqlite_store.get_run_project_id(&req.run_id).await {
-        require_endpoint_access(
-            &state,
-            &auth,
-            EndpointRbacTier::Write,
-            Some(&run_project),
-            Some(&req.run_id),
-            "run.ingest",
-            "run",
-            Some(&req.run_id),
-        )
-        .await?;
-    }
+    // Resolve run project first and fail closed when the run does not exist.
+    let run_project = state
+        .sqlite_store
+        .get_run_project_id(&req.run_id)
+        .await
+        .map_err(|e| match e {
+            storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
+
+    // Verify the caller can access the run's project and has write scope.
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Write,
+        Some(&run_project),
+        Some(&req.run_id),
+        "run.ingest",
+        "run",
+        Some(&req.run_id),
+    )
+    .await?;
     // Generate batch_id if not provided
     let batch_id = req
         .batch_id
@@ -750,17 +758,7 @@ async fn http_ingest_batch(
     let param_count = req.params.len();
     let tag_count = req.tags.len();
 
-    // Get project_id from run (read lock first)
-    let project_id = {
-        let runs = state.store.runs.read().await;
-        let run = runs.get(&req.run_id).ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                format!("Run not found: {}", req.run_id),
-            )
-        })?;
-        run.project_id.clone()
-    };
+    let project_id = run_project;
 
     let idempotency_result = state
         .idempotency_store
@@ -3104,5 +3102,66 @@ mod tests {
             .expect("Create key request failed");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_ingest_batch_requires_run_in_sqlite_even_if_present_in_memory() {
+        let store = Arc::new(InMemoryStore::new());
+        let sqlite_store = Arc::new(
+            SqliteStore::new(":memory:")
+                .await
+                .expect("Failed to create test SQLite store"),
+        );
+        let key_store = Arc::new(ApiKeyStore::new_dev_mode());
+        let idempotency_store = Arc::new(IdempotencyStore::new());
+        let cardinality_tracker = Arc::new(CardinalityTracker::default());
+
+        // Insert run in memory only; SQLite intentionally does not contain this run.
+        store.runs.write().await.insert(
+            "run-memory-only".to_string(),
+            services::ingest::RunState {
+                run_id: "run-memory-only".to_string(),
+                project_id: "project-memory".to_string(),
+                name: Some("memory-only".to_string()),
+                status: mlrunx_proto::mlrunx::v1::RunStatus::Running,
+                created_at: std::time::SystemTime::now(),
+                updated_at: std::time::SystemTime::now(),
+                metrics_count: 0,
+                params_count: 0,
+                tags: std::collections::HashMap::new(),
+            },
+        );
+
+        let state = AppState {
+            store,
+            sqlite_store,
+            key_store,
+            idempotency_store,
+            cardinality_tracker,
+        };
+        let app = build_http_router(state);
+
+        let body = r#"{
+            "run_id": "run-memory-only",
+            "batch_id": "batch-1",
+            "seq": 1,
+            "metrics": [{"name": "loss", "value": 0.5, "step": 1}],
+            "params": [],
+            "tags": []
+        }"#;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ingest/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
