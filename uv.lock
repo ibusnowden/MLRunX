@@ -1156,7 +1156,7 @@ wheels = [
 
 [[package]]
 name = "mlrunx"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "sdks/python" }
 dependencies = [
     { name = "httpx" },
@@ -1194,7 +1194,7 @@ provides-extras = ["grpc", "dev"]
 
 [[package]]
 name = "mlrunx-integrations"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "sdks/integrations" }
 dependencies = [
     { name = "mlrunx" },

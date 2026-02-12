@@ -1,6 +1,6 @@
 [project]
 name = "mlrunx-integrations"
-version = "0.1.0"
+version = "0.1.1"
 description = "MLRunX integrations for popular ML frameworks"
 requires-python = ">=3.10"
 readme = "README.md"
@@ -20,7 +20,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "mlrunx>=0.1.0",
+    "mlrunx>=0.1.1",
 ]
 
 [project.optional-dependencies]

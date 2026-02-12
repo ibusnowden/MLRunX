@@ -1,6 +1,6 @@
 [project]
 name = "mlrunx"
-version = "0.1.0"
+version = "0.1.1"
 description = "MLRunX Python SDK - async, non-blocking ML experiment tracking"
 requires-python = ">=3.10"
 readme = "README.md"
