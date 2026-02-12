@@ -107,4 +107,31 @@ describe('api key management client', () => {
     expect(options.method).toBe('DELETE');
     expect(options.credentials).toBe('include');
   });
+
+  it('logs in UI session with bearer token without API key header', async () => {
+    window.localStorage.setItem(API_URL_STORAGE_KEY, 'https://mlrunx.ibra-niang.com');
+    window.localStorage.setItem(API_KEY_STORAGE_KEY, 'mlrunx_local_key');
+
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({
+        status: 'ok',
+        user_id: 'user-1',
+        expires_at: '2026-02-12 00:00:00',
+        project_count: 1,
+      })
+    );
+
+    const result = await api.loginUiSessionWithBearer('provider-jwt-token');
+    expect(result.status).toBe('ok');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = headersToRecord(options.headers);
+
+    expect(url).toBe('https://mlrunx.ibra-niang.com/api/v1/ui-auth/login');
+    expect(options.method).toBe('POST');
+    expect(options.credentials).toBe('include');
+    expect(headers['Authorization']).toBe('Bearer provider-jwt-token');
+    expect(headers['X-API-Key']).toBeUndefined();
+  });
 });
