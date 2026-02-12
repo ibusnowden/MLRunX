@@ -82,8 +82,13 @@ class HttpTransport(Transport):
 
         try:
             return response.json()
-        except Exception:
-            return {"status": "ok"}
+        except ValueError as e:
+            # Do not silently treat malformed responses as success.
+            raise TransportError(
+                f"Invalid JSON response from server: {e}",
+                status_code=response.status_code,
+                retryable=False,
+            ) from e
 
     def send_batch(
         self,
