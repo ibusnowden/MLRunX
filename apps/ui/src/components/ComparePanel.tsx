@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { api, MetricSeries } from '@/lib/api';
 import { UPlotChart } from '@/components/charts/UPlotChart';
 import { useTheme } from '@/components/ThemeProvider';
+import { formatFixed, safeMinMax } from '@/lib/format';
 import { useAutoRefresh } from '@/lib/useAutoRefresh';
 
 // Icons
@@ -337,6 +338,7 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
                   const series = run.metricSeries;
                   if (!series) return null;
                   const points = series.points;
+                  const bounds = safeMinMax(points);
                   return (
                     <tr key={run.run_id} className="border-b border-border">
                       <td className="py-2 px-3 flex items-center gap-2 font-medium text-text-primary">
@@ -347,10 +349,10 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
                         {run.run_name || run.run_id.slice(0, 8)}
                       </td>
                       <td className="text-right py-2 px-3 font-mono text-text-secondary">
-                        {Math.min(...points.map((p) => p.min)).toFixed(4)}
+                        {formatFixed(bounds.min)}
                       </td>
                       <td className="text-right py-2 px-3 font-mono text-text-secondary">
-                        {Math.max(...points.map((p) => p.max)).toFixed(4)}
+                        {formatFixed(bounds.max)}
                       </td>
                       <td className="text-right py-2 px-3 font-mono text-text-secondary">
                         {points.length > 0 ? points[points.length - 1].mean.toFixed(4) : '-'}

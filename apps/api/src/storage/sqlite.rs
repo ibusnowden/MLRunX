@@ -11,6 +11,9 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
+const SQLITE_SCHEMA_VERSION: &str = "2026-02-12.1";
+const SQLITE_SCHEMA_DESCRIPTION: &str = "bootstrap schema with auth, audit, and share tables";
+
 /// Errors that can occur in SQLite operations.
 #[derive(Error, Debug)]
 pub enum SqliteError {
@@ -277,10 +280,32 @@ impl SqliteStore {
                 FOREIGN KEY (run_id) REFERENCES runs(id)
             );
             CREATE INDEX IF NOT EXISTS idx_share_tokens_run ON share_tokens(run_id);
+
+            -- Schema migration ledger for long-lived upgrade safety.
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version TEXT PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
         "#)?;
+
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?1, ?2)",
+            params![SQLITE_SCHEMA_VERSION, SQLITE_SCHEMA_DESCRIPTION],
+        )?;
 
         debug!("SQLite schema initialized");
         Ok(())
+    }
+
+    /// List applied schema migration versions.
+    pub async fn list_schema_migrations(&self) -> Result<Vec<String>, SqliteError> {
+        let conn = self.conn.lock().await;
+        let mut stmt =
+            conn.prepare("SELECT version FROM schema_migrations ORDER BY applied_at ASC")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        let versions: Result<Vec<_>, _> = rows.collect();
+        Ok(versions?)
     }
 
     // =========================================================================
@@ -1354,6 +1379,13 @@ mod tests {
         assert_eq!(run.id, "run-123");
         assert_eq!(run.name, Some("My Run".to_string()));
         assert_eq!(run.status, "running");
+    }
+
+    #[tokio::test]
+    async fn test_schema_migration_ledger_records_bootstrap_version() {
+        let store = create_test_store().await;
+        let versions = store.list_schema_migrations().await.unwrap();
+        assert!(versions.contains(&SQLITE_SCHEMA_VERSION.to_string()));
     }
 
     #[tokio::test]

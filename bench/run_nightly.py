@@ -145,9 +145,6 @@ class NightlyRunner:
         """
         logger.info(f"Running {workload} benchmark (scale: {scale})...")
 
-        # Get scale config
-        scale_config = self.thresholds.get("scale", {}).get(scale, {}).get(workload, {})
-
         # Build command
         if workload == "w1":
             cmd = [
@@ -159,6 +156,13 @@ class NightlyRunner:
         elif workload == "w2":
             cmd = [
                 sys.executable, "-m", "bench.workloads.w2_ingest_latency_runner",
+                "--scale", scale,
+                "--server-url", self.server_url,
+                "--output", str(self.output_dir / f"{workload}_{scale}.json"),
+            ]
+        elif workload == "w3":
+            cmd = [
+                sys.executable, "-m", "bench.workloads.w3_mixed_dashboard_runner",
                 "--scale", scale,
                 "--server-url", self.server_url,
                 "--output", str(self.output_dir / f"{workload}_{scale}.json"),
@@ -350,7 +354,7 @@ class NightlyRunner:
 
         # Determine workloads
         if workloads is None:
-            workloads = ["w1", "w2"]  # w3 not implemented yet
+            workloads = ["w1", "w2", "w3"]
 
         # Run benchmarks
         all_results = []

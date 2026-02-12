@@ -6,6 +6,10 @@ members = [
     "services/ingest",
     "services/processor",
 ]
+default-members = [
+    "apps/api",
+    "crates/proto",
+]
 
 [workspace.package]
 version = "0.1.0"
