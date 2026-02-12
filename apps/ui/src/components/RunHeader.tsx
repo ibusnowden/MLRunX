@@ -1,17 +1,11 @@
 'use client';
 
 import { RunDetail } from '@/lib/api';
+import { formatDuration } from '@/lib/format';
 
 interface RunHeaderProps {
   run: RunDetail;
   darkTheme?: boolean;
-}
-
-function formatDuration(seconds: number | null): string {
-  if (seconds === null) return '-';
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
-  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
 export function RunHeader({ run }: RunHeaderProps) {

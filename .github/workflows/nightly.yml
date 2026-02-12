@@ -154,26 +154,50 @@ jobs:
         with:
           version: "25.x"
 
-      - name: Build services
-        run: cargo build --release
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
 
-      - name: Run W1 benchmark (scaled-down)
-        id: bench
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Build API
+        run: cargo build --release --bin mlrunx-api
+
+      - name: Run W1 benchmark and threshold check
         run: |
-          # Placeholder: actual benchmark implementation in BENCH-000
-          echo "Running W1 benchmark..."
-          echo "Target: p95 < 200ms for 1,000 runs queries"
+          set -euo pipefail
+          DB_PATH="/tmp/mlrunx-w1-${RANDOM}.db"
+          MLRUNX_AUTH_DISABLED=true MLRUNX_SQLITE_PATH="$DB_PATH" API_HOST=127.0.0.1 API_HTTP_PORT=3001 API_GRPC_PORT=50051 \
+            ./target/release/mlrunx-api > /tmp/mlrunx-api-w1.log 2>&1 &
+          API_PID=$!
 
-          # Simulate benchmark result (replace with actual benchmark)
-          W1_P95=150
-          echo "W1_P95=$W1_P95" >> $GITHUB_OUTPUT
-          echo "W1 p95: ${W1_P95}ms"
+          cleanup() {
+            kill "$API_PID" >/dev/null 2>&1 || true
+            wait "$API_PID" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT INT TERM
 
-      - name: Check threshold
-        run: |
-          if [ "${{ steps.bench.outputs.W1_P95 }}" -gt 200 ]; then
-            echo "::warning::W1 p95 (${{ steps.bench.outputs.W1_P95 }}ms) exceeds 200ms target"
-          fi
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:3001/health >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3001/health >/dev/null
+
+          uv run python -m bench.workloads.w1_run_scale_runner \
+            --scale nightly \
+            --server-url http://127.0.0.1:3001 \
+            --output bench/results/w1_nightly.json
+
+          uv run python bench/run_nightly.py check-threshold \
+            --results bench/results/w1_nightly.json \
+            --thresholds bench/ci_thresholds.yaml
 
   bench-w2:
     name: Benchmark W2 (High-Freq Ingest)
@@ -206,26 +230,50 @@ jobs:
         with:
           version: "25.x"
 
-      - name: Build services
-        run: cargo build --release
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
 
-      - name: Run W2 benchmark (scaled-down)
-        id: bench
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Build API
+        run: cargo build --release --bin mlrunx-api
+
+      - name: Run W2 benchmark and threshold check
         run: |
-          # Placeholder: actual benchmark implementation in BENCH-000
-          echo "Running W2 benchmark..."
-          echo "Target: p95 < 500ms for log-to-visible latency"
+          set -euo pipefail
+          DB_PATH="/tmp/mlrunx-w2-${RANDOM}.db"
+          MLRUNX_AUTH_DISABLED=true MLRUNX_SQLITE_PATH="$DB_PATH" API_HOST=127.0.0.1 API_HTTP_PORT=3001 API_GRPC_PORT=50051 \
+            ./target/release/mlrunx-api > /tmp/mlrunx-api-w2.log 2>&1 &
+          API_PID=$!
 
-          # Simulate benchmark result (replace with actual benchmark)
-          W2_P95=350
-          echo "W2_P95=$W2_P95" >> $GITHUB_OUTPUT
-          echo "W2 p95: ${W2_P95}ms"
+          cleanup() {
+            kill "$API_PID" >/dev/null 2>&1 || true
+            wait "$API_PID" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT INT TERM
 
-      - name: Check threshold
-        run: |
-          if [ "${{ steps.bench.outputs.W2_P95 }}" -gt 500 ]; then
-            echo "::warning::W2 p95 (${{ steps.bench.outputs.W2_P95 }}ms) exceeds 500ms target"
-          fi
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:3001/health >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3001/health >/dev/null
+
+          uv run python -m bench.workloads.w2_ingest_latency_runner \
+            --scale nightly \
+            --server-url http://127.0.0.1:3001 \
+            --output bench/results/w2_nightly.json
+
+          uv run python bench/run_nightly.py check-threshold \
+            --results bench/results/w2_nightly.json \
+            --thresholds bench/ci_thresholds.yaml
 
   bench-w3:
     name: Benchmark W3 (Mixed Dashboard)
@@ -261,26 +309,50 @@ jobs:
         with:
           version: "25.x"
 
-      - name: Build services
-        run: cargo build --release
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
 
-      - name: Run W3 benchmark (scaled-down)
-        id: bench
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Build API
+        run: cargo build --release --bin mlrunx-api
+
+      - name: Run W3 benchmark and threshold check
         run: |
-          # Placeholder: actual benchmark implementation in BENCH-000
-          echo "Running W3 benchmark..."
-          echo "Target: p95 < 300ms for mixed dashboard queries"
+          set -euo pipefail
+          DB_PATH="/tmp/mlrunx-w3-${RANDOM}.db"
+          MLRUNX_AUTH_DISABLED=true MLRUNX_SQLITE_PATH="$DB_PATH" API_HOST=127.0.0.1 API_HTTP_PORT=3001 API_GRPC_PORT=50051 \
+            ./target/release/mlrunx-api > /tmp/mlrunx-api-w3.log 2>&1 &
+          API_PID=$!
 
-          # Simulate benchmark result (replace with actual benchmark)
-          W3_P95=200
-          echo "W3_P95=$W3_P95" >> $GITHUB_OUTPUT
-          echo "W3 p95: ${W3_P95}ms"
+          cleanup() {
+            kill "$API_PID" >/dev/null 2>&1 || true
+            wait "$API_PID" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT INT TERM
 
-      - name: Check threshold
-        run: |
-          if [ "${{ steps.bench.outputs.W3_P95 }}" -gt 300 ]; then
-            echo "::warning::W3 p95 (${{ steps.bench.outputs.W3_P95 }}ms) exceeds 300ms target"
-          fi
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:3001/health >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3001/health >/dev/null
+
+          uv run python -m bench.workloads.w3_mixed_dashboard_runner \
+            --scale nightly \
+            --server-url http://127.0.0.1:3001 \
+            --output bench/results/w3_nightly.json
+
+          uv run python bench/run_nightly.py check-threshold \
+            --results bench/results/w3_nightly.json \
+            --thresholds bench/ci_thresholds.yaml
 
   # ===========================================================================
   # Summary & Notification

@@ -6,6 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 description = "MLRunX API gateway and query service"
 
+[features]
+default = []
+experimental-clickhouse = ["dep:clickhouse"]
+experimental-minio = []
+
 [dependencies]
 # Internal crates
 mlrunx-proto.workspace = true
@@ -27,7 +32,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 # Database
-clickhouse.workspace = true
+clickhouse = { workspace = true, optional = true }
 rusqlite.workspace = true
 tokio-postgres.workspace = true
 

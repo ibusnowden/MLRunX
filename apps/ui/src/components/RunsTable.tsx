@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { api, Run, ListRunsResponse } from '@/lib/api';
+import { formatDuration } from '@/lib/format';
 import { useAutoRefresh } from '@/lib/useAutoRefresh';
 
 interface RunsTableProps {
@@ -104,13 +105,6 @@ function parseTagFilter(value: string): { key: string; value?: string } | null {
   const [key, tagValue] = trimmed.split('=', 2);
   if (!key) return null;
   return tagValue ? { key, value: tagValue } : { key };
-}
-
-function formatDuration(seconds: number | null): string {
-  if (seconds === null) return '-';
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
-  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
 function formatDate(dateStr: string): string {

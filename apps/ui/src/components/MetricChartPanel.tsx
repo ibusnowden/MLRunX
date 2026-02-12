@@ -5,6 +5,7 @@ import { api, MetricSeries } from '@/lib/api';
 import { UPlotChart } from '@/components/charts/UPlotChart';
 import { ChartControls } from '@/components/charts/ChartControls';
 import { useTheme } from '@/components/ThemeProvider';
+import { formatFixed, safeMinMax } from '@/lib/format';
 
 interface MetricChartPanelProps {
   runId: string;
@@ -179,18 +180,20 @@ export function MetricChartPanel({ runId }: MetricChartPanelProps) {
 
             {/* Summary stats */}
             <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
-              {series.slice(0, 1).map((s) => (
-                <React.Fragment key={s.name}>
+              {series.slice(0, 1).map((s) => {
+                const bounds = safeMinMax(s.points);
+                return (
+                  <React.Fragment key={s.name}>
                   <div className="rounded-lg p-3 bg-surface-secondary">
                     <div className="text-text-muted">Min ({s.name})</div>
                     <div className="font-mono text-lg text-text-primary">
-                      {Math.min(...s.points.map((p) => p.min)).toFixed(4)}
+                      {formatFixed(bounds.min)}
                     </div>
                   </div>
                   <div className="rounded-lg p-3 bg-surface-secondary">
                     <div className="text-text-muted">Max ({s.name})</div>
                     <div className="font-mono text-lg text-text-primary">
-                      {Math.max(...s.points.map((p) => p.max)).toFixed(4)}
+                      {formatFixed(bounds.max)}
                     </div>
                   </div>
                   <div className="rounded-lg p-3 bg-surface-secondary">
@@ -201,8 +204,9 @@ export function MetricChartPanel({ runId }: MetricChartPanelProps) {
                         : '-'}
                     </div>
                   </div>
-                </React.Fragment>
-              ))}
+                  </React.Fragment>
+                );
+              })}
             </div>
           </div>
         ) : null}

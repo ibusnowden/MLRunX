@@ -4,16 +4,8 @@ import { useState, useEffect, useCallback, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { api, Run } from '@/lib/api';
 import { ComparePanel } from '@/components/ComparePanel';
+import { formatDuration } from '@/lib/format';
 import { useAutoRefresh } from '@/lib/useAutoRefresh';
-
-function formatDuration(seconds: number | null): string {
-  if (seconds === null) return '-';
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  return `${h}h ${m}m`;
-}
 
 function ComparePageContent() {
   const router = useRouter();
