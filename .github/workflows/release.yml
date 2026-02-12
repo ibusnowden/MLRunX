@@ -4,6 +4,7 @@
 # Triggered on version tags (v*). Builds and publishes:
 # 1. Docker image to GitHub Container Registry (ghcr.io)
 # 2. Pre-built binaries as GitHub Release assets
+# 3. Python SDK distributions to PyPI + GitHub Release assets
 # =============================================================================
 
 name: Release
@@ -133,11 +134,117 @@ jobs:
           path: dist/${{ matrix.artifact }}
 
   # ---------------------------------------------------------------------------
+  # Build, test, and package Python SDK distributions
+  # ---------------------------------------------------------------------------
+  python-packages:
+    name: Python Packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Verify tag matches SDK versions
+        run: |
+          python - <<'PY'
+          import pathlib
+          import tomllib
+          import os
+          import sys
+
+          tag = os.environ["GITHUB_REF"].removeprefix("refs/tags/v")
+          sdk_pyproject = pathlib.Path("sdks/python/pyproject.toml")
+          integrations_pyproject = pathlib.Path("sdks/integrations/pyproject.toml")
+
+          sdk_version = tomllib.loads(sdk_pyproject.read_text())["project"]["version"]
+          integrations_version = tomllib.loads(integrations_pyproject.read_text())["project"]["version"]
+
+          if sdk_version != tag:
+              print(f"sdks/python version {sdk_version} does not match tag {tag}")
+              sys.exit(1)
+          if integrations_version != tag:
+              print(f"sdks/integrations version {integrations_version} does not match tag {tag}")
+              sys.exit(1)
+
+          print(f"Tag/version match: {tag}")
+          PY
+
+      - name: Install workspace dependencies
+        run: uv sync --all-packages
+
+      - name: Run SDK test suites
+        run: |
+          uv run pytest sdks/python/tests -q
+          uv run pytest sdks/integrations/tests -q
+
+      - name: Build Python distributions
+        run: uv build --all-packages --out-dir dist/python --sdist --wheel --clear
+
+      - name: Validate Python distribution artifacts
+        run: |
+          ls -1 dist/python
+          python - <<'PY'
+          import pathlib
+          import sys
+
+          dist = pathlib.Path("dist/python")
+          files = [p.name for p in dist.glob("*")]
+          required_prefixes = ("mlrunx-", "mlrunx_integrations-")
+          missing = [
+              prefix for prefix in required_prefixes
+              if not any(name.startswith(prefix) for name in files)
+          ]
+          if missing:
+              print(f"Missing expected package artifacts: {missing}")
+              sys.exit(1)
+          print("Found both mlrunx and mlrunx-integrations distributions.")
+          PY
+
+      - name: Upload Python package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-dists
+          path: dist/python/*
+
+  # ---------------------------------------------------------------------------
+  # Publish Python packages to PyPI (Trusted Publishing)
+  # ---------------------------------------------------------------------------
+  pypi-publish:
+    name: PyPI Publish
+    needs: [python-packages]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download Python package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-dists
+          path: dist/python
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/python
+          skip-existing: true
+
+  # ---------------------------------------------------------------------------
   # Create GitHub Release with binaries
   # ---------------------------------------------------------------------------
   release:
     name: GitHub Release
-    needs: [docker, binaries]
+    needs: [docker, binaries, python-packages, pypi-publish]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -148,6 +255,12 @@ jobs:
           pattern: mlrunx-api-*
           merge-multiple: true
           path: dist
+
+      - name: Download Python package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-dists
+          path: dist/python
 
       - name: Create release
         uses: softprops/action-gh-release@v2
