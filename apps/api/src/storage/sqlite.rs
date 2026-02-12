@@ -1357,6 +1357,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_persistence_across_store_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("mlrunx-persist.db");
+
+        {
+            let store = SqliteStore::new(&db_path).await.unwrap();
+            let project_id = store
+                .get_or_create_project("persist-project")
+                .await
+                .unwrap();
+            store
+                .create_run("run-persist-123", &project_id, Some("Persisted Run"))
+                .await
+                .unwrap();
+            store
+                .insert_metrics(
+                    "run-persist-123",
+                    &[MetricRow {
+                        name: "loss".to_string(),
+                        step: 1,
+                        value: 0.42,
+                        timestamp: Some(1_717_171_717.0),
+                    }],
+                )
+                .await
+                .unwrap();
+        }
+
+        {
+            let reopened = SqliteStore::new(&db_path).await.unwrap();
+            let run = reopened.get_run("run-persist-123").await.unwrap();
+            assert_eq!(run.name, Some("Persisted Run".to_string()));
+
+            let metrics = reopened
+                .get_metrics("run-persist-123", &["loss".to_string()], 1000)
+                .await
+                .unwrap();
+            assert_eq!(metrics.len(), 1);
+            assert_eq!(metrics[0].name, "loss");
+            assert_eq!(metrics[0].points.len(), 1);
+            assert_eq!(metrics[0].points[0].step, 1);
+        }
+    }
+
+    #[tokio::test]
     async fn test_insert_and_query_metrics() {
         let store = create_test_store().await;
 

@@ -590,23 +590,6 @@ async fn http_init_run(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
-    // Also maintain in-memory state for backward compatibility
-    let now = std::time::SystemTime::now();
-    let run_state = services::ingest::RunState {
-        run_id: run_id.clone(),
-        project_id: req.project.clone(),
-        name: req.name.clone(),
-        status: mlrunx_proto::mlrunx::v1::RunStatus::Running,
-        created_at: now,
-        updated_at: now,
-        metrics_count: 0,
-        params_count: 0,
-        tags: req.tags.clone().unwrap_or_default(),
-    };
-
-    let mut runs = state.store.runs.write().await;
-    runs.insert(run_id.clone(), run_state);
-
     info!(run_id = %run_id, project = %req.project, "HTTP: Initialized run (SQLite)");
 
     emit_audit_event(
@@ -840,17 +823,17 @@ async fn http_ingest_batch(
     let accepted_metrics: std::collections::HashSet<_> =
         validation.accepted_metrics.iter().collect();
 
-    // Now process the batch
-    let mut runs = state.store.runs.write().await;
+    // Validate run status from SQLite (single source of truth for HTTP paths).
+    let run = state
+        .sqlite_store
+        .get_run(&req.run_id)
+        .await
+        .map_err(|e| match e {
+            storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
 
-    let run = runs.get_mut(&req.run_id).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            format!("Run not found: {}", req.run_id),
-        )
-    })?;
-
-    if run.status != mlrunx_proto::mlrunx::v1::RunStatus::Running {
+    if !run.status.eq_ignore_ascii_case("running") {
         return Err((
             StatusCode::PRECONDITION_FAILED,
             format!("Run {} is not running", req.run_id),
@@ -895,25 +878,6 @@ async fn http_ingest_batch(
         {
             warn!(error = %e, "Failed to update metrics count in SQLite");
         }
-
-        // Also maintain in-memory for backward compatibility
-        let mut metrics_store = state.store.metrics.write().await;
-        let run_metrics = metrics_store
-            .entry(req.run_id.clone())
-            .or_insert_with(services::RunMetrics::new);
-
-        for metric in req
-            .metrics
-            .iter()
-            .filter(|m| accepted_metrics.contains(&m.name))
-        {
-            run_metrics.add_point(services::MetricPoint {
-                name: metric.name.clone(),
-                step: metric.step,
-                value: metric.value,
-                timestamp: metric.timestamp,
-            });
-        }
     }
 
     // Persist tags to SQLite
@@ -942,16 +906,6 @@ async fn http_ingest_batch(
             warn!(error = %e, "Failed to persist params to SQLite");
         }
     }
-
-    run.metrics_count += accepted_metric_count as u64;
-    run.params_count += param_count as u64;
-
-    // Update tags (only accepted ones) in memory
-    for (key, value) in accepted_tags {
-        run.tags.insert(key.clone(), value.clone());
-    }
-
-    run.updated_at = std::time::SystemTime::now();
 
     let total = accepted_metric_count + param_count + accepted_tag_count;
     let dropped = validation.dropped_tags.len() + validation.dropped_metrics.len();
@@ -1018,18 +972,6 @@ async fn http_finish_run(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Also update in-memory for backward compatibility
-    let mut runs = state.store.runs.write().await;
-    if let Some(run) = runs.get_mut(&run_id) {
-        run.status = match req.status.as_str() {
-            "finished" => mlrunx_proto::mlrunx::v1::RunStatus::Finished,
-            "failed" => mlrunx_proto::mlrunx::v1::RunStatus::Failed,
-            "killed" => mlrunx_proto::mlrunx::v1::RunStatus::Killed,
-            _ => mlrunx_proto::mlrunx::v1::RunStatus::Finished,
-        };
-        run.updated_at = std::time::SystemTime::now();
-    }
-
     info!(run_id = %run_id, status = %req.status, "HTTP: Finished run (SQLite)");
 
     emit_audit_event(
@@ -1094,10 +1036,6 @@ async fn http_delete_run(
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         })?;
-
-    // Also remove from in-memory store
-    state.store.runs.write().await.remove(&run_id);
-    state.store.metrics.write().await.remove(&run_id);
 
     info!(run_id = %run_id, "HTTP: Deleted run");
 
@@ -2784,6 +2722,26 @@ mod tests {
         String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8")
     }
 
+    async fn test_app_with_auth_enabled() -> Router {
+        let store = Arc::new(InMemoryStore::new());
+        let sqlite_store = Arc::new(
+            SqliteStore::new(":memory:")
+                .await
+                .expect("Failed to create test SQLite store"),
+        );
+        let key_store = Arc::new(ApiKeyStore::new());
+        let idempotency_store = Arc::new(IdempotencyStore::new());
+        let cardinality_tracker = Arc::new(CardinalityTracker::default());
+        let state = AppState {
+            store,
+            sqlite_store,
+            key_store,
+            idempotency_store,
+            cardinality_tracker,
+        };
+        build_http_router(state)
+    }
+
     #[tokio::test]
     async fn test_root_endpoint() {
         let app = test_app().await;
@@ -3102,6 +3060,26 @@ mod tests {
             .expect("Create key request failed");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_protected_run_init_requires_auth_when_not_in_dev_mode() {
+        let app = test_app_with_auth_enabled().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"project": "auth-project", "name": "auth-test"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test(flavor = "multi_thread")]

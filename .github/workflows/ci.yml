@@ -31,12 +31,66 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # Proto/API contract checks
+  # ---------------------------------------------------------------------------
+  contracts:
+    name: Contracts (Buf)
+    runs-on: ubuntu-latest
+    needs: [hygiene]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup buf
+        uses: bufbuild/buf-setup-action@v1
+
+      - name: Lint proto definitions
+        run: buf lint
+
+      - name: Check breaking proto changes
+        run: buf breaking --against '.git#branch=main'
+
+  # ---------------------------------------------------------------------------
+  # Dependency security audits (informational)
+  # ---------------------------------------------------------------------------
+  security:
+    name: Security Audits
+    runs-on: ubuntu-latest
+    needs: [hygiene]
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Rust advisory audit
+        run: cargo audit
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/ui/package-lock.json
+
+      - name: Install UI dependencies
+        run: npm ci --prefix apps/ui
+
+      - name: npm advisory audit
+        run: npm --prefix apps/ui audit --audit-level=high
+
+  # ---------------------------------------------------------------------------
   # Rust API: build + test
   # ---------------------------------------------------------------------------
   api:
     name: API (Rust)
     runs-on: ubuntu-latest
-    needs: [hygiene]
+    needs: [hygiene, contracts]
     steps:
       - uses: actions/checkout@v4
 
@@ -67,7 +121,7 @@ jobs:
   ui:
     name: UI (Next.js)
     runs-on: ubuntu-latest
-    needs: [hygiene]
+    needs: [hygiene, contracts]
     defaults:
       run:
         working-directory: apps/ui
