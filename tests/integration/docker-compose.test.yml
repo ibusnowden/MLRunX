@@ -90,6 +90,7 @@ services:
       API_HOST: "0.0.0.0"
       API_HTTP_PORT: "3001"
       API_GRPC_PORT: "50051"
+      MLRUNX_AUTH_MODE: "disabled"
       MLRUNX_AUTH_DISABLED: "true"  # Disable auth for tests
       DATABASE_URL: postgres://mlrunx:test_password@postgres:5432/mlrunx_test
       CLICKHOUSE_URL: http://clickhouse:8123
