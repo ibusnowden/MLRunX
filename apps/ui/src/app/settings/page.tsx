@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import {
   ApiKeyInfo,
@@ -11,6 +12,7 @@ import {
   getStoredApiConfig,
   saveStoredApiConfig,
 } from '@/lib/api';
+import { signOutSupabase } from '@/lib/auth/supabase';
 
 function formatTimestamp(epochSeconds: string | null): string {
   if (!epochSeconds) return 'Never';
@@ -22,7 +24,6 @@ function formatTimestamp(epochSeconds: string | null): string {
 export default function SettingsPage() {
   const [apiBaseUrl, setApiBaseUrl] = useState(DEFAULT_API_URL);
   const [apiKey, setApiKey] = useState('');
-  const [jwtInput, setJwtInput] = useState('');
   const [session, setSession] = useState<UiAuthSessionResult | null>(null);
   const [keys, setKeys] = useState<ApiKeyInfo[]>([]);
   const [newKeyName, setNewKeyName] = useState('');
@@ -114,31 +115,14 @@ export default function SettingsPage() {
     clearStoredApiConfig();
     setApiBaseUrl(DEFAULT_API_URL);
     setApiKey('');
-    setJwtInput('');
     setCreatedKey(null);
     setStatus(`Reset to defaults at ${new Date().toLocaleTimeString()}`);
-  };
-
-  const handleSessionLogin = async () => {
-    if (!jwtInput.trim()) {
-      setStatus('JWT is required to sign in.');
-      return;
-    }
-
-    try {
-      const result = await api.loginUiSession(jwtInput.trim());
-      setJwtInput('');
-      await refreshSession();
-      setStatus(`UI session started (expires ${result.expires_at}).`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to start UI session.';
-      setStatus(message);
-    }
   };
 
   const handleSessionLogout = async () => {
     try {
       await api.logoutUiSession();
+      await signOutSupabase();
       await refreshSession();
       setCreatedKey(null);
       setStatus('UI session ended.');
@@ -249,33 +233,27 @@ export default function SettingsPage() {
           </div>
 
           <div>
-            <label htmlFor="session-jwt" className="block text-sm font-medium text-text-primary mb-1.5">
-              Sign In JWT (Not Stored)
+            <label className="block text-sm font-medium text-text-primary mb-1.5">
+              UI Session
             </label>
-            <textarea
-              id="session-jwt"
-              value={jwtInput}
-              onChange={(event) => setJwtInput(event.target.value)}
-              placeholder="Paste JWT to exchange for secure HttpOnly session cookie"
-              autoComplete="off"
-              rows={4}
-              className="w-full rounded-lg border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent"
-            />
             <p className="mt-1.5 text-xs text-text-muted">
-              JWT is sent once to <code>/api/v1/ui-auth/login</code> and exchanged for HttpOnly + CSRF cookies.
+              Use <Link href="/login" className="text-accent hover:underline">/login</Link> or{' '}
+              <Link href="/signup" className="text-accent hover:underline">/signup</Link> for sign in. This page now manages only session status and API key self-service.
             </p>
             <div className="mt-3 flex flex-col sm:flex-row gap-2">
-              <button
-                type="button"
-                onClick={handleSessionLogin}
-                className="px-4 py-2.5 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent-hover transition-colors"
-              >
-                Start UI Session
-              </button>
+              {!session && (
+                <Link
+                  href="/login"
+                  className="inline-flex items-center justify-center px-4 py-2.5 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent-hover transition-colors"
+                >
+                  Go to Login
+                </Link>
+              )}
               <button
                 type="button"
                 onClick={handleSessionLogout}
-                className="px-4 py-2.5 rounded-lg border border-border text-sm font-medium text-text-secondary hover:bg-surface-secondary hover:text-text-primary transition-colors"
+                disabled={!session}
+                className="px-4 py-2.5 rounded-lg border border-border text-sm font-medium text-text-secondary hover:bg-surface-secondary hover:text-text-primary transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 End UI Session
               </button>
@@ -292,7 +270,7 @@ export default function SettingsPage() {
                 ? 'Checking session...'
                 : session
                   ? `Authenticated (${session.auth_mode}) with scopes [${session.scopes.join(', ')}] across ${session.project_ids.length} project(s).`
-                  : 'No active UI session cookie.'}
+                  : 'No active UI session cookie. Sign in at /login.'}
             </p>
           </div>
 

@@ -1,9 +1,11 @@
 'use client';
 
-import { useMemo } from 'react';
-import { usePathname } from 'next/navigation';
+import { useEffect, useMemo, useState } from 'react';
+import { usePathname, useRouter } from 'next/navigation';
 import { Sidebar } from './Sidebar';
 import { useSidebar } from './SidebarProvider';
+import { api, getStoredApiConfig } from '@/lib/api';
+import { isPublicAuthPath } from '@/lib/auth/routes';
 
 const MenuIcon = () => (
   <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -21,13 +23,78 @@ function getPageTitle(pathname: string): string {
   if (pathname.startsWith('/runs/')) return 'Run Details';
   if (pathname === '/compare') return 'Compare';
   if (pathname === '/settings') return 'Access Console';
+  if (pathname === '/login') return 'Login';
+  if (pathname === '/signup') return 'Sign Up';
   return 'MLRunX';
 }
 
 export function AppShell({ children }: { children: React.ReactNode }) {
+  const router = useRouter();
   const pathname = usePathname();
   const { collapsed, toggleMobile } = useSidebar();
   const pageTitle = useMemo(() => getPageTitle(pathname), [pathname]);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authorized, setAuthorized] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (isPublicAuthPath(pathname)) {
+      setAuthChecked(true);
+      setAuthorized(true);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const { apiKey } = getStoredApiConfig();
+    if (apiKey.trim()) {
+      setAuthChecked(true);
+      setAuthorized(true);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setAuthChecked(false);
+    setAuthorized(false);
+
+    const verify = async () => {
+      try {
+        await api.getUiSession();
+        if (!cancelled) {
+          setAuthorized(true);
+          setAuthChecked(true);
+        }
+      } catch {
+        if (!cancelled) {
+          const nextPath = pathname.startsWith('/') ? pathname : '/';
+          router.replace(`/login?next=${encodeURIComponent(nextPath)}`);
+          setAuthorized(false);
+          setAuthChecked(true);
+        }
+      }
+    };
+
+    void verify();
+    return () => {
+      cancelled = true;
+    };
+  }, [pathname, router]);
+
+  if (isPublicAuthPath(pathname)) {
+    return <div className="min-h-screen bg-background">{children}</div>;
+  }
+
+  if (!authChecked || !authorized) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-text-secondary">
+          Checking session...
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-screen bg-background">

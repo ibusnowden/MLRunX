@@ -278,6 +278,20 @@ export const api = {
     );
   },
 
+  async loginUiSessionWithBearer(jwt: string): Promise<UiAuthLoginResult> {
+    return fetchApi<UiAuthLoginResult>(
+      '/api/v1/ui-auth/login',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${jwt}`,
+        },
+        body: '{}',
+      },
+      { skipApiKey: true }
+    );
+  },
+
   async getUiSession(): Promise<UiAuthSessionResult> {
     return fetchApi<UiAuthSessionResult>('/api/v1/ui-auth/session', {}, { skipApiKey: true });
   },
