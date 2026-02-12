@@ -21,7 +21,7 @@ const OAUTH_PROVIDERS: Array<{ provider: OAuthProvider; label: string }> = [
 function LoginContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const nextPath = useMemo(() => sanitizeNextPath(searchParams.get('next'), '/settings'), [searchParams]);
+  const nextPath = useMemo(() => sanitizeNextPath(searchParams.get('next'), '/onboarding'), [searchParams]);
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
