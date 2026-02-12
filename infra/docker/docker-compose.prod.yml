@@ -17,6 +17,7 @@ services:
       API_GRPC_PORT: "50051"
       MLRUNX_SQLITE_PATH: ${MLRUNX_SQLITE_PATH:-/data/mlrunx.db}
 
+      MLRUNX_AUTH_MODE: ${MLRUNX_AUTH_MODE:-hybrid}
       MLRUNX_AUTH_DISABLED: ${MLRUNX_AUTH_DISABLED:-false}
       MLRUNX_API_KEY: ${MLRUNX_API_KEY:-}
 

@@ -1,0 +1,67 @@
+version: 1
+updated_utc: "2026-02-12T00:00:00Z"
+summary:
+  maturity: alpha
+  intent: "Agent-facing map of implemented vs experimental surfaces and non-negotiable runtime invariants."
+
+components:
+  api:
+    status: implemented
+    owner: apps/api
+    notes:
+      - "HTTP runtime paths use SQLite as source of truth."
+      - "Auth mode is controlled by MLRUNX_AUTH_MODE with legacy flag fallback."
+  ui:
+    status: implemented
+    owner: apps/ui
+    notes:
+      - "Primary dashboard and settings paths are production-facing."
+      - "Global route error boundary is present for crash containment."
+  sdk_python:
+    status: implemented
+    owner: sdks/python
+    notes:
+      - "HTTP transport now fails closed on malformed JSON responses."
+  storage_postgres:
+    status: scaffolded
+    owner: apps/api/src/storage/postgres.rs
+    notes:
+      - "Do not treat as production-ready without explicit implementation pass."
+  storage_clickhouse:
+    status: experimental
+    owner: apps/api/src/storage/clickhouse.rs
+    compile_gate: experimental-clickhouse
+  storage_minio:
+    status: experimental
+    owner: apps/api/src/storage/minio.rs
+    compile_gate: experimental-minio
+  services_ingest:
+    status: scaffolded
+    owner: services/ingest
+    default_build: excluded
+  services_processor:
+    status: scaffolded
+    owner: services/processor
+    default_build: excluded
+
+invariants:
+  - id: AUTH-001
+    description: "When MLRUNX_AUTH_MODE=disabled, all protected endpoints must bypass credential checks in middleware."
+  - id: AUTH-002
+    description: "When MLRUNX_AUTH_MODE=api_key, UI JWT/session paths must remain disabled."
+  - id: AUTH-003
+    description: "When MLRUNX_AUTH_MODE=hybrid, API key auth and UI JWT/session auth must both be accepted."
+  - id: DB-001
+    description: "HTTP read/write handlers must not rely on in-memory run metadata as authoritative state."
+  - id: DB-002
+    description: "SQLite schema bootstrap must record a ledger row in schema_migrations."
+  - id: CI-001
+    description: "Nightly benchmark jobs must execute real workload runners, not synthetic placeholder values."
+  - id: REL-001
+    description: "Release workflow publishes both API and UI container images with version and latest tags."
+
+change_policy:
+  require_update_on:
+    - "Any change in storage readiness classification"
+    - "Any new runtime auth mode or auth flag deprecation"
+    - "Any release artifact matrix change"

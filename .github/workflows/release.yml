@@ -15,7 +15,9 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/mlrunx-api
+  API_IMAGE_NAME: ${{ github.repository_owner }}/mlrunx-api
+  UI_IMAGE_NAME: ${{ github.repository_owner }}/mlrunx-ui
+  UI_NEXT_PUBLIC_API_URL: https://mlrunx.example.com
 
 permissions:
   contents: write
@@ -45,14 +47,28 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
-      - name: Build and push Docker image
+      - name: Build and push API image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.API_IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.API_IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push UI image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.ui
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.UI_IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.UI_IMAGE_NAME }}:latest
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ env.UI_NEXT_PUBLIC_API_URL }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

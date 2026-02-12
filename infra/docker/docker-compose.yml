@@ -161,6 +161,7 @@ services:
       API_HOST: "0.0.0.0"
       API_HTTP_PORT: "3001"
       API_GRPC_PORT: "50051"
+      MLRUNX_AUTH_MODE: ${MLRUNX_AUTH_MODE:-api_key}
       MLRUNX_AUTH_DISABLED: ${MLRUNX_AUTH_DISABLED:-false}
       MLRUNX_API_KEY: ${MLRUNX_API_KEY:-}
       DATABASE_URL: postgres://mlrunx:${POSTGRES_PASSWORD:-mlrunx_dev}@postgres:5432/mlrunx

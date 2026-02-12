@@ -84,7 +84,7 @@ struct UiJwtConfig {
 }
 
 impl UiJwtConfig {
-    fn from_env() -> Self {
+    fn from_env(enabled: bool) -> Self {
         let session_ttl_seconds = std::env::var("MLRUNX_UI_SESSION_TTL_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -106,7 +106,7 @@ impl UiJwtConfig {
             .unwrap_or_else(|| "Lax".to_string());
 
         Self {
-            enabled: env_flag("MLRUNX_UI_JWT_AUTH_ENABLED"),
+            enabled,
             secret: std::env::var("MLRUNX_JWT_SECRET")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
@@ -157,6 +157,70 @@ fn env_flag(name: &str) -> bool {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeAuthMode {
+    Disabled,
+    ApiKey,
+    Hybrid,
+}
+
+impl RuntimeAuthMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "disabled" | "none" | "off" => Some(Self::Disabled),
+            "api_key" | "api-key" | "apikey" => Some(Self::ApiKey),
+            "hybrid" | "mixed" | "api_key_ui_jwt" | "api-key-ui-jwt" | "ui_jwt" | "ui-jwt" => {
+                Some(Self::Hybrid)
+            }
+            _ => None,
+        }
+    }
+
+    fn from_flags(auth_disabled: bool, ui_jwt_enabled: bool) -> Self {
+        if auth_disabled {
+            Self::Disabled
+        } else if ui_jwt_enabled {
+            Self::Hybrid
+        } else {
+            Self::ApiKey
+        }
+    }
+
+    fn from_env() -> Self {
+        if let Ok(raw_mode) = std::env::var("MLRUNX_AUTH_MODE") {
+            if let Some(mode) = Self::parse(&raw_mode) {
+                return mode;
+            }
+
+            warn!(
+                mode = %raw_mode,
+                "Invalid MLRUNX_AUTH_MODE value; falling back to legacy auth flags."
+            );
+        }
+
+        Self::from_flags(
+            env_flag("MLRUNX_AUTH_DISABLED"),
+            env_flag("MLRUNX_UI_JWT_AUTH_ENABLED"),
+        )
+    }
+
+    fn auth_disabled(self) -> bool {
+        matches!(self, Self::Disabled)
+    }
+
+    fn ui_jwt_enabled(self) -> bool {
+        matches!(self, Self::Hybrid)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::ApiKey => "api_key",
+            Self::Hybrid => "hybrid",
+        }
+    }
+}
+
 /// API key store with optional SQLite persistence.
 pub struct ApiKeyStore {
     /// Map from key_hash to ApiKey
@@ -165,6 +229,8 @@ pub struct ApiKeyStore {
     sqlite_store: Option<Arc<SqliteStore>>,
     /// UI JWT auth configuration (feature-flagged).
     ui_jwt: UiJwtConfig,
+    /// Resolved runtime auth mode from environment.
+    runtime_auth_mode: RuntimeAuthMode,
     /// Whether auth is disabled (for dev/testing)
     pub auth_disabled: std::sync::atomic::AtomicBool,
 }
@@ -172,21 +238,25 @@ pub struct ApiKeyStore {
 impl ApiKeyStore {
     /// Create a new API key store.
     pub fn new() -> Self {
+        let runtime_auth_mode = RuntimeAuthMode::from_env();
         Self {
             keys: RwLock::new(HashMap::new()),
             sqlite_store: None,
-            ui_jwt: UiJwtConfig::from_env(),
-            auth_disabled: std::sync::atomic::AtomicBool::new(false),
+            ui_jwt: UiJwtConfig::from_env(runtime_auth_mode.ui_jwt_enabled()),
+            runtime_auth_mode,
+            auth_disabled: std::sync::atomic::AtomicBool::new(runtime_auth_mode.auth_disabled()),
         }
     }
 
     /// Create a key store backed by SQLite for durable key storage.
     pub fn new_with_sqlite(sqlite_store: Arc<SqliteStore>) -> Self {
+        let runtime_auth_mode = RuntimeAuthMode::from_env();
         Self {
             keys: RwLock::new(HashMap::new()),
             sqlite_store: Some(sqlite_store),
-            ui_jwt: UiJwtConfig::from_env(),
-            auth_disabled: std::sync::atomic::AtomicBool::new(false),
+            ui_jwt: UiJwtConfig::from_env(runtime_auth_mode.ui_jwt_enabled()),
+            runtime_auth_mode,
+            auth_disabled: std::sync::atomic::AtomicBool::new(runtime_auth_mode.auth_disabled()),
         }
     }
 
@@ -195,7 +265,8 @@ impl ApiKeyStore {
         Self {
             keys: RwLock::new(HashMap::new()),
             sqlite_store: None,
-            ui_jwt: UiJwtConfig::from_env(),
+            ui_jwt: UiJwtConfig::from_env(false),
+            runtime_auth_mode: RuntimeAuthMode::Disabled,
             auth_disabled: std::sync::atomic::AtomicBool::new(true),
         }
     }
@@ -217,6 +288,7 @@ impl ApiKeyStore {
                 cookie_secure: false,
                 cookie_same_site: "Lax".to_string(),
             },
+            runtime_auth_mode: RuntimeAuthMode::Hybrid,
             auth_disabled: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -253,21 +325,19 @@ impl ApiKeyStore {
 
     /// Initialize the store with bootstrap keys from environment.
     pub async fn init_from_env(&self) {
+        info!(
+            mode = self.runtime_auth_mode.as_str(),
+            "Resolved authentication mode"
+        );
+
         if self.ui_jwt.enabled {
             if self.ui_jwt.secret.is_some() {
                 info!("UI JWT auth enabled (feature-flagged)");
             } else {
                 warn!(
-                    "MLRUNX_UI_JWT_AUTH_ENABLED is set but MLRUNX_JWT_SECRET is missing; JWT auth path will reject tokens"
+                    "UI JWT auth is enabled but MLRUNX_JWT_SECRET is missing; JWT auth path will reject tokens"
                 );
             }
-        }
-
-        // Check for dev mode (no auth required)
-        if std::env::var("MLRUNX_AUTH_DISABLED").map_or(false, |v| v == "true" || v == "1") {
-            self.auth_disabled
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            info!("Authentication disabled (dev mode)");
         }
 
         // Check for bootstrap key
@@ -1174,6 +1244,43 @@ mod tests {
 
         // Different key should produce different hash
         assert_ne!(hash, hash_api_key("mlrunx_test456"));
+    }
+
+    #[test]
+    fn test_runtime_auth_mode_parsing() {
+        assert_eq!(
+            RuntimeAuthMode::parse("disabled"),
+            Some(RuntimeAuthMode::Disabled)
+        );
+        assert_eq!(
+            RuntimeAuthMode::parse("api_key"),
+            Some(RuntimeAuthMode::ApiKey)
+        );
+        assert_eq!(
+            RuntimeAuthMode::parse("hybrid"),
+            Some(RuntimeAuthMode::Hybrid)
+        );
+        assert_eq!(
+            RuntimeAuthMode::parse("api-key-ui-jwt"),
+            Some(RuntimeAuthMode::Hybrid)
+        );
+        assert_eq!(RuntimeAuthMode::parse("unknown"), None);
+    }
+
+    #[test]
+    fn test_runtime_auth_mode_from_legacy_flags() {
+        assert_eq!(
+            RuntimeAuthMode::from_flags(true, false),
+            RuntimeAuthMode::Disabled
+        );
+        assert_eq!(
+            RuntimeAuthMode::from_flags(false, false),
+            RuntimeAuthMode::ApiKey
+        );
+        assert_eq!(
+            RuntimeAuthMode::from_flags(false, true),
+            RuntimeAuthMode::Hybrid
+        );
     }
 
     #[test]

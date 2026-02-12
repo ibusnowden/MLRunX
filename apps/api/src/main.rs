@@ -129,12 +129,6 @@ struct UiAuthLogoutResponse {
     status: String,
 }
 
-fn env_flag(name: &str) -> bool {
-    std::env::var(name).map_or(false, |v| {
-        v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
-    })
-}
-
 fn env_flag_default(name: &str, default_value: bool) -> bool {
     std::env::var(name).map_or(default_value, |v| {
         v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
@@ -2333,7 +2327,9 @@ async fn http_compare_runs(
 // =============================================================================
 
 fn build_http_router(state: AppState) -> Router {
-    let cors = if env_flag("MLRUNX_UI_JWT_AUTH_ENABLED") {
+    let ui_jwt_enabled = state.key_store.is_ui_jwt_enabled();
+
+    let cors = if ui_jwt_enabled {
         let mut allowed_origins: Vec<HeaderValue> = std::env::var("MLRUNX_UI_ALLOWED_ORIGINS")
             .ok()
             .map(|raw| {
@@ -2373,10 +2369,7 @@ fn build_http_router(state: AppState) -> Router {
     let decompression = RequestDecompressionLayer::new();
 
     // Routes that require authentication
-    let protected_routes = Router::new()
-        // UI auth session endpoints (JWT/session path)
-        .route("/api/v1/ui-auth/session", get(http_ui_auth_session))
-        .route("/api/v1/ui-auth/logout", post(http_ui_auth_logout))
+    let mut protected_routes = Router::new()
         // SDK HTTP transport endpoints (ingestion)
         .route("/api/v1/runs", post(http_init_run))
         .route("/api/v1/ingest/batch", post(http_ingest_batch))
@@ -2397,24 +2390,33 @@ fn build_http_router(state: AppState) -> Router {
         .route(
             "/api/v1/runs/{run_id}/share/{token}",
             delete(http_revoke_share_token),
-        )
-        .layer(middleware::from_fn_with_state(
-            state.key_store.clone(),
-            auth_middleware,
-        ));
+        );
+
+    if ui_jwt_enabled {
+        protected_routes = protected_routes
+            .route("/api/v1/ui-auth/session", get(http_ui_auth_session))
+            .route("/api/v1/ui-auth/logout", post(http_ui_auth_logout));
+    }
+
+    protected_routes = protected_routes.layer(middleware::from_fn_with_state(
+        state.key_store.clone(),
+        auth_middleware,
+    ));
 
     // Public routes (no auth required)
-    let public_routes = Router::new()
+    let mut public_routes = Router::new()
         .route("/", get(root))
         .route("/health", get(health))
-        // UI auth bootstrap endpoint: exchange JWT for secure session cookies.
-        .route("/api/v1/ui-auth/login", post(http_ui_auth_login))
         // Shared run endpoints (public, no auth — token is the credential)
         .route("/api/v1/shared/{token}", get(http_get_shared_run))
         .route(
             "/api/v1/shared/{token}/metrics",
             get(http_get_shared_metrics),
         );
+
+    if ui_jwt_enabled {
+        public_routes = public_routes.route("/api/v1/ui-auth/login", post(http_ui_auth_login));
+    }
 
     // Combine routes
     Router::new()
