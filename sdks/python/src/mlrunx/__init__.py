@@ -30,7 +30,7 @@ Example usage:
         # Auto-finishes on exit
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from mlrunx.autodebug import AutoDebugHelper
 from mlrunx.config import Config, configure, get_config
