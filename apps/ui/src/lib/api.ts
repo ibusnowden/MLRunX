@@ -70,6 +70,24 @@ export interface RunDetail extends Run {
   }>;
 }
 
+export interface RunEvent {
+  id: number;
+  run_id: string;
+  level: 'debug' | 'info' | 'warn' | 'error' | string;
+  source: string;
+  message: string;
+  step: number | null;
+  timestamp: number | null;
+  created_at: string;
+}
+
+export interface RunEventsResponse {
+  run_id: string;
+  events: RunEvent[];
+  next_after_id: number | null;
+  has_more: boolean;
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -538,6 +556,22 @@ export const api = {
     const query = searchParams.toString();
     return fetchApi<MetricsResponse>(
       `/api/v1/runs/${runId}/metrics${query ? `?${query}` : ''}`
+    );
+  },
+
+  /**
+   * Get structured run events for timeline/log display.
+   */
+  async getRunEvents(
+    runId: string,
+    params: { afterId?: number; limit?: number } = {}
+  ): Promise<RunEventsResponse> {
+    const searchParams = new URLSearchParams();
+    if (params.afterId !== undefined) searchParams.set('after_id', String(params.afterId));
+    if (params.limit !== undefined) searchParams.set('limit', String(params.limit));
+    const query = searchParams.toString();
+    return fetchApi<RunEventsResponse>(
+      `/api/v1/runs/${runId}/events${query ? `?${query}` : ''}`
     );
   },
 

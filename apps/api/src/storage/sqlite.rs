@@ -11,9 +11,8 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-const SQLITE_SCHEMA_VERSION: &str = "2026-02-13.1";
-const SQLITE_SCHEMA_DESCRIPTION: &str =
-    "adds explicit project APIs and run ownership metadata columns";
+const SQLITE_SCHEMA_VERSION: &str = "2026-02-13.2";
+const SQLITE_SCHEMA_DESCRIPTION: &str = "adds run events for backend log timelines";
 
 /// Errors that can occur in SQLite operations.
 #[derive(Error, Debug)]
@@ -173,6 +172,21 @@ impl SqliteStore {
             CREATE INDEX IF NOT EXISTS idx_metrics_run ON metrics(run_id);
             CREATE INDEX IF NOT EXISTS idx_metrics_run_name ON metrics(run_id, name);
             CREATE INDEX IF NOT EXISTS idx_metrics_run_step ON metrics(run_id, step);
+
+            -- Run events table (structured logs/timeline events)
+            CREATE TABLE IF NOT EXISTS run_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                level TEXT NOT NULL DEFAULT 'info',
+                source TEXT NOT NULL DEFAULT 'sdk',
+                message TEXT NOT NULL,
+                step INTEGER,
+                timestamp REAL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (run_id) REFERENCES runs(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_run_events_run_id ON run_events(run_id, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_run_events_created_at ON run_events(run_id, created_at DESC);
 
             -- Parameters table (hyperparameters)
             CREATE TABLE IF NOT EXISTS params (
@@ -531,6 +545,7 @@ impl SqliteStore {
                 params![run_id],
             )?;
             tx.execute("DELETE FROM metrics WHERE run_id = ?1", params![run_id])?;
+            tx.execute("DELETE FROM run_events WHERE run_id = ?1", params![run_id])?;
             tx.execute("DELETE FROM tags WHERE run_id = ?1", params![run_id])?;
             tx.execute("DELETE FROM params WHERE run_id = ?1", params![run_id])?;
             tx.execute("DELETE FROM batches WHERE run_id = ?1", params![run_id])?;
@@ -1224,6 +1239,7 @@ impl SqliteStore {
 
         // Delete related data first (no ON DELETE CASCADE in schema)
         conn.execute("DELETE FROM metrics WHERE run_id = ?1", params![run_id])?;
+        conn.execute("DELETE FROM run_events WHERE run_id = ?1", params![run_id])?;
         conn.execute("DELETE FROM tags WHERE run_id = ?1", params![run_id])?;
         conn.execute("DELETE FROM params WHERE run_id = ?1", params![run_id])?;
         conn.execute("DELETE FROM batches WHERE run_id = ?1", params![run_id])?;
@@ -1442,6 +1458,101 @@ impl SqliteStore {
 
         let names: Result<Vec<_>, _> = rows.collect();
         Ok(names?)
+    }
+
+    // =========================================================================
+    // Run event operations
+    // =========================================================================
+
+    /// Insert structured run events.
+    pub async fn insert_run_events(
+        &self,
+        run_id: &str,
+        events: &[RunEventInput],
+    ) -> Result<usize, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let mut count = 0usize;
+        for event in events {
+            conn.execute(
+                "INSERT INTO run_events (run_id, level, source, message, step, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    run_id,
+                    event.level,
+                    event.source,
+                    event.message,
+                    event.step,
+                    event.timestamp
+                ],
+            )?;
+            count += 1;
+        }
+
+        if count > 0 {
+            conn.execute(
+                "UPDATE runs SET updated_at = datetime('now') WHERE id = ?1",
+                params![run_id],
+            )?;
+        }
+
+        Ok(count)
+    }
+
+    /// List run events in ascending order for incremental polling.
+    pub async fn list_run_events(
+        &self,
+        run_id: &str,
+        after_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<RunEventRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+        let safe_limit = limit.clamp(1, 1000) as i64;
+
+        let rows = if let Some(after) = after_id {
+            let mut stmt = conn.prepare(
+                "SELECT id, run_id, level, source, message, step, timestamp, created_at
+                 FROM run_events
+                 WHERE run_id = ?1 AND id > ?2
+                 ORDER BY id ASC
+                 LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(params![run_id, after, safe_limit], |row| {
+                Ok(RunEventRow {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    level: row.get(2)?,
+                    source: row.get(3)?,
+                    message: row.get(4)?,
+                    step: row.get(5)?,
+                    timestamp: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, run_id, level, source, message, step, timestamp, created_at
+                 FROM run_events
+                 WHERE run_id = ?1
+                 ORDER BY id ASC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![run_id, safe_limit], |row| {
+                Ok(RunEventRow {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    level: row.get(2)?,
+                    source: row.get(3)?,
+                    message: row.get(4)?,
+                    step: row.get(5)?,
+                    timestamp: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        Ok(rows)
     }
 
     // =========================================================================
@@ -1949,6 +2060,29 @@ pub struct MetricSeriesRow {
     pub downsampled: bool,
 }
 
+/// Insert payload for a run event row.
+#[derive(Debug, Clone)]
+pub struct RunEventInput {
+    pub level: String,
+    pub source: String,
+    pub message: String,
+    pub step: Option<i64>,
+    pub timestamp: Option<f64>,
+}
+
+/// A row from the run_events table.
+#[derive(Debug, Clone)]
+pub struct RunEventRow {
+    pub id: i64,
+    pub run_id: String,
+    pub level: String,
+    pub source: String,
+    pub message: String,
+    pub step: Option<i64>,
+    pub timestamp: Option<f64>,
+    pub created_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2192,6 +2326,56 @@ mod tests {
         assert_eq!(series.len(), 1);
         assert!(series[0].points.len() <= 10);
         assert!(series[0].downsampled);
+    }
+
+    #[tokio::test]
+    async fn test_insert_and_list_run_events() {
+        let store = create_test_store().await;
+
+        let project_id = store.get_or_create_project("events-project").await.unwrap();
+        store
+            .create_run("run-events-123", &project_id, None, None, None)
+            .await
+            .unwrap();
+
+        let inserted = store
+            .insert_run_events(
+                "run-events-123",
+                &[
+                    RunEventInput {
+                        level: "info".to_string(),
+                        source: "sdk".to_string(),
+                        message: "initialized".to_string(),
+                        step: Some(0),
+                        timestamp: Some(1700.0),
+                    },
+                    RunEventInput {
+                        level: "warn".to_string(),
+                        source: "trainer".to_string(),
+                        message: "gradient clipped".to_string(),
+                        step: Some(12),
+                        timestamp: Some(1701.0),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(inserted, 2);
+
+        let events = store
+            .list_run_events("run-events-123", None, 100)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].message, "initialized");
+        assert_eq!(events[1].message, "gradient clipped");
+
+        let after_first = store
+            .list_run_events("run-events-123", Some(events[0].id), 100)
+            .await
+            .unwrap();
+        assert_eq!(after_first.len(), 1);
+        assert_eq!(after_first[0].message, "gradient clipped");
     }
 
     #[tokio::test]

@@ -29,8 +29,13 @@ else
     echo "Bucket created successfully"
 fi
 
-# Set bucket policy to allow authenticated access
-echo "Setting bucket policy..."
-mc anonymous set download local/${BUCKET_NAME} 2>/dev/null || true
+# Buckets are private by default.
+# Optional escape hatch for public demo buckets (not recommended).
+if [ "${MINIO_ALLOW_ANONYMOUS_DOWNLOAD:-false}" = "true" ]; then
+    echo "WARNING: Enabling anonymous download access for '${BUCKET_NAME}'"
+    mc anonymous set download local/${BUCKET_NAME}
+else
+    echo "Leaving '${BUCKET_NAME}' private (recommended)"
+fi
 
 echo "MinIO initialization complete!"

@@ -221,4 +221,25 @@ describe('api key management client', () => {
     expect(deleteHeaders['X-CSRF-Token']).toBe('csrf-token-xyz');
     expect(deleteHeaders['X-API-Key']).toBeUndefined();
   });
+
+  it('queries run events with incremental cursor parameters', async () => {
+    window.localStorage.setItem(API_URL_STORAGE_KEY, 'https://mlrunx.ibra-niang.com');
+    window.localStorage.setItem(API_KEY_STORAGE_KEY, 'mlrunx_local_key');
+
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        jsonResponse({ run_id: 'run-1', events: [], next_after_id: null, has_more: false })
+      );
+
+    await api.getRunEvents('run-1', { afterId: 42, limit: 100 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = headersToRecord(options.headers);
+
+    expect(url).toBe('https://mlrunx.ibra-niang.com/api/v1/runs/run-1/events?after_id=42&limit=100');
+    expect(options.credentials).toBe('same-origin');
+    expect(headers['X-API-Key']).toBe('mlrunx_local_key');
+  });
 });

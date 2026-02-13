@@ -49,13 +49,13 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use auth::{ApiKeyStore, AuthContext, AuthMode, auth_middleware};
 use mlrunx_proto::mlrunx::v1::ingest_service_server::IngestServiceServer;
 use services::{
-    CardinalityTracker, IdempotencyResult, IdempotencyStore, IngestServiceImpl, MetricPayload,
-    ParamPayload, TagPayload, compute_payload_hash, ingest::InMemoryStore,
+    CardinalityTracker, EventPayload, IdempotencyResult, IdempotencyStore, IngestServiceImpl,
+    MetricPayload, ParamPayload, TagPayload, compute_payload_hash, ingest::InMemoryStore,
 };
 use storage::{
     AuditEventRow, AuthSessionAdminRow, CreateProjectInput, CreateRunInput, MetricRow,
-    ProjectRepository, ProjectRow, RunRepository, RunRow, RunStatus as PostgresRunStatus,
-    SqliteStore, UserProjectMembershipRow, UserRow,
+    ProjectRepository, ProjectRow, RunEventInput, RunEventRow, RunRepository, RunRow,
+    RunStatus as PostgresRunStatus, SqliteStore, UserProjectMembershipRow, UserRow,
 };
 
 /// Application state shared across handlers.
@@ -103,6 +103,19 @@ async fn health() -> &'static str {
 
 async fn root() -> &'static str {
     "MLRunX API v0.1.0"
+}
+
+fn is_production_environment() -> bool {
+    let raw = std::env::var("MLRUNX_ENVIRONMENT")
+        .or_else(|_| std::env::var("APP_ENV"))
+        .or_else(|_| std::env::var("ENVIRONMENT"))
+        .or_else(|_| std::env::var("RUST_ENV"))
+        .unwrap_or_else(|_| "development".to_string());
+
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "prod" | "production"
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -1704,6 +1717,23 @@ async fn http_init_run(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
+
+    if let Err(e) = state
+        .sqlite_store
+        .insert_run_events(
+            &run_id,
+            &[RunEventInput {
+                level: "info".to_string(),
+                source: "system".to_string(),
+                message: "Run initialized".to_string(),
+                step: Some(0),
+                timestamp: None,
+            }],
+        )
+        .await
+    {
+        warn!(run_id = %run_id, error = %e, "Failed to persist run init event");
+    }
     maybe_shadow_write_run_to_postgres(&run_id, project_id, req.name.as_deref(), req.tags.as_ref())
         .await;
 
@@ -1746,9 +1776,14 @@ struct IngestBatchHttpRequest {
     batch_id: Option<String>,
     /// Sequence number for ordering (optional)
     seq: Option<i64>,
+    #[serde(default)]
     metrics: Vec<MetricData>,
+    #[serde(default)]
     params: Vec<ParamData>,
+    #[serde(default)]
     tags: Vec<TagData>,
+    #[serde(default)]
+    events: Vec<LogEventData>,
     #[allow(dead_code)]
     timestamp: Option<f64>,
     #[allow(dead_code)]
@@ -1776,6 +1811,15 @@ struct TagData {
 }
 
 #[derive(Debug, Deserialize)]
+struct LogEventData {
+    level: Option<String>,
+    source: Option<String>,
+    message: String,
+    step: Option<i64>,
+    timestamp: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct BatchStats {
     metric_count: Option<i64>,
     param_count: Option<i64>,
@@ -1792,6 +1836,47 @@ struct IngestBatchHttpResponse {
     /// Warnings about the batch (e.g., out of order)
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
+}
+
+fn normalize_run_event_level(raw: Option<&str>) -> String {
+    match raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("info")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "debug" => "debug".to_string(),
+        "warn" | "warning" => "warn".to_string(),
+        "error" => "error".to_string(),
+        _ => "info".to_string(),
+    }
+}
+
+fn normalize_run_event_source(raw: Option<&str>) -> String {
+    let normalized = raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("sdk");
+    let max_len = 64usize;
+    if normalized.len() <= max_len {
+        normalized.to_string()
+    } else {
+        normalized.chars().take(max_len).collect()
+    }
+}
+
+fn sanitize_run_event_message(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let max_len = 2000usize;
+    if trimmed.len() <= max_len {
+        Some(trimmed.to_string())
+    } else {
+        Some(trimmed.chars().take(max_len).collect())
+    }
 }
 
 /// Ingest a batch of events via HTTP (for SDK HTTP transport).
@@ -1859,13 +1944,31 @@ async fn http_ingest_batch(
         })
         .collect();
 
+    let event_payloads: Vec<EventPayload> = req
+        .events
+        .iter()
+        .map(|event| EventPayload {
+            level: normalize_run_event_level(event.level.as_deref()),
+            source: normalize_run_event_source(event.source.as_deref()),
+            message: event.message.clone(),
+            step: event.step,
+            timestamp: event.timestamp,
+        })
+        .collect();
+
     // Compute payload hash for idempotency
-    let payload_hash = compute_payload_hash(&metric_payloads, &param_payloads, &tag_payloads);
+    let payload_hash = compute_payload_hash(
+        &metric_payloads,
+        &param_payloads,
+        &tag_payloads,
+        &event_payloads,
+    );
 
     // Check and record for idempotency
     let metric_count = req.metrics.len();
     let param_count = req.params.len();
     let tag_count = req.tags.len();
+    let event_count = req.events.len();
 
     let project_id = run.project_id.clone();
 
@@ -1880,6 +1983,7 @@ async fn http_ingest_batch(
             metric_count as i32,
             param_count as i32,
             tag_count as i32,
+            event_count as i32,
         )
         .await;
 
@@ -2052,7 +2156,83 @@ async fn http_ingest_batch(
         }
     }
 
-    let total = accepted_metric_count + param_count + accepted_tag_count;
+    let mut dropped_event_count = 0usize;
+    let sqlite_events: Vec<RunEventInput> = req
+        .events
+        .iter()
+        .filter_map(|event| {
+            let message = match sanitize_run_event_message(&event.message) {
+                Some(message) => message,
+                None => {
+                    dropped_event_count += 1;
+                    return None;
+                }
+            };
+            let timestamp = match event.timestamp {
+                Some(value) if !value.is_finite() => {
+                    dropped_event_count += 1;
+                    return None;
+                }
+                value => value,
+            };
+            Some(RunEventInput {
+                level: normalize_run_event_level(event.level.as_deref()),
+                source: normalize_run_event_source(event.source.as_deref()),
+                message,
+                step: event.step,
+                timestamp,
+            })
+        })
+        .collect();
+
+    if dropped_event_count > 0 {
+        warnings.push(format!(
+            "Dropped {dropped_event_count} events with empty messages or non-finite timestamps"
+        ));
+    }
+
+    let mut accepted_event_count = if sqlite_events.is_empty() {
+        0usize
+    } else {
+        state
+            .sqlite_store
+            .insert_run_events(&req.run_id, &sqlite_events)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to persist run events to SQLite: {e}"),
+                )
+            })?
+    };
+
+    if !warnings.is_empty() {
+        let warning_events: Vec<RunEventInput> = warnings
+            .iter()
+            .map(|warning| RunEventInput {
+                level: "warn".to_string(),
+                source: "ingest".to_string(),
+                message: warning.clone(),
+                step: None,
+                timestamp: None,
+            })
+            .collect();
+
+        match state
+            .sqlite_store
+            .insert_run_events(&req.run_id, &warning_events)
+            .await
+        {
+            Ok(inserted) => {
+                accepted_event_count += inserted;
+            }
+            Err(e) => {
+                warn!(run_id = %req.run_id, error = %e, "Failed to persist warning events");
+            }
+        }
+    }
+
+    let total = accepted_metric_count + param_count + accepted_tag_count + accepted_event_count;
     let dropped = validation.dropped_tags.len() + validation.dropped_metrics.len();
 
     tracing::debug!(
@@ -2062,6 +2242,7 @@ async fn http_ingest_batch(
         metrics = accepted_metric_count,
         params = param_count,
         tags = accepted_tag_count,
+        events = accepted_event_count,
         dropped = dropped,
         "HTTP: Ingested batch (SQLite)"
     );
@@ -2121,6 +2302,26 @@ async fn http_finish_run(
         .finish_run(&run_id, &req.status)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Err(e) = state
+        .sqlite_store
+        .insert_run_events(
+            &run_id,
+            &[RunEventInput {
+                level: if req.status.eq_ignore_ascii_case("failed") {
+                    "error".to_string()
+                } else {
+                    "info".to_string()
+                },
+                source: "system".to_string(),
+                message: format!("Run marked as {}", req.status),
+                step: None,
+                timestamp: None,
+            }],
+        )
+        .await
+    {
+        warn!(run_id = %run_id, error = %e, "Failed to persist run finish event");
+    }
     maybe_shadow_finish_run_in_postgres(&run_id, &req.status).await;
 
     info!(run_id = %run_id, status = %req.status, "HTTP: Finished run (SQLite)");
@@ -3261,6 +3462,37 @@ fn default_max_points() -> usize {
     1000
 }
 
+#[derive(Debug, Deserialize)]
+struct RunEventsQuery {
+    after_id: Option<i64>,
+    #[serde(default = "default_run_events_limit")]
+    limit: usize,
+}
+
+fn default_run_events_limit() -> usize {
+    200
+}
+
+#[derive(Debug, Serialize)]
+struct RunEventResponse {
+    id: i64,
+    run_id: String,
+    level: String,
+    source: String,
+    message: String,
+    step: Option<i64>,
+    timestamp: Option<f64>,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ListRunEventsResponse {
+    run_id: String,
+    events: Vec<RunEventResponse>,
+    next_after_id: Option<i64>,
+    has_more: bool,
+}
+
 /// Get metrics for a run with optional downsampling.
 async fn http_get_metrics(
     State(state): State<AppState>,
@@ -3337,6 +3569,69 @@ async fn http_get_metrics(
         run_id,
         series,
         available_metrics,
+    }))
+}
+
+/// Get structured run events for log/timeline display.
+async fn http_get_run_events(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(run_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<RunEventsQuery>,
+) -> Result<Json<ListRunEventsResponse>, (StatusCode, String)> {
+    let run = state
+        .sqlite_store
+        .get_run(&run_id)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)))?;
+
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Read,
+        Some(&run.project_id),
+        Some(&run_id),
+        "run.events.read",
+        "run",
+        Some(&run_id),
+    )
+    .await?;
+    require_ui_run_owner(&auth, &run)?;
+
+    let limit = query.limit.clamp(1, 500);
+    let fetch_limit = limit + 1;
+    let mut rows = state
+        .sqlite_store
+        .list_run_events(&run_id, query.after_id, fetch_limit)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let has_more = rows.len() > limit;
+    if has_more {
+        rows.truncate(limit);
+    }
+
+    let next_after_id = rows.last().map(|row| row.id).or(query.after_id);
+
+    let events = rows
+        .into_iter()
+        .map(|row| RunEventResponse {
+            id: row.id,
+            run_id: row.run_id,
+            level: row.level,
+            source: row.source,
+            message: row.message,
+            step: row.step,
+            timestamp: row.timestamp,
+            created_at: row.created_at,
+        })
+        .collect();
+
+    Ok(Json(ListRunEventsResponse {
+        run_id,
+        events,
+        next_after_id,
+        has_more,
     }))
 }
 
@@ -3590,6 +3885,7 @@ fn build_http_router(state: AppState) -> Router {
             get(http_get_run).delete(http_delete_run),
         )
         .route("/api/v1/runs/{run_id}/metrics", get(http_get_metrics))
+        .route("/api/v1/runs/{run_id}/events", get(http_get_run_events))
         .route("/api/v1/runs/compare", post(http_compare_runs))
         // Key management endpoints (admin only)
         .route("/api/v1/keys", post(http_create_key).get(http_list_keys))
@@ -3687,6 +3983,16 @@ async fn main() {
         Arc::new(ApiKeyStore::new_with_sqlite(sqlite_store.clone()))
     };
     key_store.init_from_env().await;
+
+    if key_store.is_auth_disabled() && is_production_environment() {
+        panic!(
+            "Refusing to start: authentication is disabled in production. \
+Set MLRUNX_AUTH_MODE=api_key or MLRUNX_AUTH_MODE=hybrid and restart."
+        );
+    }
+    if key_store.is_auth_disabled() {
+        warn!("Authentication is disabled; use only in development/test environments.");
+    }
 
     // Create shared state
     let store = Arc::new(InMemoryStore::new());
@@ -4103,6 +4409,116 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response_text(response).await;
         assert!(body.contains("project_id is required"));
+    }
+
+    #[tokio::test]
+    async fn test_run_events_ingest_and_query() {
+        let app = test_app().await;
+
+        let create_project_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "events-project"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create project request"),
+            )
+            .await
+            .expect("Create project request failed");
+        assert_eq!(create_project_response.status(), StatusCode::OK);
+        let create_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_project_response).await)
+                .expect("Create project response must be JSON");
+        let project_id = create_payload["project_id"]
+            .as_str()
+            .expect("project_id should exist")
+            .to_string();
+
+        let run_id = "run-events-http-123";
+        let init_run_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": project_id,
+                            "run_id": run_id,
+                            "name": "events-run"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build init run request"),
+            )
+            .await
+            .expect("Init run request failed");
+        assert_eq!(init_run_response.status(), StatusCode::OK);
+
+        let ingest_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ingest/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "run_id": run_id,
+                            "metrics": [],
+                            "params": [],
+                            "tags": [],
+                            "events": [
+                                {"level": "INFO", "source": "trainer", "message": "Initializing worker", "step": 1},
+                                {"level": "warning", "source": "trainer", "message": "Gradient clipped", "step": 2}
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build ingest request"),
+            )
+            .await
+            .expect("Ingest request failed");
+        assert_eq!(ingest_response.status(), StatusCode::OK);
+
+        let events_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/runs/{run_id}/events?limit=20"))
+                    .body(Body::empty())
+                    .expect("Failed to build events request"),
+            )
+            .await
+            .expect("Events request failed");
+        assert_eq!(events_response.status(), StatusCode::OK);
+        let payload: serde_json::Value =
+            serde_json::from_str(&response_text(events_response).await)
+                .expect("Events response should be JSON");
+        let events = payload["events"]
+            .as_array()
+            .expect("events should be an array");
+        assert!(
+            events
+                .iter()
+                .any(|event| event["message"].as_str() == Some("Initializing worker")),
+            "ingested info event should be present"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event["level"].as_str() == Some("warn")),
+            "warning level should normalize to warn"
+        );
     }
 
     #[tokio::test]

@@ -1,9 +1,9 @@
 'use client';
 
 import Link from 'next/link';
-import { use, useCallback, useEffect, useMemo, useState } from 'react';
+import { use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { api, MetricSeries, RunDetail } from '@/lib/api';
+import { api, MetricSeries, RunDetail, RunEvent } from '@/lib/api';
 import { formatDuration, formatFixed } from '@/lib/format';
 import { UPlotChart, type ChartSeries } from '@/components/charts/UPlotChart';
 import { useTheme } from '@/components/ThemeProvider';
@@ -22,12 +22,6 @@ type ProgressStep = {
   state: ProgressState;
 };
 
-type TimelineLine = {
-  timestamp: string;
-  level: 'info' | 'warn' | 'error';
-  message: string;
-};
-
 type MetricStats = {
   lastValue?: number;
   lastStep?: number;
@@ -37,6 +31,7 @@ type MetricStats = {
 };
 
 const METRIC_FETCH_MAX_POINTS = 1200;
+const RUN_EVENTS_FETCH_LIMIT = 200;
 
 const TRAIN_LOSS_CANDIDATES = ['train/loss', 'loss', 'train.loss', 'training/loss'];
 const VAL_LOSS_CANDIDATES = ['val/loss', 'val_loss', 'validation/loss', 'eval/loss'];
@@ -397,82 +392,32 @@ function buildProgressSteps(
   }));
 }
 
-function buildTimelineLines(
-  run: RunDetail,
-  tags: Record<string, string>,
-  trainLossStats: MetricStats,
-  totalSteps: number
-): TimelineLine[] {
-  const lines: TimelineLine[] = [];
+function normalizeEventLevel(level: string): 'debug' | 'info' | 'warn' | 'error' {
+  const normalized = level.trim().toLowerCase();
+  if (normalized === 'error') return 'error';
+  if (normalized === 'warn' || normalized === 'warning') return 'warn';
+  if (normalized === 'debug') return 'debug';
+  return 'info';
+}
 
-  lines.push({
-    timestamp: formatTimeOnly(run.created_at),
-    level: 'info',
-    message: `Run created (${shortenRunId(run.run_id)})`,
-  });
-
-  const modelName = pickTagValue(tags, ['model', 'model_name']);
-  if (modelName) {
-    lines.push({
-      timestamp: formatTimeOnly(run.created_at),
-      level: 'info',
-      message: `Model: ${modelName}`,
+function formatEventTime(event: RunEvent): string {
+  if (event.timestamp && Number.isFinite(event.timestamp)) {
+    return new Date(event.timestamp * 1000).toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
     });
   }
+  return formatTimeOnly(event.created_at);
+}
 
-  const datasetName = pickTagValue(tags, ['dataset', 'data', 'dataset_name']);
-  if (datasetName) {
-    lines.push({
-      timestamp: formatTimeOnly(run.created_at),
-      level: 'info',
-      message: `Dataset: ${datasetName}`,
-    });
-  }
-
-  lines.push({
-    timestamp: formatTimeOnly(run.updated_at),
-    level: 'info',
-    message:
-      totalSteps > 0
-        ? `Metrics received up to step ${totalSteps.toLocaleString()}`
-        : `${run.metrics_count.toLocaleString()} metric points ingested`,
-  });
-
-  if (trainLossStats.lastValue !== undefined) {
-    lines.push({
-      timestamp: formatTimeOnly(run.updated_at),
-      level: 'info',
-      message: `Latest train loss: ${formatFixed(trainLossStats.lastValue, 4)}`,
-    });
-  }
-
-  if (run.status === 'running') {
-    lines.push({
-      timestamp: formatTimeOnly(run.updated_at),
-      level: 'info',
-      message: 'Run is still receiving metrics',
-    });
-  } else if (run.status === 'finished') {
-    lines.push({
-      timestamp: formatTimeOnly(run.updated_at),
-      level: 'info',
-      message: `Run completed in ${formatDuration(run.duration_seconds)}`,
-    });
-  } else if (run.status === 'failed') {
-    lines.push({
-      timestamp: formatTimeOnly(run.updated_at),
-      level: 'error',
-      message: 'Run ended with a failure status',
-    });
-  } else if (run.status === 'killed') {
-    lines.push({
-      timestamp: formatTimeOnly(run.updated_at),
-      level: 'warn',
-      message: 'Run was stopped before completion',
-    });
-  }
-
-  return lines.slice(0, 8);
+function mergeRunEvents(existing: RunEvent[], incoming: RunEvent[]): RunEvent[] {
+  if (incoming.length === 0) return existing;
+  const merged = new Map<number, RunEvent>();
+  existing.forEach((event) => merged.set(event.id, event));
+  incoming.forEach((event) => merged.set(event.id, event));
+  return Array.from(merged.values()).sort((a, b) => a.id - b.id);
 }
 
 function getThroughputValue(run: RunDetail, allMetrics: MetricSeries[]): number | undefined {
@@ -593,8 +538,12 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
   const [availableMetrics, setAvailableMetrics] = useState<string[]>([]);
   const [metricsLoading, setMetricsLoading] = useState(true);
   const [metricsError, setMetricsError] = useState<string | null>(null);
+  const [runEvents, setRunEvents] = useState<RunEvent[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(true);
+  const [eventsError, setEventsError] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const eventsCursorRef = useRef<number | null>(null);
 
   const setTheme = (target: 'dark' | 'light') => {
     if ((target === 'dark') !== isDark) {
@@ -637,10 +586,45 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     }
   }, [runId]);
 
+  const fetchRunEvents = useCallback(
+    async ({
+      silent = false,
+      reset = false,
+    }: { silent?: boolean; reset?: boolean } = {}) => {
+      if (!silent) {
+        setEventsLoading(true);
+      }
+      if (reset) {
+        eventsCursorRef.current = null;
+        setRunEvents([]);
+      }
+      setEventsError(null);
+      try {
+        const response = await api.getRunEvents(runId, {
+          afterId: reset ? undefined : (eventsCursorRef.current ?? undefined),
+          limit: RUN_EVENTS_FETCH_LIMIT,
+        });
+        setRunEvents((previous) => (reset ? response.events : mergeRunEvents(previous, response.events)));
+        const nextAfterId = response.next_after_id ?? eventsCursorRef.current;
+        if (nextAfterId !== null && nextAfterId !== undefined) {
+          eventsCursorRef.current = nextAfterId;
+        }
+      } catch (err) {
+        setEventsError(err instanceof Error ? err.message : 'Failed to load run events');
+      } finally {
+        if (!silent) {
+          setEventsLoading(false);
+        }
+      }
+    },
+    [runId]
+  );
+
   useEffect(() => {
     void fetchRun();
     void fetchMetrics();
-  }, [fetchRun, fetchMetrics]);
+    void fetchRunEvents({ reset: true });
+  }, [fetchRun, fetchMetrics, fetchRunEvents]);
 
   const shouldAutoRefresh = run?.status === 'running'
     || (!!run && run.metrics_count > 0 && availableMetrics.length === 0);
@@ -653,6 +637,13 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
       ]);
     },
     { intervalMs: 15000, enabled: shouldAutoRefresh, runOnMount: false }
+  );
+
+  useAutoRefresh(
+    async () => {
+      await fetchRunEvents({ silent: true });
+    },
+    { intervalMs: 4000, enabled: run?.status === 'running', runOnMount: false }
   );
 
   const featuredMetricNames = useMemo(
@@ -722,10 +713,11 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     return buildProgressSteps(run, runTags, totalSteps);
   }, [run, runTags, totalSteps]);
 
-  const timelineLines = useMemo(() => {
-    if (!run) return [];
-    return buildTimelineLines(run, runTags, trainLossStats, totalSteps);
-  }, [run, runTags, trainLossStats, totalSteps]);
+  const lastEventRelative = useMemo(() => {
+    if (!run) return '';
+    if (runEvents.length === 0) return formatRelativeTime(run.updated_at);
+    return formatRelativeTime(runEvents[runEvents.length - 1].created_at);
+  }, [run, runEvents]);
 
   const handleDeleteRun = useCallback(async () => {
     setDeleting(true);
@@ -1040,30 +1032,49 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
           <section className="rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
             <div className="border-b border-border px-5 py-4">
               <h2 className="text-xl font-semibold text-text-primary">Logs</h2>
-              <p className="mt-0.5 text-xs text-text-muted">System timeline from run metadata</p>
+              <p className="mt-0.5 text-xs text-text-muted">Live run events from backend</p>
             </div>
             <div className="p-4">
               <div className="max-h-[260px] overflow-y-auto rounded-xl border border-border bg-background px-4 py-3 font-mono text-xs">
-                {timelineLines.map((line) => (
-                  <div key={`${line.timestamp}-${line.message}`} className="mb-1 flex gap-3 leading-6 last:mb-0">
-                    <span className="text-text-muted">{line.timestamp}</span>
-                    <span
-                      className={
-                        line.level === 'error'
-                          ? 'font-semibold text-danger'
-                          : line.level === 'warn'
-                            ? 'font-semibold text-warning'
-                            : 'font-semibold text-accent'
-                      }
-                    >
-                      {line.level.toUpperCase()}
-                    </span>
-                    <span className="text-text-secondary">{line.message}</span>
+                {eventsLoading ? (
+                  <div className="py-6 text-center text-text-muted">Loading run events...</div>
+                ) : eventsError ? (
+                  <div className="py-6 text-center text-danger">{eventsError}</div>
+                ) : runEvents.length === 0 ? (
+                  <div className="py-6 text-center text-text-muted">
+                    No events recorded yet. Use{' '}
+                    <code className="font-semibold text-text-secondary">run.log_event(...)</code>{' '}
+                    to stream training logs.
                   </div>
-                ))}
+                ) : (
+                  runEvents.map((event) => {
+                    const level = normalizeEventLevel(event.level);
+                    const levelClass =
+                      level === 'error'
+                        ? 'font-semibold text-danger'
+                        : level === 'warn'
+                          ? 'font-semibold text-warning'
+                          : level === 'debug'
+                            ? 'font-semibold text-text-secondary'
+                            : 'font-semibold text-accent';
+                    const stepSuffix =
+                      event.step !== null && event.step !== undefined
+                        ? ` (step ${event.step.toLocaleString()})`
+                        : '';
+                    const sourcePrefix = event.source ? `[${event.source}] ` : '';
+
+                    return (
+                      <div key={event.id} className="mb-1 flex gap-3 leading-6 last:mb-0">
+                        <span className="text-text-muted">{formatEventTime(event)}</span>
+                        <span className={levelClass}>{level.toUpperCase()}</span>
+                        <span className="text-text-secondary">{`${sourcePrefix}${event.message}${stepSuffix}`}</span>
+                      </div>
+                    );
+                  })
+                )}
               </div>
               <div className="mt-2 text-xs text-text-muted">
-                Last update: {formatRelativeTime(run.updated_at)}
+                Last event: {lastEventRelative || 'n/a'}
               </div>
             </div>
           </section>

@@ -332,6 +332,7 @@ class FlushWorker:
         metrics = []
         params = []
         tags = []
+        events_data = []
 
         for event in events:
             if event.type == EventType.METRIC:
@@ -340,6 +341,8 @@ class FlushWorker:
                 params.append(event.data)
             elif event.type == EventType.TAG:
                 tags.append(event.data)
+            elif event.type == EventType.EVENT:
+                events_data.append(event.data)
 
         # Build batch payload
         batch: dict[str, Any] = {
@@ -347,6 +350,7 @@ class FlushWorker:
             "metrics": metrics,
             "params": params,
             "tags": tags,
+            "events": events_data,
             "timestamp": time.time(),
             "stats": {
                 "metric_count": stats.metric_count,
@@ -387,7 +391,7 @@ class FlushWorker:
                 self._connection.record_success()
                 logger.debug(
                     f"Sent batch: {len(metrics)} metrics, "
-                    f"{len(params)} params, {len(tags)} tags"
+                    f"{len(params)} params, {len(tags)} tags, {len(events_data)} events"
                 )
                 return True
 
