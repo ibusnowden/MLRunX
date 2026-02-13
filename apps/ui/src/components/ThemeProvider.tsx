@@ -21,26 +21,24 @@ export function useTheme() {
 }
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setTheme] = useState<Theme>('dark');
-  const [mounted, setMounted] = useState(false);
-
-  // Load theme from localStorage on mount
-  useEffect(() => {
+  const [theme, setTheme] = useState<Theme>(() => {
+    if (typeof window === 'undefined') {
+      return 'dark';
+    }
     const stored = localStorage.getItem('mlrunx-theme') as Theme | null;
     if (stored === 'light' || stored === 'dark') {
-      setTheme(stored);
+      return stored;
     }
-    setMounted(true);
-  }, []);
+    return 'dark';
+  });
 
   // Sync theme to <html> class and localStorage
   useEffect(() => {
-    if (!mounted) return;
     const root = document.documentElement;
     root.classList.remove('light', 'dark');
     root.classList.add(theme);
     localStorage.setItem('mlrunx-theme', theme);
-  }, [theme, mounted]);
+  }, [theme]);
 
   const toggleTheme = useCallback(() => {
     setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
@@ -51,15 +49,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     toggleTheme,
     isDark: theme === 'dark',
   };
-
-  // Prevent flash of wrong theme
-  if (!mounted) {
-    return (
-      <div style={{ visibility: 'hidden' }}>
-        {children}
-      </div>
-    );
-  }
 
   return (
     <ThemeContext.Provider value={value}>

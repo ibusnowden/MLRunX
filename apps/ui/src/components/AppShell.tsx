@@ -35,45 +35,33 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { toggleMobile } = useSidebar();
   const pageTitle = useMemo(() => getPageTitle(pathname), [pathname]);
-  const [authChecked, setAuthChecked] = useState(false);
-  const [authorized, setAuthorized] = useState(false);
+  const [uiSessionAuthorized, setUiSessionAuthorized] = useState(false);
+  const [uiSessionChecked, setUiSessionChecked] = useState(false);
+  const isPublicPath = isPublicAuthPath(pathname);
+  const hasStoredApiKey = getStoredApiConfig().apiKey.trim().length > 0;
 
   useEffect(() => {
     let cancelled = false;
 
-    if (isPublicAuthPath(pathname)) {
-      setAuthChecked(true);
-      setAuthorized(true);
+    if (isPublicPath || hasStoredApiKey) {
       return () => {
         cancelled = true;
       };
     }
-
-    const { apiKey } = getStoredApiConfig();
-    if (apiKey.trim()) {
-      setAuthChecked(true);
-      setAuthorized(true);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    setAuthChecked(false);
-    setAuthorized(false);
 
     const verify = async () => {
       try {
         await api.getUiSession();
         if (!cancelled) {
-          setAuthorized(true);
-          setAuthChecked(true);
+          setUiSessionAuthorized(true);
+          setUiSessionChecked(true);
         }
       } catch {
         if (!cancelled) {
           const nextPath = pathname.startsWith('/') ? pathname : '/';
           router.replace(`/login?next=${encodeURIComponent(nextPath)}`);
-          setAuthorized(false);
-          setAuthChecked(true);
+          setUiSessionAuthorized(false);
+          setUiSessionChecked(true);
         }
       }
     };
@@ -82,13 +70,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [pathname, router]);
+  }, [hasStoredApiKey, isPublicPath, pathname, router]);
 
-  if (isPublicAuthPath(pathname)) {
+  if (isPublicPath) {
     return <div className="min-h-screen bg-background">{children}</div>;
   }
 
-  if (!authChecked || !authorized) {
+  const isAuthorized = hasStoredApiKey || uiSessionAuthorized;
+  const isChecking = !hasStoredApiKey && !uiSessionChecked;
+
+  if (isChecking || !isAuthorized) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-text-secondary">

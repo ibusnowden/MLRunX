@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ApiKeyInfo,
   CreateApiKeyResponse,
@@ -49,7 +49,7 @@ export default function SettingsPage() {
   const [submittingKey, setSubmittingKey] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
-  const refreshKeys = async () => {
+  const refreshKeys = useCallback(async () => {
     if (!session) {
       setKeys([]);
       return;
@@ -65,9 +65,9 @@ export default function SettingsPage() {
     } finally {
       setLoadingKeys(false);
     }
-  };
+  }, [session]);
 
-  const refreshProjects = async () => {
+  const refreshProjects = useCallback(async () => {
     if (!session) {
       setProjects([]);
       return;
@@ -83,9 +83,9 @@ export default function SettingsPage() {
     } finally {
       setLoadingProjects(false);
     }
-  };
+  }, [session]);
 
-  const refreshSession = async () => {
+  const refreshSession = useCallback(async () => {
     setLoadingSession(true);
     try {
       const [sessionResult, identityResult] = await Promise.all([
@@ -103,14 +103,14 @@ export default function SettingsPage() {
     } finally {
       setLoadingSession(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
       setApiBaseUrl(window.location.origin);
     }
     void refreshSession();
-  }, []);
+  }, [refreshSession]);
 
   const availableProjects = useMemo(() => {
     if (projects.length > 0) return projects;
@@ -164,7 +164,7 @@ export default function SettingsPage() {
     if (session) {
       void Promise.all([refreshKeys(), refreshProjects()]);
     }
-  }, [session]);
+  }, [session, refreshKeys, refreshProjects]);
 
   const sdkApiKey = useMemo(() => createdKey?.api_key || '<paste-api-key>', [createdKey]);
   const sdkProjectId = useMemo(() => {
