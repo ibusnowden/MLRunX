@@ -91,6 +91,7 @@ struct UiJwtConfig {
 enum UiJwtAlgorithm {
     Hs256,
     Rs256,
+    Es256,
 }
 
 impl UiJwtAlgorithm {
@@ -98,6 +99,7 @@ impl UiJwtAlgorithm {
         match raw.trim().to_ascii_lowercase().as_str() {
             "hs256" => Some(Self::Hs256),
             "rs256" => Some(Self::Rs256),
+            "es256" => Some(Self::Es256),
             _ => None,
         }
     }
@@ -106,6 +108,7 @@ impl UiJwtAlgorithm {
         match self {
             Self::Hs256 => "HS256",
             Self::Rs256 => "RS256",
+            Self::Es256 => "ES256",
         }
     }
 
@@ -113,6 +116,7 @@ impl UiJwtAlgorithm {
         match self {
             Self::Hs256 => Algorithm::HS256,
             Self::Rs256 => Algorithm::RS256,
+            Self::Es256 => Algorithm::ES256,
         }
     }
 }
@@ -364,6 +368,36 @@ impl ApiKeyStore {
         }
     }
 
+    #[cfg(test)]
+    fn new_with_sqlite_and_ui_jwt_public_key(
+        sqlite_store: Arc<SqliteStore>,
+        public_key_pem: &str,
+        algorithm: UiJwtAlgorithm,
+    ) -> Self {
+        Self {
+            keys: RwLock::new(HashMap::new()),
+            sqlite_store: Some(sqlite_store),
+            ui_jwt: UiJwtConfig {
+                enabled: true,
+                secret: None,
+                public_key_pem: Some(public_key_pem.to_string()),
+                algorithm,
+                auto_provision_project: true,
+                personal_project_prefix: "personal".to_string(),
+                issuer: None,
+                audience: None,
+                provider: "jwt".to_string(),
+                session_cookie_name: "mlrunx_ui_session".to_string(),
+                csrf_cookie_name: "mlrunx_ui_csrf".to_string(),
+                session_ttl_seconds: 900,
+                cookie_secure: false,
+                cookie_same_site: "Lax".to_string(),
+            },
+            runtime_auth_mode: RuntimeAuthMode::Hybrid,
+            auth_disabled: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
     pub fn is_ui_jwt_enabled(&self) -> bool {
         self.ui_jwt.enabled
     }
@@ -404,7 +438,9 @@ impl ApiKeyStore {
         if self.ui_jwt.enabled {
             let configured = match self.ui_jwt.algorithm {
                 UiJwtAlgorithm::Hs256 => self.ui_jwt.secret.is_some(),
-                UiJwtAlgorithm::Rs256 => self.ui_jwt.public_key_pem.is_some(),
+                UiJwtAlgorithm::Rs256 | UiJwtAlgorithm::Es256 => {
+                    self.ui_jwt.public_key_pem.is_some()
+                }
             };
 
             if configured {
@@ -416,7 +452,9 @@ impl ApiKeyStore {
             } else {
                 let missing = match self.ui_jwt.algorithm {
                     UiJwtAlgorithm::Hs256 => "MLRUNX_JWT_SECRET",
-                    UiJwtAlgorithm::Rs256 => "MLRUNX_JWT_PUBLIC_KEY_PEM",
+                    UiJwtAlgorithm::Rs256 | UiJwtAlgorithm::Es256 => {
+                        "MLRUNX_JWT_PUBLIC_KEY_PEM"
+                    }
                 };
                 warn!(
                     algorithm = self.ui_jwt.algorithm.env_value(),
@@ -962,6 +1000,14 @@ impl ApiKeyStore {
                 DecodingKey::from_rsa_pem(pem.as_bytes())
                     .map_err(|e| format!("Invalid RSA public key PEM: {e}"))?
             }
+            UiJwtAlgorithm::Es256 => {
+                let pem =
+                    self.ui_jwt.public_key_pem.as_ref().ok_or_else(|| {
+                        "MLRUNX_JWT_PUBLIC_KEY_PEM is not configured.".to_string()
+                    })?;
+                DecodingKey::from_ec_pem(pem.as_bytes())
+                    .map_err(|e| format!("Invalid EC public key PEM: {e}"))?
+            }
         };
 
         let token_data = decode::<UiJwtClaims>(raw_token, &decoding_key, &validation)
@@ -1443,6 +1489,17 @@ mod tests {
         exp: usize,
     }
 
+    const TEST_ES256_PRIVATE_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgby+rCcrDgW6NTYBt
+JmWYreNddqDKuwX+CVD6c8FSvFqhRANCAASd7UWEwAENK2EGEWqXOLiuabfDARYK
++tDqX9RwFanOZesb0CLkbR1xBz/hovi0yJK+96axFoQAYX61QNN7rMfc
+-----END PRIVATE KEY-----"#;
+
+    const TEST_ES256_PUBLIC_KEY_PEM: &str = r#"-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEne1FhMABDSthBhFqlzi4rmm3wwEW
+CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
+-----END PUBLIC KEY-----"#;
+
     #[test]
     fn test_hash_api_key() {
         let key = "mlrunx_test123";
@@ -1480,6 +1537,7 @@ mod tests {
     fn test_ui_jwt_algorithm_parsing() {
         assert_eq!(UiJwtAlgorithm::parse("HS256"), Some(UiJwtAlgorithm::Hs256));
         assert_eq!(UiJwtAlgorithm::parse("rs256"), Some(UiJwtAlgorithm::Rs256));
+        assert_eq!(UiJwtAlgorithm::parse("Es256"), Some(UiJwtAlgorithm::Es256));
         assert_eq!(UiJwtAlgorithm::parse("hs512"), None);
     }
 
@@ -1698,6 +1756,35 @@ mod tests {
         assert_eq!(memberships.len(), 1);
         assert_eq!(memberships[0].role, "owner");
         assert!(allowed_projects.contains(&memberships[0].project_id));
+    }
+
+    #[tokio::test]
+    async fn test_ui_jwt_auth_es256_public_key_verification() {
+        let sqlite_store = Arc::new(SqliteStore::new(":memory:").await.unwrap());
+        let store = ApiKeyStore::new_with_sqlite_and_ui_jwt_public_key(
+            sqlite_store.clone(),
+            TEST_ES256_PUBLIC_KEY_PEM,
+            UiJwtAlgorithm::Es256,
+        );
+
+        let claims = TestJwtClaims {
+            sub: "es256-user-subject".to_string(),
+            email: Some("es256.user@example.com".to_string()),
+            name: Some("ES256 User".to_string()),
+            exp: (chrono::Utc::now().timestamp() + 3600) as usize,
+        };
+        let token = encode(
+            &Header::new(Algorithm::ES256),
+            &claims,
+            &EncodingKey::from_ec_pem(TEST_ES256_PRIVATE_KEY_PEM.as_bytes()).unwrap(),
+        )
+        .unwrap();
+
+        let (api_key, allowed_projects) = store.authenticate_ui_jwt(&token).await.unwrap();
+        assert_eq!(allowed_projects.len(), 1);
+        assert!(api_key.scopes.contains(&"read".to_string()));
+        assert!(api_key.scopes.contains(&"write".to_string()));
+        assert!(api_key.scopes.contains(&"admin".to_string()));
     }
 
     #[tokio::test]

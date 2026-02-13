@@ -22,7 +22,9 @@ services:
       MLRUNX_API_KEY: ${MLRUNX_API_KEY:-}
 
       MLRUNX_UI_JWT_AUTH_ENABLED: ${MLRUNX_UI_JWT_AUTH_ENABLED:-true}
-      MLRUNX_JWT_SECRET: ${MLRUNX_JWT_SECRET:?Set MLRUNX_JWT_SECRET in .env.prod}
+      MLRUNX_JWT_ALGORITHM: ${MLRUNX_JWT_ALGORITHM:-}
+      MLRUNX_JWT_SECRET: ${MLRUNX_JWT_SECRET:-}
+      MLRUNX_JWT_PUBLIC_KEY_PEM: ${MLRUNX_JWT_PUBLIC_KEY_PEM:-}
       MLRUNX_UI_ALLOWED_ORIGINS: https://${MLRUNX_DOMAIN:?Set MLRUNX_DOMAIN in .env.prod}
       MLRUNX_UI_COOKIE_SECURE: ${MLRUNX_UI_COOKIE_SECURE:-true}
       MLRUNX_UI_COOKIE_SAMESITE: ${MLRUNX_UI_COOKIE_SAMESITE:-Lax}
@@ -51,6 +53,8 @@ services:
       dockerfile: infra/docker/Dockerfile.ui
       args:
         NEXT_PUBLIC_API_URL: https://${MLRUNX_DOMAIN:?Set MLRUNX_DOMAIN in .env.prod}
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:-}
     container_name: mlrunx-ui
     expose:
       - "3000"
@@ -59,6 +63,8 @@ services:
       MLRUNX_API_URL: http://api:3001
       # Runtime fallback for server-rendered paths.
       NEXT_PUBLIC_API_URL: https://${MLRUNX_DOMAIN}
+      NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:-}
     depends_on:
       api:
         condition: service_healthy
