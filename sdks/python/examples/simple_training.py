@@ -11,6 +11,7 @@ Note: This example works even without a server running (offline mode).
 """
 
 import math
+import os
 import random
 import time
 
@@ -42,7 +43,7 @@ def main() -> None:
 
     # Initialize a run
     run = mlrunx.init(
-        project="example-project",
+        project_id=os.getenv("MLRUNX_PROJECT_ID", "project-uuid"),
         name="simple-training",
         tags={"framework": "pytorch", "task": "classification"},
         config={"learning_rate": 0.001, "batch_size": 32, "epochs": 10},

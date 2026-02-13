@@ -64,7 +64,7 @@ def init(
     instance that can be used to log metrics, parameters, and artifacts.
 
     Args:
-        project: Project name
+        project: Deprecated project value for compatibility. Use project_id.
         project_id: Project ID (preferred for scoped API keys)
         name: Human-readable run name (auto-generated if not provided)
         run_id: Explicit run ID (auto-generated UUID if not provided)
