@@ -411,6 +411,28 @@ export const api = {
     return fetchApi<ListProjectsResponse>('/api/v1/projects', {}, { skipApiKey: true });
   },
 
+  async createProject(request: {
+    name: string;
+    description?: string;
+  }): Promise<ProjectInfo> {
+    return fetchApi<ProjectInfo>(
+      '/api/v1/projects',
+      {
+        method: 'POST',
+        body: JSON.stringify(request),
+      },
+      { skipApiKey: true }
+    );
+  },
+
+  async deleteProject(projectId: string): Promise<{ status: string }> {
+    return fetchApi<{ status: string }>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}`,
+      { method: 'DELETE' },
+      { skipApiKey: true }
+    );
+  },
+
   async listAdminUsers(): Promise<AdminListUsersResponse> {
     return fetchApi<AdminListUsersResponse>('/api/v1/admin/users');
   },

@@ -495,6 +495,73 @@ impl SqliteStore {
         Ok(projects)
     }
 
+    /// Delete a project and all project-scoped records (runs, metrics, keys, memberships).
+    pub async fn delete_project(&self, project_id: &str) -> Result<(), SqliteError> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+
+        let exists: Option<String> = tx
+            .query_row(
+                "SELECT id FROM projects WHERE id = ?1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(SqliteError::NotFound(format!(
+                "Project not found: '{project_id}'"
+            )));
+        }
+
+        // Capture run IDs first so we can null foreign keys in audit rows before deletes.
+        let run_ids = {
+            let mut stmt = tx.prepare("SELECT id FROM runs WHERE project_id = ?1")?;
+            let rows = stmt.query_map(params![project_id], |row| row.get::<_, String>(0))?;
+            let collected: Result<Vec<_>, _> = rows.collect();
+            collected?
+        };
+
+        for run_id in &run_ids {
+            tx.execute(
+                "UPDATE audit_events SET run_id = NULL WHERE run_id = ?1",
+                params![run_id],
+            )?;
+            tx.execute(
+                "DELETE FROM share_tokens WHERE run_id = ?1",
+                params![run_id],
+            )?;
+            tx.execute("DELETE FROM metrics WHERE run_id = ?1", params![run_id])?;
+            tx.execute("DELETE FROM tags WHERE run_id = ?1", params![run_id])?;
+            tx.execute("DELETE FROM params WHERE run_id = ?1", params![run_id])?;
+            tx.execute("DELETE FROM batches WHERE run_id = ?1", params![run_id])?;
+            tx.execute("DELETE FROM runs WHERE id = ?1", params![run_id])?;
+        }
+
+        // Clear FK references in audit rows before removing scoped key/project rows.
+        tx.execute(
+            "UPDATE audit_events SET actor_key_id = NULL WHERE actor_key_id IN (SELECT id FROM api_keys WHERE project_id = ?1)",
+            params![project_id],
+        )?;
+        tx.execute(
+            "UPDATE audit_events SET project_id = NULL WHERE project_id = ?1",
+            params![project_id],
+        )?;
+
+        tx.execute(
+            "DELETE FROM api_keys WHERE project_id = ?1",
+            params![project_id],
+        )?;
+        tx.execute(
+            "DELETE FROM project_memberships WHERE project_id = ?1",
+            params![project_id],
+        )?;
+        tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
+
+        tx.commit()?;
+        info!(project_id = %project_id, "Deleted project and scoped data");
+        Ok(())
+    }
+
     // =========================================================================
     // User / membership operations
     // =========================================================================
@@ -1915,6 +1982,66 @@ mod tests {
         assert_eq!(run.id, "run-123");
         assert_eq!(run.name, Some("My Run".to_string()));
         assert_eq!(run.status, "running");
+    }
+
+    #[tokio::test]
+    async fn test_delete_project_removes_scoped_data() {
+        let store = create_test_store().await;
+
+        let project = store.create_project("delete-project", None).await.unwrap();
+        let project_id = project.id.clone();
+
+        store
+            .insert_api_key(
+                "key-delete-project",
+                "hash-delete-project",
+                "mlrunx_d",
+                Some(&project_id),
+                Some("delete-project-key"),
+                r#"["read","write"]"#,
+            )
+            .await
+            .unwrap();
+
+        store
+            .create_run(
+                "run-delete-project",
+                &project_id,
+                Some("delete-run"),
+                Some("key-delete-project"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        store
+            .insert_audit_event(
+                None,
+                Some("key-delete-project"),
+                Some(&project_id),
+                Some("run-delete-project"),
+                "run.init",
+                "run",
+                Some("run-delete-project"),
+                "success",
+                None,
+            )
+            .await
+            .unwrap();
+
+        store.delete_project(&project_id).await.unwrap();
+
+        assert!(
+            store
+                .get_project_by_id(&project_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            store.get_run("run-delete-project").await,
+            Err(SqliteError::NotFound(_))
+        ));
     }
 
     #[tokio::test]
