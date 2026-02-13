@@ -38,7 +38,8 @@ class Run:
 
     def __init__(
         self,
-        project: str,
+        project: str | None = None,
+        project_id: str | None = None,
         name: str | None = None,
         run_id: str | None = None,
         tags: dict[str, str] | None = None,
@@ -49,17 +50,41 @@ class Run:
 
         Args:
             project: Project name
+            project_id: Project ID (preferred for scoped API keys)
             name: Human-readable run name (auto-generated if not provided)
             run_id: Explicit run ID (auto-generated if not provided)
             tags: Initial tags for the run
             config: Initial configuration/parameters
             sdk_config: SDK configuration (uses global if not provided)
         """
-        self._project = project
+        self._sdk_config = sdk_config or get_config()
+
+        resolved_project_id = project_id
+        project_name = project
+
+        if resolved_project_id is None and project_name is None:
+            resolved_project_id = self._sdk_config.project_id
+
+        if resolved_project_id is None and project_name is not None:
+            try:
+                uuid.UUID(project_name)
+                logger.warning(
+                    "Project value looks like a UUID; treating it as project_id. "
+                    "Pass project_id explicitly to avoid ambiguity."
+                )
+                resolved_project_id = project_name
+                project_name = None
+            except ValueError:
+                pass
+
+        if resolved_project_id is None and project_name is None:
+            raise ValueError("project or project_id is required")
+
+        self._project_name = project_name
+        self._project_id = resolved_project_id
         self._name = name or self._generate_name()
         self._run_id = run_id or str(uuid.uuid4())
         self._tags = tags or {}
-        self._sdk_config = sdk_config or get_config()
         self._finished = False
         self._offline = False
         self._step = 0
@@ -108,13 +133,7 @@ class Run:
         """Initialize the run on the server."""
         try:
             response = self._transport.init_run(
-                {
-                    "project": self._project,
-                    "name": self._name,
-                    "run_id": self._run_id,
-                    "tags": self._tags,
-                    "config": config,
-                }
+                self._build_init_payload(config)
             )
 
             if response.get("offline"):
@@ -149,8 +168,26 @@ class Run:
 
     @property
     def project(self) -> str:
-        """The project name."""
-        return self._project
+        """The project name or ID."""
+        return self._project_name or self._project_id or ""
+
+    @property
+    def project_id(self) -> str | None:
+        """The project ID (if known)."""
+        return self._project_id
+
+    def _build_init_payload(self, config: dict[str, Any]) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "name": self._name,
+            "run_id": self._run_id,
+            "tags": self._tags,
+            "config": config,
+        }
+        if self._project_id is not None:
+            payload["project_id"] = self._project_id
+        if self._project_name is not None:
+            payload["project"] = self._project_name
+        return payload
 
     @property
     def is_offline(self) -> bool:

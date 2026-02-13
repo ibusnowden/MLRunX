@@ -21,6 +21,7 @@ class Config:
     # Server connection
     server_url: str = "http://localhost:3001"
     api_key: str | None = None
+    project_id: str | None = None  # Preferred project identifier for scoped keys
 
     # Batching settings (adaptive)
     batch_size: int = 1000  # Max items per batch
@@ -67,6 +68,7 @@ class Config:
         return cls(
             server_url=os.getenv("MLRUNX_SERVER_URL", "http://localhost:3001"),
             api_key=os.getenv("MLRUNX_API_KEY"),
+            project_id=os.getenv("MLRUNX_PROJECT_ID"),
             batch_size=int(os.getenv("MLRUNX_BATCH_SIZE", "1000")),
             batch_max_bytes=int(os.getenv("MLRUNX_BATCH_MAX_BYTES", "1000000")),
             batch_timeout_ms=int(os.getenv("MLRUNX_BATCH_TIMEOUT_MS", "1000")),

@@ -109,15 +109,21 @@ export default function SettingsPage() {
   }, [session]);
 
   const sdkApiKey = useMemo(() => createdKey?.api_key || '<paste-api-key>', [createdKey]);
+  const sdkProjectId = useMemo(() => {
+    if (newKeyProjectId) return newKeyProjectId;
+    if (session?.project_ids?.length === 1) return session.project_ids[0];
+    return '<project-id>';
+  }, [newKeyProjectId, session]);
   const pipCommand = useMemo(
-    () => `pip install mlrunx\nexport MLRUNX_SERVER_URL=${apiBaseUrl || 'https://mlrunx.example.com'}\nexport MLRUNX_API_KEY=${sdkApiKey}`,
-    [apiBaseUrl, sdkApiKey]
+    () =>
+      `pip install mlrunx\nexport MLRUNX_SERVER_URL=${apiBaseUrl || 'https://mlrunx.example.com'}\nexport MLRUNX_API_KEY=${sdkApiKey}\nexport MLRUNX_PROJECT_ID=${sdkProjectId}`,
+    [apiBaseUrl, sdkApiKey, sdkProjectId]
   );
   const uvCommand = useMemo(
-    () => `uv pip install mlrunx\nMLRUNX_SERVER_URL=${apiBaseUrl || 'https://mlrunx.example.com'} MLRUNX_API_KEY=${sdkApiKey} python train.py`,
-    [apiBaseUrl, sdkApiKey]
+    () =>
+      `uv pip install mlrunx\nMLRUNX_SERVER_URL=${apiBaseUrl || 'https://mlrunx.example.com'} MLRUNX_API_KEY=${sdkApiKey} MLRUNX_PROJECT_ID=${sdkProjectId} python train.py`,
+    [apiBaseUrl, sdkApiKey, sdkProjectId]
   );
-
   const copyToClipboard = async (value: string, successMessage: string) => {
     try {
       await navigator.clipboard.writeText(value);

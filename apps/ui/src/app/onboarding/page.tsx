@@ -108,11 +108,12 @@ export default function OnboardingPage() {
           <pre className="overflow-x-auto rounded-lg border border-border bg-surface-secondary p-3 text-xs sm:text-sm text-text-primary">
 {`pip install mlrunx
 export MLRUNX_SERVER_URL=${apiBaseUrl}
-export MLRUNX_API_KEY=${effectiveApiKey}`}
+export MLRUNX_API_KEY=${effectiveApiKey}
+export MLRUNX_PROJECT_ID=${projectHint}`}
           </pre>
           <pre className="overflow-x-auto rounded-lg border border-border bg-surface-secondary p-3 text-xs sm:text-sm text-text-primary">
 {`uv pip install mlrunx
-MLRUNX_SERVER_URL=${apiBaseUrl} MLRUNX_API_KEY=${effectiveApiKey} python train.py`}
+MLRUNX_SERVER_URL=${apiBaseUrl} MLRUNX_API_KEY=${effectiveApiKey} MLRUNX_PROJECT_ID=${projectHint} python train.py`}
           </pre>
         </section>
 
@@ -125,7 +126,7 @@ MLRUNX_SERVER_URL=${apiBaseUrl} MLRUNX_API_KEY=${effectiveApiKey} python train.p
 {`python - <<'PY'
 import mlrunx
 
-run = mlrunx.init(project="${projectHint}", name="onboarding-smoke")
+run = mlrunx.init(project_id="${projectHint}", name="onboarding-smoke")
 mlrunx.log({"loss": 0.42, "accuracy": 0.91}, step=1)
 mlrunx.finish()
 print("run_id:", run.run_id)

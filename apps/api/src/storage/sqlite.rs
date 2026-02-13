@@ -340,6 +340,22 @@ impl SqliteStore {
         Ok(id)
     }
 
+    /// Resolve a project name by ID.
+    pub async fn get_project_name_by_id(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<String>, SqliteError> {
+        let conn = self.conn.lock().await;
+        let name: Option<String> = conn
+            .query_row(
+                "SELECT name FROM projects WHERE id = ?1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(name)
+    }
+
     // =========================================================================
     // User / membership operations
     // =========================================================================

@@ -6,7 +6,7 @@ Example usage:
 
     # Initialize a run
     run = mlrunx.init(
-        project="my-project",
+        project_id="project-uuid",
         name="training-run-1",
         tags={"model": "resnet50"},
         config={"lr": 0.001, "batch_size": 32}
@@ -24,7 +24,7 @@ Example usage:
     run.finish()
 
     # Or use as context manager:
-    with mlrunx.init(project="my-project") as run:
+    with mlrunx.init(project_id="project-uuid") as run:
         for step in range(1000):
             run.log({"loss": loss}, step=step)
         # Auto-finishes on exit
@@ -51,7 +51,8 @@ _active_run: Run | None = None
 
 
 def init(
-    project: str,
+    project: str | None = None,
+    project_id: str | None = None,
     name: str | None = None,
     run_id: str | None = None,
     tags: dict[str, str] | None = None,
@@ -63,7 +64,8 @@ def init(
     instance that can be used to log metrics, parameters, and artifacts.
 
     Args:
-        project: Project name (required)
+        project: Project name
+        project_id: Project ID (preferred for scoped API keys)
         name: Human-readable run name (auto-generated if not provided)
         run_id: Explicit run ID (auto-generated UUID if not provided)
         tags: Initial tags for filtering/organizing runs
@@ -72,20 +74,23 @@ def init(
     Returns:
         A Run instance for logging
 
+    Notes:
+        If project_id is not provided, the SDK will use MLRUNX_PROJECT_ID if set.
+
     Example:
         # Basic usage
-        run = mlrunx.init(project="my-project")
+        run = mlrunx.init(project_id="project-uuid")
 
         # With all options
         run = mlrunx.init(
-            project="my-project",
+            project_id="project-uuid",
             name="experiment-v2",
             tags={"model": "resnet50", "dataset": "imagenet"},
             config={"lr": 0.001, "batch_size": 32}
         )
 
         # As context manager
-        with mlrunx.init(project="my-project") as run:
+        with mlrunx.init(project_id="project-uuid") as run:
             run.log({"loss": 0.5})
     """
     global _active_run
@@ -96,6 +101,7 @@ def init(
 
     _active_run = Run(
         project=project,
+        project_id=project_id,
         name=name,
         run_id=run_id,
         tags=tags,

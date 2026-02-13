@@ -517,7 +517,8 @@ async fn http_ui_auth_logout(
 /// Request to initialize a run via HTTP.
 #[derive(Debug, Deserialize)]
 struct InitRunHttpRequest {
-    project: String,
+    project: Option<String>,
+    project_id: Option<String>,
     name: Option<String>,
     run_id: Option<String>,
     tags: Option<std::collections::HashMap<String, String>>,
@@ -568,12 +569,68 @@ async fn http_init_run(
         }));
     }
 
-    // Get or create project in SQLite
-    let project_id = state
-        .sqlite_store
-        .get_or_create_project(&req.project)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Resolve project identity (prefer explicit project_id).
+    let (project_id, resolved_project_name) = if let Some(ref project_id) = req.project_id {
+        let name = state
+            .sqlite_store
+            .get_project_name_by_id(project_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    format!("Project not found: '{project_id}'"),
+                )
+            })?;
+
+        if let Some(ref project_name) = req.project {
+            if project_name != &name {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "project_id '{project_id}' does not match project name '{project_name}'"
+                    ),
+                ));
+            }
+        }
+
+        (project_id.clone(), Some(name))
+    } else if let Some(ref project_name) = req.project {
+        let looks_like_uuid = uuid::Uuid::parse_str(project_name).is_ok();
+        if looks_like_uuid {
+            if let Some(name) = state
+                .sqlite_store
+                .get_project_name_by_id(project_name)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            {
+                (project_name.clone(), Some(name))
+            } else {
+                warn!(
+                    project = %project_name,
+                    "Project looks like a UUID but no matching project_id was found; treating it as a project name"
+                );
+                let id = state
+                    .sqlite_store
+                    .get_or_create_project(project_name)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                (id, Some(project_name.clone()))
+            }
+        } else {
+            let id = state
+                .sqlite_store
+                .get_or_create_project(project_name)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            (id, Some(project_name.clone()))
+        }
+    } else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "project or project_id is required.".to_string(),
+        ));
+    };
 
     // Enforce project scope and write permission
     require_endpoint_access(
@@ -606,7 +663,12 @@ async fn http_init_run(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
-    info!(run_id = %run_id, project = %req.project, "HTTP: Initialized run (SQLite)");
+    info!(
+        run_id = %run_id,
+        project_id = %project_id,
+        project_name = ?resolved_project_name,
+        "HTTP: Initialized run (SQLite)"
+    );
 
     emit_audit_event(
         &state,
