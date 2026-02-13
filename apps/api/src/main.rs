@@ -53,8 +53,9 @@ use services::{
     ParamPayload, TagPayload, compute_payload_hash, ingest::InMemoryStore,
 };
 use storage::{
-    AuthSessionAdminRow, MetricRow, ProjectRow, RunRow, SqliteStore, UserProjectMembershipRow,
-    UserRow,
+    AuthSessionAdminRow, CreateProjectInput, CreateRunInput, MetricRow, ProjectRepository,
+    ProjectRow, RunRepository, RunRow, RunStatus as PostgresRunStatus, SqliteStore,
+    UserProjectMembershipRow, UserRow,
 };
 
 /// Application state shared across handlers.
@@ -381,6 +382,153 @@ fn require_api_key_run_owner_for_mutation(
     }
 
     Ok(())
+}
+
+fn postgres_metadata_shadow_writes_enabled() -> bool {
+    env_flag_default("MLRUNX_POSTGRES_METADATA_SHADOW_WRITES_ENABLED", false)
+}
+
+async fn maybe_shadow_write_project_to_postgres(project: &ProjectRow) {
+    if !postgres_metadata_shadow_writes_enabled() {
+        return;
+    }
+
+    let project_uuid = match uuid::Uuid::parse_str(&project.id) {
+        Ok(value) => value,
+        Err(err) => {
+            warn!(
+                project_id = %project.id,
+                error = %err,
+                "Skipped PostgreSQL shadow write for project with non-UUID id"
+            );
+            return;
+        }
+    };
+
+    let result = ProjectRepository::create(CreateProjectInput {
+        id: Some(project_uuid),
+        name: project.name.clone(),
+        description: project.description.clone(),
+        owner_id: None,
+        settings: None,
+    })
+    .await;
+
+    if let Err(err) = result {
+        warn!(
+            project_id = %project.id,
+            error = %err,
+            "PostgreSQL project shadow write failed"
+        );
+    }
+}
+
+async fn maybe_shadow_write_run_to_postgres(
+    run_id: &str,
+    project_id: &str,
+    name: Option<&str>,
+    tags: Option<&std::collections::HashMap<String, String>>,
+) {
+    if !postgres_metadata_shadow_writes_enabled() {
+        return;
+    }
+
+    let run_uuid = match uuid::Uuid::parse_str(run_id) {
+        Ok(value) => value,
+        Err(err) => {
+            warn!(
+                run_id = %run_id,
+                error = %err,
+                "Skipped PostgreSQL run shadow write because run_id is not UUID"
+            );
+            return;
+        }
+    };
+    let project_uuid = match uuid::Uuid::parse_str(project_id) {
+        Ok(value) => value,
+        Err(err) => {
+            warn!(
+                project_id = %project_id,
+                error = %err,
+                "Skipped PostgreSQL run shadow write because project_id is not UUID"
+            );
+            return;
+        }
+    };
+
+    let tags_json = tags
+        .map(|t| serde_json::to_value(t).unwrap_or_else(|_| serde_json::json!({})))
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let result = RunRepository::create(CreateRunInput {
+        id: Some(run_uuid),
+        project_id: project_uuid,
+        name: name.map(ToOwned::to_owned),
+        description: None,
+        parent_run_id: None,
+        tags: Some(tags_json),
+        system_info: None,
+        git_info: None,
+    })
+    .await;
+
+    if let Err(err) = result {
+        warn!(
+            run_id = %run_id,
+            project_id = %project_id,
+            error = %err,
+            "PostgreSQL run shadow write failed"
+        );
+    }
+}
+
+fn postgres_run_status_from_http(status: &str) -> Option<PostgresRunStatus> {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "pending" => Some(PostgresRunStatus::Pending),
+        "running" => Some(PostgresRunStatus::Running),
+        "finished" => Some(PostgresRunStatus::Finished),
+        "failed" => Some(PostgresRunStatus::Failed),
+        "killed" => Some(PostgresRunStatus::Killed),
+        _ => None,
+    }
+}
+
+async fn maybe_shadow_finish_run_in_postgres(run_id: &str, status: &str) {
+    if !postgres_metadata_shadow_writes_enabled() {
+        return;
+    }
+
+    let run_uuid = match uuid::Uuid::parse_str(run_id) {
+        Ok(value) => value,
+        Err(err) => {
+            warn!(
+                run_id = %run_id,
+                error = %err,
+                "Skipped PostgreSQL run status shadow write because run_id is not UUID"
+            );
+            return;
+        }
+    };
+    let status_value = match postgres_run_status_from_http(status) {
+        Some(value) => value,
+        None => {
+            warn!(
+                run_id = %run_id,
+                status = %status,
+                "Skipped PostgreSQL run status shadow write for unknown status"
+            );
+            return;
+        }
+    };
+
+    if let Err(err) = RunRepository::update_status(run_uuid, status_value, None).await {
+        warn!(
+            run_id = %run_id,
+            status = %status,
+            error = %err,
+            "PostgreSQL run status shadow write failed"
+        );
+    }
 }
 
 fn extract_cookie(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
@@ -750,6 +898,7 @@ async fn http_create_project(
             .grant_project_membership(&row.id, &user_id, "owner", Some(&user_id))
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        maybe_shadow_write_project_to_postgres(&row).await;
 
         emit_audit_event(
             &state,
@@ -803,6 +952,7 @@ async fn http_create_project(
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
             }
         })?;
+    maybe_shadow_write_project_to_postgres(&row).await;
 
     emit_audit_event(
         &state,
@@ -1352,6 +1502,8 @@ async fn http_init_run(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
+    maybe_shadow_write_run_to_postgres(&run_id, project_id, req.name.as_deref(), req.tags.as_ref())
+        .await;
 
     info!(
         run_id = %run_id,
@@ -1767,6 +1919,7 @@ async fn http_finish_run(
         .finish_run(&run_id, &req.status)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    maybe_shadow_finish_run_in_postgres(&run_id, &req.status).await;
 
     info!(run_id = %run_id, status = %req.status, "HTTP: Finished run (SQLite)");
 
