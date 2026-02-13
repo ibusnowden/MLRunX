@@ -363,6 +363,40 @@ fn require_ui_run_owner(auth: &AuthContext, run: &RunRow) -> Result<(), (StatusC
     Ok(())
 }
 
+async fn require_ui_project_owner(
+    state: &AppState,
+    auth: &AuthContext,
+    project_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    if auth.is_dev_mode || !auth.is_ui_jwt() {
+        return Ok(());
+    }
+
+    let user_id = auth_user_id(auth).ok_or((
+        StatusCode::FORBIDDEN,
+        "Unable to resolve user identity for project authorization.".to_string(),
+    ))?;
+
+    let memberships = state
+        .sqlite_store
+        .list_active_project_memberships(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let owns_project = memberships
+        .iter()
+        .any(|membership| membership.project_id == project_id && membership.role == "owner");
+
+    if !owns_project {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access denied: only project owners can delete this project.".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn require_api_key_run_owner_for_mutation(
     auth: &AuthContext,
     run: &RunRow,
@@ -971,6 +1005,72 @@ async fn http_create_project(
     .await;
 
     Ok(Json(project_response_from_row(row)))
+}
+
+async fn http_delete_project(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+) -> Result<Json<AdminMutationResponse>, (StatusCode, String)> {
+    let project = state
+        .sqlite_store
+        .get_project_by_id(&project_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("Project not found: '{project_id}'"),
+        ))?;
+
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Admin,
+        Some(&project_id),
+        None,
+        "project.delete",
+        "project",
+        Some(&project_id),
+    )
+    .await?;
+
+    if auth.is_ui_jwt() {
+        require_ui_project_owner(&state, &auth, &project_id).await?;
+    } else if !auth.is_global() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Project deletion requires a global admin key or owner UI session.".to_string(),
+        ));
+    }
+
+    state
+        .sqlite_store
+        .delete_project(&project_id)
+        .await
+        .map_err(|e| match e {
+            storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        Some(&project_id),
+        None,
+        "project.delete",
+        "project",
+        Some(&project_id),
+        "success",
+        serde_json::json!({
+            "name": project.name,
+            "auth_mode": auth_mode_label(&auth),
+        }),
+    )
+    .await;
+
+    Ok(Json(AdminMutationResponse {
+        status: "ok".to_string(),
+    }))
 }
 
 #[derive(Debug, Serialize)]
@@ -3459,6 +3559,7 @@ fn build_http_router(state: AppState) -> Router {
             "/api/v1/projects",
             get(http_list_projects).post(http_create_project),
         )
+        .route("/api/v1/projects/{project_id}", delete(http_delete_project))
         // Platform admin control-plane endpoints (global admin only)
         .route("/api/v1/admin/users", get(http_admin_list_users))
         .route(
@@ -4027,8 +4128,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(create_response.status(), StatusCode::OK);
+        let created_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_response).await)
+                .expect("Create project response should be JSON");
+        let project_id = created_payload["project_id"]
+            .as_str()
+            .expect("project_id should be present")
+            .to_string();
 
         let list_response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("GET")
@@ -4050,6 +4159,45 @@ mod tests {
                 .iter()
                 .any(|project| project["name"].as_str() == Some("phase1-project")),
             "Created project should be returned by list endpoint"
+        );
+
+        let delete_uri = format!("/api/v1/projects/{project_id}");
+        let delete_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(delete_uri.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete_response.status(), StatusCode::OK);
+
+        let list_after_delete = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/projects")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_after_delete.status(), StatusCode::OK);
+
+        let payload_after_delete: serde_json::Value =
+            serde_json::from_str(&response_text(list_after_delete).await)
+                .expect("List projects response should be JSON");
+        let projects_after_delete = payload_after_delete["projects"]
+            .as_array()
+            .expect("projects should be an array");
+        assert!(
+            projects_after_delete
+                .iter()
+                .all(|project| project["project_id"].as_str() != Some(project_id.as_str())),
+            "Deleted project should not be returned by list endpoint"
         );
     }
 
@@ -4485,6 +4633,129 @@ mod tests {
             .expect("Delete run request failed");
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_ui_owner_can_delete_owned_project() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let create_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "owned-delete-project",
+                            "description": "owner can delete"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create project request"),
+            )
+            .await
+            .expect("Create project request failed");
+        assert_eq!(create_response.status(), StatusCode::OK);
+        let created_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_response).await)
+                .expect("Create project response should be JSON");
+        let project_id = created_payload["project_id"]
+            .as_str()
+            .expect("project_id should be present")
+            .to_string();
+
+        let delete_uri = format!("/api/v1/projects/{project_id}");
+        let delete_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(delete_uri.as_str())
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::empty())
+                    .expect("Failed to build delete project request"),
+            )
+            .await
+            .expect("Delete project request failed");
+        assert_eq!(delete_response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_ui_editor_cannot_delete_project_without_owner_role() {
+        let harness = ui_session_harness_with_role("editor").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let delete_uri = format!("/api/v1/projects/{}", harness.primary_project_id);
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(delete_uri.as_str())
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::empty())
+                    .expect("Failed to build delete project request"),
+            )
+            .await
+            .expect("Delete project request failed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_global_admin_key_can_delete_project() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let project = harness
+            .sqlite_store
+            .create_project("global-admin-delete-project", None)
+            .await
+            .expect("Failed to create project");
+
+        let (global_admin_key, _) = harness
+            .key_store
+            .create_key(
+                None,
+                Some("platform-admin".to_string()),
+                vec!["admin".to_string()],
+            )
+            .await;
+
+        let delete_uri = format!("/api/v1/projects/{}", project.id);
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(delete_uri.as_str())
+                    .header("x-api-key", &global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build delete project request"),
+            )
+            .await
+            .expect("Delete project request failed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            harness
+                .sqlite_store
+                .get_project_by_id(&project.id)
+                .await
+                .expect("Failed to query project")
+                .is_none()
+        );
     }
 
     #[tokio::test]
