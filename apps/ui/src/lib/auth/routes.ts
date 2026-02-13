@@ -1,4 +1,4 @@
-const PUBLIC_AUTH_PATHS = ['/login', '/signup', '/auth/callback'];
+const PUBLIC_AUTH_PATHS = ['/login', '/signup', '/auth/callback', '/auth/reset'];
 
 export function isPublicAuthPath(pathname: string): boolean {
   return PUBLIC_AUTH_PATHS.some((publicPath) => {

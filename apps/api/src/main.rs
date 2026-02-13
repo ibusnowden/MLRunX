@@ -49,13 +49,13 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use auth::{ApiKeyStore, AuthContext, AuthMode, auth_middleware};
 use mlrunx_proto::mlrunx::v1::ingest_service_server::IngestServiceServer;
 use services::{
-    CardinalityTracker, IdempotencyResult, IdempotencyStore, IngestServiceImpl, MetricPayload,
-    ParamPayload, TagPayload, compute_payload_hash, ingest::InMemoryStore,
+    CardinalityTracker, EventPayload, IdempotencyResult, IdempotencyStore, IngestServiceImpl,
+    MetricPayload, ParamPayload, TagPayload, compute_payload_hash, ingest::InMemoryStore,
 };
 use storage::{
-    AuthSessionAdminRow, CreateProjectInput, CreateRunInput, MetricRow, ProjectRepository,
-    ProjectRow, RunRepository, RunRow, RunStatus as PostgresRunStatus, SqliteStore,
-    UserProjectMembershipRow, UserRow,
+    AuditEventRow, AuthSessionAdminRow, CreateProjectInput, CreateRunInput, MetricRow,
+    ProjectRepository, ProjectRow, RunEventInput, RunEventRow, RunRepository, RunRow,
+    RunStatus as PostgresRunStatus, SqliteStore, UserProjectMembershipRow, UserRow,
 };
 
 /// Application state shared across handlers.
@@ -103,6 +103,19 @@ async fn health() -> &'static str {
 
 async fn root() -> &'static str {
     "MLRunX API v0.1.0"
+}
+
+fn is_production_environment() -> bool {
+    let raw = std::env::var("MLRUNX_ENVIRONMENT")
+        .or_else(|_| std::env::var("APP_ENV"))
+        .or_else(|_| std::env::var("ENVIRONMENT"))
+        .or_else(|_| std::env::var("RUST_ENV"))
+        .unwrap_or_else(|_| "development".to_string());
+
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "prod" | "production"
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -358,6 +371,40 @@ fn require_ui_run_owner(auth: &AuthContext, run: &RunRow) -> Result<(), (StatusC
                 "Access denied: this user cannot access that run.".to_string(),
             ));
         }
+    }
+
+    Ok(())
+}
+
+async fn require_ui_project_owner(
+    state: &AppState,
+    auth: &AuthContext,
+    project_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    if auth.is_dev_mode || !auth.is_ui_jwt() {
+        return Ok(());
+    }
+
+    let user_id = auth_user_id(auth).ok_or((
+        StatusCode::FORBIDDEN,
+        "Unable to resolve user identity for project authorization.".to_string(),
+    ))?;
+
+    let memberships = state
+        .sqlite_store
+        .list_active_project_memberships(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let owns_project = memberships
+        .iter()
+        .any(|membership| membership.project_id == project_id && membership.role == "owner");
+
+    if !owns_project {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access denied: only project owners can delete this project.".to_string(),
+        ));
     }
 
     Ok(())
@@ -973,6 +1020,72 @@ async fn http_create_project(
     Ok(Json(project_response_from_row(row)))
 }
 
+async fn http_delete_project(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+) -> Result<Json<AdminMutationResponse>, (StatusCode, String)> {
+    let project = state
+        .sqlite_store
+        .get_project_by_id(&project_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("Project not found: '{project_id}'"),
+        ))?;
+
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Admin,
+        Some(&project_id),
+        None,
+        "project.delete",
+        "project",
+        Some(&project_id),
+    )
+    .await?;
+
+    if auth.is_ui_jwt() {
+        require_ui_project_owner(&state, &auth, &project_id).await?;
+    } else if !auth.is_global() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Project deletion requires a global admin key or owner UI session.".to_string(),
+        ));
+    }
+
+    state
+        .sqlite_store
+        .delete_project(&project_id)
+        .await
+        .map_err(|e| match e {
+            storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        Some(&project_id),
+        None,
+        "project.delete",
+        "project",
+        Some(&project_id),
+        "success",
+        serde_json::json!({
+            "name": project.name,
+            "auth_mode": auth_mode_label(&auth),
+        }),
+    )
+    .await;
+
+    Ok(Json(AdminMutationResponse {
+        status: "ok".to_string(),
+    }))
+}
+
 #[derive(Debug, Serialize)]
 struct AdminUserResponse {
     user_id: String,
@@ -1022,6 +1135,16 @@ struct AdminSessionsQuery {
     include_revoked: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct AdminAuditEventsQuery {
+    project_id: Option<String>,
+    user_id: Option<String>,
+    key_id: Option<String>,
+    action: Option<String>,
+    outcome: Option<String>,
+    limit: Option<usize>,
+}
+
 #[derive(Debug, Serialize)]
 struct AdminSessionResponse {
     session_id: String,
@@ -1037,6 +1160,29 @@ struct AdminSessionResponse {
 #[derive(Debug, Serialize)]
 struct AdminListSessionsResponse {
     sessions: Vec<AdminSessionResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminAuditEventResponse {
+    id: i64,
+    occurred_at: String,
+    actor_user_id: Option<String>,
+    actor_key_id: Option<String>,
+    project_id: Option<String>,
+    run_id: Option<String>,
+    action: String,
+    resource_type: String,
+    resource_id: Option<String>,
+    outcome: String,
+    request_id: Option<String>,
+    client_ip: Option<String>,
+    user_agent: Option<String>,
+    metadata: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminListAuditEventsResponse {
+    events: Vec<AdminAuditEventResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1083,6 +1229,28 @@ fn admin_session_response_from_row(row: AuthSessionAdminRow) -> AdminSessionResp
         revoked_at: row.revoked_at,
         client_ip: row.client_ip,
         user_agent: row.user_agent,
+    }
+}
+
+fn admin_audit_event_response_from_row(row: AuditEventRow) -> AdminAuditEventResponse {
+    let metadata = serde_json::from_str::<serde_json::Value>(&row.metadata)
+        .unwrap_or_else(|_| serde_json::json!({ "raw": row.metadata }));
+
+    AdminAuditEventResponse {
+        id: row.id,
+        occurred_at: row.occurred_at,
+        actor_user_id: row.actor_user_id,
+        actor_key_id: row.actor_key_id,
+        project_id: row.project_id,
+        run_id: row.run_id,
+        action: row.action,
+        resource_type: row.resource_type,
+        resource_id: row.resource_id,
+        outcome: row.outcome,
+        request_id: row.request_id,
+        client_ip: row.client_ip,
+        user_agent: row.user_agent,
+        metadata,
     }
 }
 
@@ -1376,6 +1544,53 @@ async fn http_admin_revoke_session(
     }))
 }
 
+async fn http_admin_list_audit_events(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Query(query): axum::extract::Query<AdminAuditEventsQuery>,
+) -> Result<Json<AdminListAuditEventsResponse>, (StatusCode, String)> {
+    require_platform_admin_access(&state, &auth, "admin.audit.list", "audit_event", None).await?;
+
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let events = state
+        .sqlite_store
+        .list_audit_events_for_admin(
+            query.project_id.as_deref(),
+            query.user_id.as_deref(),
+            query.key_id.as_deref(),
+            query.action.as_deref(),
+            query.outcome.as_deref(),
+            limit,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .map(admin_audit_event_response_from_row)
+        .collect();
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        None,
+        None,
+        "admin.audit.list",
+        "audit_event",
+        None,
+        "success",
+        serde_json::json!({
+            "project_id": query.project_id,
+            "user_id": query.user_id,
+            "key_id": query.key_id,
+            "action": query.action,
+            "outcome": query.outcome,
+            "limit": limit,
+        }),
+    )
+    .await;
+
+    Ok(Json(AdminListAuditEventsResponse { events }))
+}
+
 /// Initialize a run via HTTP (for SDK HTTP transport).
 async fn http_init_run(
     State(state): State<AppState>,
@@ -1502,6 +1717,23 @@ async fn http_init_run(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
+
+    if let Err(e) = state
+        .sqlite_store
+        .insert_run_events(
+            &run_id,
+            &[RunEventInput {
+                level: "info".to_string(),
+                source: "system".to_string(),
+                message: "Run initialized".to_string(),
+                step: Some(0),
+                timestamp: None,
+            }],
+        )
+        .await
+    {
+        warn!(run_id = %run_id, error = %e, "Failed to persist run init event");
+    }
     maybe_shadow_write_run_to_postgres(&run_id, project_id, req.name.as_deref(), req.tags.as_ref())
         .await;
 
@@ -1544,9 +1776,14 @@ struct IngestBatchHttpRequest {
     batch_id: Option<String>,
     /// Sequence number for ordering (optional)
     seq: Option<i64>,
+    #[serde(default)]
     metrics: Vec<MetricData>,
+    #[serde(default)]
     params: Vec<ParamData>,
+    #[serde(default)]
     tags: Vec<TagData>,
+    #[serde(default)]
+    events: Vec<LogEventData>,
     #[allow(dead_code)]
     timestamp: Option<f64>,
     #[allow(dead_code)]
@@ -1574,6 +1811,15 @@ struct TagData {
 }
 
 #[derive(Debug, Deserialize)]
+struct LogEventData {
+    level: Option<String>,
+    source: Option<String>,
+    message: String,
+    step: Option<i64>,
+    timestamp: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct BatchStats {
     metric_count: Option<i64>,
     param_count: Option<i64>,
@@ -1590,6 +1836,47 @@ struct IngestBatchHttpResponse {
     /// Warnings about the batch (e.g., out of order)
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
+}
+
+fn normalize_run_event_level(raw: Option<&str>) -> String {
+    match raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("info")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "debug" => "debug".to_string(),
+        "warn" | "warning" => "warn".to_string(),
+        "error" => "error".to_string(),
+        _ => "info".to_string(),
+    }
+}
+
+fn normalize_run_event_source(raw: Option<&str>) -> String {
+    let normalized = raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("sdk");
+    let max_len = 64usize;
+    if normalized.len() <= max_len {
+        normalized.to_string()
+    } else {
+        normalized.chars().take(max_len).collect()
+    }
+}
+
+fn sanitize_run_event_message(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let max_len = 2000usize;
+    if trimmed.len() <= max_len {
+        Some(trimmed.to_string())
+    } else {
+        Some(trimmed.chars().take(max_len).collect())
+    }
 }
 
 /// Ingest a batch of events via HTTP (for SDK HTTP transport).
@@ -1657,13 +1944,31 @@ async fn http_ingest_batch(
         })
         .collect();
 
+    let event_payloads: Vec<EventPayload> = req
+        .events
+        .iter()
+        .map(|event| EventPayload {
+            level: normalize_run_event_level(event.level.as_deref()),
+            source: normalize_run_event_source(event.source.as_deref()),
+            message: event.message.clone(),
+            step: event.step,
+            timestamp: event.timestamp,
+        })
+        .collect();
+
     // Compute payload hash for idempotency
-    let payload_hash = compute_payload_hash(&metric_payloads, &param_payloads, &tag_payloads);
+    let payload_hash = compute_payload_hash(
+        &metric_payloads,
+        &param_payloads,
+        &tag_payloads,
+        &event_payloads,
+    );
 
     // Check and record for idempotency
     let metric_count = req.metrics.len();
     let param_count = req.params.len();
     let tag_count = req.tags.len();
+    let event_count = req.events.len();
 
     let project_id = run.project_id.clone();
 
@@ -1678,6 +1983,7 @@ async fn http_ingest_batch(
             metric_count as i32,
             param_count as i32,
             tag_count as i32,
+            event_count as i32,
         )
         .await;
 
@@ -1850,7 +2156,83 @@ async fn http_ingest_batch(
         }
     }
 
-    let total = accepted_metric_count + param_count + accepted_tag_count;
+    let mut dropped_event_count = 0usize;
+    let sqlite_events: Vec<RunEventInput> = req
+        .events
+        .iter()
+        .filter_map(|event| {
+            let message = match sanitize_run_event_message(&event.message) {
+                Some(message) => message,
+                None => {
+                    dropped_event_count += 1;
+                    return None;
+                }
+            };
+            let timestamp = match event.timestamp {
+                Some(value) if !value.is_finite() => {
+                    dropped_event_count += 1;
+                    return None;
+                }
+                value => value,
+            };
+            Some(RunEventInput {
+                level: normalize_run_event_level(event.level.as_deref()),
+                source: normalize_run_event_source(event.source.as_deref()),
+                message,
+                step: event.step,
+                timestamp,
+            })
+        })
+        .collect();
+
+    if dropped_event_count > 0 {
+        warnings.push(format!(
+            "Dropped {dropped_event_count} events with empty messages or non-finite timestamps"
+        ));
+    }
+
+    let mut accepted_event_count = if sqlite_events.is_empty() {
+        0usize
+    } else {
+        state
+            .sqlite_store
+            .insert_run_events(&req.run_id, &sqlite_events)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to persist run events to SQLite: {e}"),
+                )
+            })?
+    };
+
+    if !warnings.is_empty() {
+        let warning_events: Vec<RunEventInput> = warnings
+            .iter()
+            .map(|warning| RunEventInput {
+                level: "warn".to_string(),
+                source: "ingest".to_string(),
+                message: warning.clone(),
+                step: None,
+                timestamp: None,
+            })
+            .collect();
+
+        match state
+            .sqlite_store
+            .insert_run_events(&req.run_id, &warning_events)
+            .await
+        {
+            Ok(inserted) => {
+                accepted_event_count += inserted;
+            }
+            Err(e) => {
+                warn!(run_id = %req.run_id, error = %e, "Failed to persist warning events");
+            }
+        }
+    }
+
+    let total = accepted_metric_count + param_count + accepted_tag_count + accepted_event_count;
     let dropped = validation.dropped_tags.len() + validation.dropped_metrics.len();
 
     tracing::debug!(
@@ -1860,6 +2242,7 @@ async fn http_ingest_batch(
         metrics = accepted_metric_count,
         params = param_count,
         tags = accepted_tag_count,
+        events = accepted_event_count,
         dropped = dropped,
         "HTTP: Ingested batch (SQLite)"
     );
@@ -1919,6 +2302,26 @@ async fn http_finish_run(
         .finish_run(&run_id, &req.status)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Err(e) = state
+        .sqlite_store
+        .insert_run_events(
+            &run_id,
+            &[RunEventInput {
+                level: if req.status.eq_ignore_ascii_case("failed") {
+                    "error".to_string()
+                } else {
+                    "info".to_string()
+                },
+                source: "system".to_string(),
+                message: format!("Run marked as {}", req.status),
+                step: None,
+                timestamp: None,
+            }],
+        )
+        .await
+    {
+        warn!(run_id = %run_id, error = %e, "Failed to persist run finish event");
+    }
     maybe_shadow_finish_run_in_postgres(&run_id, &req.status).await;
 
     info!(run_id = %run_id, status = %req.status, "HTTP: Finished run (SQLite)");
@@ -3059,6 +3462,37 @@ fn default_max_points() -> usize {
     1000
 }
 
+#[derive(Debug, Deserialize)]
+struct RunEventsQuery {
+    after_id: Option<i64>,
+    #[serde(default = "default_run_events_limit")]
+    limit: usize,
+}
+
+fn default_run_events_limit() -> usize {
+    200
+}
+
+#[derive(Debug, Serialize)]
+struct RunEventResponse {
+    id: i64,
+    run_id: String,
+    level: String,
+    source: String,
+    message: String,
+    step: Option<i64>,
+    timestamp: Option<f64>,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ListRunEventsResponse {
+    run_id: String,
+    events: Vec<RunEventResponse>,
+    next_after_id: Option<i64>,
+    has_more: bool,
+}
+
 /// Get metrics for a run with optional downsampling.
 async fn http_get_metrics(
     State(state): State<AppState>,
@@ -3135,6 +3569,69 @@ async fn http_get_metrics(
         run_id,
         series,
         available_metrics,
+    }))
+}
+
+/// Get structured run events for log/timeline display.
+async fn http_get_run_events(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(run_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<RunEventsQuery>,
+) -> Result<Json<ListRunEventsResponse>, (StatusCode, String)> {
+    let run = state
+        .sqlite_store
+        .get_run(&run_id)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)))?;
+
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Read,
+        Some(&run.project_id),
+        Some(&run_id),
+        "run.events.read",
+        "run",
+        Some(&run_id),
+    )
+    .await?;
+    require_ui_run_owner(&auth, &run)?;
+
+    let limit = query.limit.clamp(1, 500);
+    let fetch_limit = limit + 1;
+    let mut rows = state
+        .sqlite_store
+        .list_run_events(&run_id, query.after_id, fetch_limit)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let has_more = rows.len() > limit;
+    if has_more {
+        rows.truncate(limit);
+    }
+
+    let next_after_id = rows.last().map(|row| row.id).or(query.after_id);
+
+    let events = rows
+        .into_iter()
+        .map(|row| RunEventResponse {
+            id: row.id,
+            run_id: row.run_id,
+            level: row.level,
+            source: row.source,
+            message: row.message,
+            step: row.step,
+            timestamp: row.timestamp,
+            created_at: row.created_at,
+        })
+        .collect();
+
+    Ok(Json(ListRunEventsResponse {
+        run_id,
+        events,
+        next_after_id,
+        has_more,
     }))
 }
 
@@ -3357,6 +3854,7 @@ fn build_http_router(state: AppState) -> Router {
             "/api/v1/projects",
             get(http_list_projects).post(http_create_project),
         )
+        .route("/api/v1/projects/{project_id}", delete(http_delete_project))
         // Platform admin control-plane endpoints (global admin only)
         .route("/api/v1/admin/users", get(http_admin_list_users))
         .route(
@@ -3376,6 +3874,10 @@ fn build_http_router(state: AppState) -> Router {
             "/api/v1/admin/sessions/{session_id}/revoke",
             post(http_admin_revoke_session),
         )
+        .route(
+            "/api/v1/admin/audit-events",
+            get(http_admin_list_audit_events),
+        )
         // Query API endpoints
         .route("/api/v1/runs", get(http_list_runs))
         .route(
@@ -3383,6 +3885,7 @@ fn build_http_router(state: AppState) -> Router {
             get(http_get_run).delete(http_delete_run),
         )
         .route("/api/v1/runs/{run_id}/metrics", get(http_get_metrics))
+        .route("/api/v1/runs/{run_id}/events", get(http_get_run_events))
         .route("/api/v1/runs/compare", post(http_compare_runs))
         // Key management endpoints (admin only)
         .route("/api/v1/keys", post(http_create_key).get(http_list_keys))
@@ -3480,6 +3983,16 @@ async fn main() {
         Arc::new(ApiKeyStore::new_with_sqlite(sqlite_store.clone()))
     };
     key_store.init_from_env().await;
+
+    if key_store.is_auth_disabled() && is_production_environment() {
+        panic!(
+            "Refusing to start: authentication is disabled in production. \
+Set MLRUNX_AUTH_MODE=api_key or MLRUNX_AUTH_MODE=hybrid and restart."
+        );
+    }
+    if key_store.is_auth_disabled() {
+        warn!("Authentication is disabled; use only in development/test environments.");
+    }
 
     // Create shared state
     let store = Arc::new(InMemoryStore::new());
@@ -3899,6 +4412,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_run_events_ingest_and_query() {
+        let app = test_app().await;
+
+        let create_project_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "events-project"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create project request"),
+            )
+            .await
+            .expect("Create project request failed");
+        assert_eq!(create_project_response.status(), StatusCode::OK);
+        let create_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_project_response).await)
+                .expect("Create project response must be JSON");
+        let project_id = create_payload["project_id"]
+            .as_str()
+            .expect("project_id should exist")
+            .to_string();
+
+        let run_id = "run-events-http-123";
+        let init_run_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": project_id,
+                            "run_id": run_id,
+                            "name": "events-run"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build init run request"),
+            )
+            .await
+            .expect("Init run request failed");
+        assert_eq!(init_run_response.status(), StatusCode::OK);
+
+        let ingest_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ingest/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "run_id": run_id,
+                            "metrics": [],
+                            "params": [],
+                            "tags": [],
+                            "events": [
+                                {"level": "INFO", "source": "trainer", "message": "Initializing worker", "step": 1},
+                                {"level": "warning", "source": "trainer", "message": "Gradient clipped", "step": 2}
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build ingest request"),
+            )
+            .await
+            .expect("Ingest request failed");
+        assert_eq!(ingest_response.status(), StatusCode::OK);
+
+        let events_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/runs/{run_id}/events?limit=20"))
+                    .body(Body::empty())
+                    .expect("Failed to build events request"),
+            )
+            .await
+            .expect("Events request failed");
+        assert_eq!(events_response.status(), StatusCode::OK);
+        let payload: serde_json::Value =
+            serde_json::from_str(&response_text(events_response).await)
+                .expect("Events response should be JSON");
+        let events = payload["events"]
+            .as_array()
+            .expect("events should be an array");
+        assert!(
+            events
+                .iter()
+                .any(|event| event["message"].as_str() == Some("Initializing worker")),
+            "ingested info event should be present"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event["level"].as_str() == Some("warn")),
+            "warning level should normalize to warn"
+        );
+    }
+
+    #[tokio::test]
     async fn test_project_create_and_list_routes() {
         let app = test_app().await;
 
@@ -3921,8 +4544,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(create_response.status(), StatusCode::OK);
+        let created_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_response).await)
+                .expect("Create project response should be JSON");
+        let project_id = created_payload["project_id"]
+            .as_str()
+            .expect("project_id should be present")
+            .to_string();
 
         let list_response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("GET")
@@ -3944,6 +4575,45 @@ mod tests {
                 .iter()
                 .any(|project| project["name"].as_str() == Some("phase1-project")),
             "Created project should be returned by list endpoint"
+        );
+
+        let delete_uri = format!("/api/v1/projects/{project_id}");
+        let delete_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(delete_uri.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete_response.status(), StatusCode::OK);
+
+        let list_after_delete = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/projects")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_after_delete.status(), StatusCode::OK);
+
+        let payload_after_delete: serde_json::Value =
+            serde_json::from_str(&response_text(list_after_delete).await)
+                .expect("List projects response should be JSON");
+        let projects_after_delete = payload_after_delete["projects"]
+            .as_array()
+            .expect("projects should be an array");
+        assert!(
+            projects_after_delete
+                .iter()
+                .all(|project| project["project_id"].as_str() != Some(project_id.as_str())),
+            "Deleted project should not be returned by list endpoint"
         );
     }
 
@@ -4382,6 +5052,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ui_owner_can_delete_owned_project() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let create_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "owned-delete-project",
+                            "description": "owner can delete"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create project request"),
+            )
+            .await
+            .expect("Create project request failed");
+        assert_eq!(create_response.status(), StatusCode::OK);
+        let created_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_response).await)
+                .expect("Create project response should be JSON");
+        let project_id = created_payload["project_id"]
+            .as_str()
+            .expect("project_id should be present")
+            .to_string();
+
+        let delete_uri = format!("/api/v1/projects/{project_id}");
+        let delete_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(delete_uri.as_str())
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::empty())
+                    .expect("Failed to build delete project request"),
+            )
+            .await
+            .expect("Delete project request failed");
+        assert_eq!(delete_response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_ui_editor_cannot_delete_project_without_owner_role() {
+        let harness = ui_session_harness_with_role("editor").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let delete_uri = format!("/api/v1/projects/{}", harness.primary_project_id);
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(delete_uri.as_str())
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::empty())
+                    .expect("Failed to build delete project request"),
+            )
+            .await
+            .expect("Delete project request failed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_global_admin_key_can_delete_project() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let project = harness
+            .sqlite_store
+            .create_project("global-admin-delete-project", None)
+            .await
+            .expect("Failed to create project");
+
+        let (global_admin_key, _) = harness
+            .key_store
+            .create_key(
+                None,
+                Some("platform-admin".to_string()),
+                vec!["admin".to_string()],
+            )
+            .await;
+
+        let delete_uri = format!("/api/v1/projects/{}", project.id);
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(delete_uri.as_str())
+                    .header("x-api-key", &global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build delete project request"),
+            )
+            .await
+            .expect("Delete project request failed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            harness
+                .sqlite_store
+                .get_project_by_id(&project.id)
+                .await
+                .expect("Failed to query project")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn test_platform_admin_endpoints_require_global_admin_key() {
         let harness = ui_session_harness_with_role("owner").await;
         let (scoped_admin_key, _) = harness
@@ -4568,6 +5361,62 @@ mod tests {
             .await
             .expect("Session check request failed");
         assert_eq!(session_response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_platform_admin_can_list_audit_events() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let (global_admin_key, _) = harness
+            .key_store
+            .create_key(
+                None,
+                Some("platform-admin".to_string()),
+                vec!["admin".to_string()],
+            )
+            .await;
+
+        // Prime at least one audit event under the admin namespace.
+        let seed_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/admin/users")
+                    .header("x-api-key", &global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build admin users request"),
+            )
+            .await
+            .expect("Admin users request failed");
+        assert_eq!(seed_response.status(), StatusCode::OK);
+
+        let audit_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/admin/audit-events?action=admin.users.list&limit=20")
+                    .header("x-api-key", &global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build admin audit request"),
+            )
+            .await
+            .expect("Admin audit request failed");
+        assert_eq!(audit_response.status(), StatusCode::OK);
+
+        let payload: serde_json::Value = serde_json::from_str(&response_text(audit_response).await)
+            .expect("Admin audit response should be JSON");
+        let events = payload["events"]
+            .as_array()
+            .expect("events should be an array");
+        assert!(
+            events
+                .iter()
+                .any(|event| event["action"].as_str() == Some("admin.users.list")),
+            "Expected admin.users.list audit entry"
+        );
     }
 
     #[tokio::test]

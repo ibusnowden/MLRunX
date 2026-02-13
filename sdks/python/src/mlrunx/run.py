@@ -250,6 +250,53 @@ class Run:
             if not self._queue.put(event):
                 logger.warning(f"Queue full, metric dropped: {name}")
 
+    def log_event(
+        self,
+        message: str,
+        level: str = "info",
+        step: int | None = None,
+        source: str = "sdk",
+        timestamp: float | None = None,
+    ) -> None:
+        """Log a structured run event (non-blocking).
+
+        Args:
+            message: Event message
+            level: Severity level ("debug", "info", "warn", "error")
+            step: Optional training step associated with the event
+            source: Event source ("sdk", "trainer", etc.)
+            timestamp: Optional Unix timestamp in seconds
+        """
+        if self._finished:
+            logger.warning("Attempting to log to a finished run")
+            return
+
+        cleaned_message = message.strip()
+        if not cleaned_message:
+            return
+
+        normalized_level = level.strip().lower()
+        if normalized_level not in {"debug", "info", "warn", "error"}:
+            normalized_level = "info"
+
+        cleaned_source = source.strip() or "sdk"
+        ts = timestamp or time.time()
+
+        event = Event(
+            type=EventType.EVENT,
+            run_id=self._run_id,
+            timestamp=ts,
+            data={
+                "level": normalized_level,
+                "source": cleaned_source,
+                "message": cleaned_message,
+                "step": step,
+                "timestamp": ts,
+            },
+        )
+        if not self._queue.put(event):
+            logger.warning("Queue full, run event dropped")
+
     def log_params(self, params: dict[str, Any]) -> None:
         """Log parameters/hyperparameters (non-blocking).
 

@@ -7,6 +7,7 @@ This is the default transport for alpha releases.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -27,6 +28,7 @@ class HttpTransport(Transport):
         base_url: str = "http://localhost:3001",
         api_key: str | None = None,
         timeout: float = 30.0,
+        verify: bool | str = True,
     ) -> None:
         """Initialize the HTTP transport.
 
@@ -34,10 +36,14 @@ class HttpTransport(Transport):
             base_url: Base URL of the MLRunX API server
             api_key: Optional API key for authentication
             timeout: Request timeout in seconds
+            verify: TLS verification mode. True enables system trust store.
+                   A string path uses a custom CA bundle.
         """
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._timeout = timeout
+        ca_bundle = os.getenv("MLRUNX_TLS_CA_BUNDLE", "").strip()
+        self._verify: bool | str = ca_bundle if ca_bundle else verify
         self._client: httpx.Client | None = None
 
     def _get_client(self) -> httpx.Client:
@@ -51,6 +57,7 @@ class HttpTransport(Transport):
                 base_url=self._base_url,
                 headers=headers,
                 timeout=self._timeout,
+                verify=self._verify,
             )
         return self._client
 

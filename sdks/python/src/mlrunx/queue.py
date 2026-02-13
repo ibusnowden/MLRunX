@@ -19,6 +19,7 @@ class EventType(Enum):
     METRIC = "metric"
     PARAM = "param"
     TAG = "tag"
+    EVENT = "event"
     ARTIFACT = "artifact"
     RUN_START = "run_start"
     RUN_FINISH = "run_finish"

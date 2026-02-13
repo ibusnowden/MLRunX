@@ -59,6 +59,8 @@ pub struct BatchRecord {
     pub param_count: i32,
     /// Number of tags in batch
     pub tag_count: i32,
+    /// Number of log events in batch
+    pub event_count: i32,
     /// When the batch was received
     pub created_at: std::time::SystemTime,
 }
@@ -95,6 +97,7 @@ impl IdempotencyStore {
         metric_count: i32,
         param_count: i32,
         tag_count: i32,
+        event_count: i32,
     ) -> IdempotencyResult {
         let key = (run_id.to_string(), batch_id.to_string());
 
@@ -164,6 +167,7 @@ impl IdempotencyStore {
                 metric_count,
                 param_count,
                 tag_count,
+                event_count,
                 created_at: std::time::SystemTime::now(),
             };
             batches.insert(key, record);
@@ -237,6 +241,7 @@ pub fn compute_payload_hash(
     metrics: &[MetricPayload],
     params: &[ParamPayload],
     tags: &[TagPayload],
+    events: &[EventPayload],
 ) -> String {
     let mut hasher = Sha256::new();
 
@@ -268,6 +273,37 @@ pub fn compute_payload_hash(
         hasher.update(t.value.as_bytes());
     }
 
+    // Hash events in stable order.
+    let mut sorted_events: Vec<_> = events.iter().collect();
+    sorted_events.sort_by(|a, b| {
+        a.step
+            .cmp(&b.step)
+            .then_with(|| a.level.cmp(&b.level))
+            .then_with(|| a.source.cmp(&b.source))
+            .then_with(|| a.message.cmp(&b.message))
+            .then_with(|| {
+                let a_bits = a.timestamp.map(f64::to_bits).unwrap_or_default();
+                let b_bits = b.timestamp.map(f64::to_bits).unwrap_or_default();
+                a_bits.cmp(&b_bits)
+            })
+    });
+
+    for e in sorted_events {
+        hasher.update(e.level.as_bytes());
+        hasher.update(e.source.as_bytes());
+        hasher.update(e.message.as_bytes());
+        if let Some(step) = e.step {
+            hasher.update(step.to_le_bytes());
+        } else {
+            hasher.update(0_i64.to_le_bytes());
+        }
+        if let Some(timestamp) = e.timestamp {
+            hasher.update(timestamp.to_le_bytes());
+        } else {
+            hasher.update(0_f64.to_le_bytes());
+        }
+    }
+
     hex::encode(hasher.finalize())
 }
 
@@ -291,6 +327,16 @@ pub struct ParamPayload {
 pub struct TagPayload {
     pub key: String,
     pub value: String,
+}
+
+/// Run event payload for hashing.
+#[derive(Debug, Clone)]
+pub struct EventPayload {
+    pub level: String,
+    pub source: String,
+    pub message: String,
+    pub step: Option<i64>,
+    pub timestamp: Option<f64>,
 }
 
 /// Shared idempotency store type.
@@ -323,8 +369,8 @@ mod tests {
             value: "dev".to_string(),
         }];
 
-        let hash1 = compute_payload_hash(&metrics, &params, &tags);
-        let hash2 = compute_payload_hash(&metrics, &params, &tags);
+        let hash1 = compute_payload_hash(&metrics, &params, &tags, &[]);
+        let hash2 = compute_payload_hash(&metrics, &params, &tags, &[]);
 
         // Same input should produce same hash
         assert_eq!(hash1, hash2);
@@ -335,7 +381,7 @@ mod tests {
             value: 0.6,
             step: 1,
         }];
-        let hash3 = compute_payload_hash(&metrics2, &params, &tags);
+        let hash3 = compute_payload_hash(&metrics2, &params, &tags, &[]);
         assert_ne!(hash1, hash3);
     }
 
@@ -367,8 +413,8 @@ mod tests {
             },
         ];
 
-        let hash1 = compute_payload_hash(&metrics1, &[], &[]);
-        let hash2 = compute_payload_hash(&metrics2, &[], &[]);
+        let hash1 = compute_payload_hash(&metrics1, &[], &[], &[]);
+        let hash2 = compute_payload_hash(&metrics2, &[], &[], &[]);
 
         assert_eq!(hash1, hash2);
     }
@@ -378,7 +424,7 @@ mod tests {
         let store = IdempotencyStore::new();
 
         let result = store
-            .check_and_record("project-1", "run-1", "batch-1", 1, "hash123", 10, 5, 2)
+            .check_and_record("project-1", "run-1", "batch-1", 1, "hash123", 10, 5, 2, 1)
             .await;
 
         assert_eq!(result, IdempotencyResult::New);
@@ -392,12 +438,12 @@ mod tests {
 
         // First batch
         store
-            .check_and_record("p", "r", "b", 1, "hash", 1, 0, 0)
+            .check_and_record("p", "r", "b", 1, "hash", 1, 0, 0, 0)
             .await;
 
         // Same batch again (same hash)
         let result = store
-            .check_and_record("p", "r", "b", 1, "hash", 1, 0, 0)
+            .check_and_record("p", "r", "b", 1, "hash", 1, 0, 0, 0)
             .await;
 
         assert_eq!(result, IdempotencyResult::Duplicate);
@@ -411,12 +457,12 @@ mod tests {
 
         // First batch
         store
-            .check_and_record("p", "r", "b", 1, "hash1", 1, 0, 0)
+            .check_and_record("p", "r", "b", 1, "hash1", 1, 0, 0, 0)
             .await;
 
         // Same batch_id but different hash (conflict!)
         let result = store
-            .check_and_record("p", "r", "b", 1, "hash2", 1, 0, 0)
+            .check_and_record("p", "r", "b", 1, "hash2", 1, 0, 0, 0)
             .await;
 
         assert!(matches!(result, IdempotencyResult::Conflict { .. }));
@@ -430,19 +476,19 @@ mod tests {
 
         // Batch with seq 1
         store
-            .check_and_record("p", "r", "b1", 1, "h1", 1, 0, 0)
+            .check_and_record("p", "r", "b1", 1, "h1", 1, 0, 0, 0)
             .await;
         assert_eq!(store.get_sequence("r").await, 1);
 
         // Batch with seq 5
         store
-            .check_and_record("p", "r", "b2", 5, "h2", 1, 0, 0)
+            .check_and_record("p", "r", "b2", 5, "h2", 1, 0, 0, 0)
             .await;
         assert_eq!(store.get_sequence("r").await, 5);
 
         // Batch with seq 3 (out of order)
         let result = store
-            .check_and_record("p", "r", "b3", 3, "h3", 1, 0, 0)
+            .check_and_record("p", "r", "b3", 3, "h3", 1, 0, 0, 0)
             .await;
         assert!(matches!(result, IdempotencyResult::OutOfOrder { .. }));
         // Sequence should still be 5
@@ -454,7 +500,7 @@ mod tests {
         let store = IdempotencyStore::new();
 
         store
-            .check_and_record("proj", "run", "batch", 1, "hash", 10, 5, 2)
+            .check_and_record("proj", "run", "batch", 1, "hash", 10, 5, 2, 3)
             .await;
 
         let batch = store.get_batch("run", "batch").await.unwrap();
@@ -464,6 +510,7 @@ mod tests {
         assert_eq!(batch.metric_count, 10);
         assert_eq!(batch.param_count, 5);
         assert_eq!(batch.tag_count, 2);
+        assert_eq!(batch.event_count, 3);
 
         // Non-existent batch
         assert!(store.get_batch("run", "nonexistent").await.is_none());
@@ -474,13 +521,13 @@ mod tests {
         let store = IdempotencyStore::new();
 
         store
-            .check_and_record("p", "r1", "b1", 1, "h1", 1, 0, 0)
+            .check_and_record("p", "r1", "b1", 1, "h1", 1, 0, 0, 0)
             .await;
         store
-            .check_and_record("p", "r1", "b2", 2, "h2", 1, 0, 0)
+            .check_and_record("p", "r1", "b2", 2, "h2", 1, 0, 0, 0)
             .await;
         store
-            .check_and_record("p", "r2", "b1", 1, "h3", 1, 0, 0)
+            .check_and_record("p", "r2", "b1", 1, "h3", 1, 0, 0, 0)
             .await;
 
         // Clear run1

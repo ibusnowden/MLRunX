@@ -1,0 +1,200 @@
+.root {
+  min-height: 100vh;
+  display: flex;
+  background: var(--background);
+  color: var(--text-primary);
+}
+
+.brandPanel {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  padding: 4rem clamp(2.5rem, 6vw, 4.5rem);
+  overflow: hidden;
+}
+
+.brandPanel::before {
+  content: '';
+  position: absolute;
+  top: -42%;
+  left: -18%;
+  width: 78%;
+  height: 120%;
+  background: radial-gradient(
+    ellipse,
+    color-mix(in srgb, var(--accent) 14%, transparent) 0%,
+    transparent 72%
+  );
+  pointer-events: none;
+}
+
+.gridBackground {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--accent) 14%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 14%, transparent) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse 60% 60% at 30% 50%, black 22%, transparent 82%);
+  -webkit-mask-image: radial-gradient(ellipse 60% 60% at 30% 50%, black 22%, transparent 82%);
+}
+
+.brandContent {
+  position: relative;
+  z-index: 1;
+  max-width: 460px;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+  margin-bottom: 2.75rem;
+}
+
+.logoText {
+  font-size: 1.625rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.logoTextAccent {
+  color: var(--accent);
+}
+
+.headline {
+  font-size: clamp(2rem, 4vw, 2.25rem);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.03em;
+  margin-bottom: 0.875rem;
+}
+
+.subtext {
+  color: var(--text-secondary);
+  font-size: 0.9375rem;
+  line-height: 1.65;
+  max-width: 24rem;
+}
+
+.features {
+  margin-top: 2.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.125rem;
+}
+
+.feature {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.875rem;
+  opacity: 0;
+  animation: fadeUp 0.5s ease forwards;
+}
+
+.feature:nth-child(1) {
+  animation-delay: 0.2s;
+}
+
+.feature:nth-child(2) {
+  animation-delay: 0.35s;
+}
+
+.feature:nth-child(3) {
+  animation-delay: 0.5s;
+}
+
+.featureIconWrap {
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.featureLabel {
+  font-size: 0.875rem;
+  font-weight: 500;
+  margin-bottom: 0.125rem;
+}
+
+.featureDesc {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+
+.authPanel {
+  width: min(100%, 480px);
+  min-height: 100vh;
+  border-left: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 96%, var(--background) 4%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2.5rem 2rem;
+}
+
+.authContainer {
+  width: 100%;
+  max-width: 360px;
+  animation: fadeIn 0.35s ease;
+}
+
+.tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1.5rem;
+}
+
+.tab {
+  flex: 1;
+  border-bottom: 2px solid transparent;
+  text-align: center;
+  padding: 0.625rem 0;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.tabActive {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 1023px) {
+  .brandPanel {
+    display: none;
+  }
+
+  .authPanel {
+    width: 100%;
+    border-left: none;
+    padding: 2rem 1.25rem;
+  }
+}

@@ -54,7 +54,9 @@ export function MetricChartPanel({ runId }: MetricChartPanelProps) {
     );
   };
 
-  const handleViewportChange = useCallback((_min: number, _max: number) => {
+  const handleViewportChange = useCallback((min: number, max: number) => {
+    void min;
+    void max;
     // Could implement viewport-driven fetching here
   }, []);
 

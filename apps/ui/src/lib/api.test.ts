@@ -134,4 +134,112 @@ describe('api key management client', () => {
     expect(headers['Authorization']).toBe('Bearer provider-jwt-token');
     expect(headers['X-API-Key']).toBeUndefined();
   });
+
+  it('lists admin audit events with encoded query filters', async () => {
+    window.localStorage.setItem(API_URL_STORAGE_KEY, 'https://mlrunx.ibra-niang.com');
+    window.localStorage.setItem(API_KEY_STORAGE_KEY, 'mlrunx_platform_admin_key');
+
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse({ events: [] }));
+
+    await api.listAdminAuditEvents({
+      action: 'admin.users.list',
+      userId: 'user/123',
+      limit: 50,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = headersToRecord(options.headers);
+
+    expect(url).toBe(
+      'https://mlrunx.ibra-niang.com/api/v1/admin/audit-events?user_id=user%2F123&action=admin.users.list&limit=50'
+    );
+    expect(headers['X-API-Key']).toBe('mlrunx_platform_admin_key');
+    expect(options.credentials).toBe('same-origin');
+  });
+
+  it('lists projects using UI-session auth', async () => {
+    window.localStorage.setItem(API_URL_STORAGE_KEY, 'https://mlrunx.ibra-niang.com');
+    window.localStorage.setItem(API_KEY_STORAGE_KEY, 'mlrunx_local_key');
+
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse({ projects: [] }));
+
+    const result = await api.listProjects();
+    expect(result.projects).toEqual([]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = headersToRecord(options.headers);
+
+    expect(url).toBe('https://mlrunx.ibra-niang.com/api/v1/projects');
+    expect(options.credentials).toBe('include');
+    expect(headers['X-API-Key']).toBeUndefined();
+  });
+
+  it('creates and deletes projects using UI-session auth with csrf token', async () => {
+    window.localStorage.setItem(API_URL_STORAGE_KEY, 'https://mlrunx.ibra-niang.com');
+    window.localStorage.setItem(API_KEY_STORAGE_KEY, 'mlrunx_local_key');
+    document.cookie = `${UI_CSRF_COOKIE_NAME}=csrf-token-xyz; Path=/`;
+
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        jsonResponse({
+          project_id: 'project-123',
+          name: 'workspace',
+          description: null,
+          created_at: '2026-02-13 00:00:00',
+          updated_at: '2026-02-13 00:00:00',
+        })
+      )
+      .mockResolvedValueOnce(jsonResponse({ status: 'ok' }));
+
+    const created = await api.createProject({ name: 'workspace' });
+    expect(created.project_id).toBe('project-123');
+
+    await api.deleteProject('project/123');
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [createUrl, createOptions] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [deleteUrl, deleteOptions] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const createHeaders = headersToRecord(createOptions.headers);
+    const deleteHeaders = headersToRecord(deleteOptions.headers);
+
+    expect(createUrl).toBe('https://mlrunx.ibra-niang.com/api/v1/projects');
+    expect(createOptions.method).toBe('POST');
+    expect(createOptions.credentials).toBe('include');
+    expect(createHeaders['X-CSRF-Token']).toBe('csrf-token-xyz');
+    expect(createHeaders['X-API-Key']).toBeUndefined();
+
+    expect(deleteUrl).toBe('https://mlrunx.ibra-niang.com/api/v1/projects/project%2F123');
+    expect(deleteOptions.method).toBe('DELETE');
+    expect(deleteOptions.credentials).toBe('include');
+    expect(deleteHeaders['X-CSRF-Token']).toBe('csrf-token-xyz');
+    expect(deleteHeaders['X-API-Key']).toBeUndefined();
+  });
+
+  it('queries run events with incremental cursor parameters', async () => {
+    window.localStorage.setItem(API_URL_STORAGE_KEY, 'https://mlrunx.ibra-niang.com');
+    window.localStorage.setItem(API_KEY_STORAGE_KEY, 'mlrunx_local_key');
+
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        jsonResponse({ run_id: 'run-1', events: [], next_after_id: null, has_more: false })
+      );
+
+    await api.getRunEvents('run-1', { afterId: 42, limit: 100 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = headersToRecord(options.headers);
+
+    expect(url).toBe('https://mlrunx.ibra-niang.com/api/v1/runs/run-1/events?after_id=42&limit=100');
+    expect(options.credentials).toBe('same-origin');
+    expect(headers['X-API-Key']).toBe('mlrunx_local_key');
+  });
 });

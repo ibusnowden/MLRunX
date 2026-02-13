@@ -11,9 +11,8 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-const SQLITE_SCHEMA_VERSION: &str = "2026-02-13.1";
-const SQLITE_SCHEMA_DESCRIPTION: &str =
-    "adds explicit project APIs and run ownership metadata columns";
+const SQLITE_SCHEMA_VERSION: &str = "2026-02-13.2";
+const SQLITE_SCHEMA_DESCRIPTION: &str = "adds run events for backend log timelines";
 
 /// Errors that can occur in SQLite operations.
 #[derive(Error, Debug)]
@@ -173,6 +172,21 @@ impl SqliteStore {
             CREATE INDEX IF NOT EXISTS idx_metrics_run ON metrics(run_id);
             CREATE INDEX IF NOT EXISTS idx_metrics_run_name ON metrics(run_id, name);
             CREATE INDEX IF NOT EXISTS idx_metrics_run_step ON metrics(run_id, step);
+
+            -- Run events table (structured logs/timeline events)
+            CREATE TABLE IF NOT EXISTS run_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                level TEXT NOT NULL DEFAULT 'info',
+                source TEXT NOT NULL DEFAULT 'sdk',
+                message TEXT NOT NULL,
+                step INTEGER,
+                timestamp REAL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (run_id) REFERENCES runs(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_run_events_run_id ON run_events(run_id, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_run_events_created_at ON run_events(run_id, created_at DESC);
 
             -- Parameters table (hyperparameters)
             CREATE TABLE IF NOT EXISTS params (
@@ -495,6 +509,74 @@ impl SqliteStore {
         Ok(projects)
     }
 
+    /// Delete a project and all project-scoped records (runs, metrics, keys, memberships).
+    pub async fn delete_project(&self, project_id: &str) -> Result<(), SqliteError> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+
+        let exists: Option<String> = tx
+            .query_row(
+                "SELECT id FROM projects WHERE id = ?1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(SqliteError::NotFound(format!(
+                "Project not found: '{project_id}'"
+            )));
+        }
+
+        // Capture run IDs first so we can null foreign keys in audit rows before deletes.
+        let run_ids = {
+            let mut stmt = tx.prepare("SELECT id FROM runs WHERE project_id = ?1")?;
+            let rows = stmt.query_map(params![project_id], |row| row.get::<_, String>(0))?;
+            let collected: Result<Vec<_>, _> = rows.collect();
+            collected?
+        };
+
+        for run_id in &run_ids {
+            tx.execute(
+                "UPDATE audit_events SET run_id = NULL WHERE run_id = ?1",
+                params![run_id],
+            )?;
+            tx.execute(
+                "DELETE FROM share_tokens WHERE run_id = ?1",
+                params![run_id],
+            )?;
+            tx.execute("DELETE FROM metrics WHERE run_id = ?1", params![run_id])?;
+            tx.execute("DELETE FROM run_events WHERE run_id = ?1", params![run_id])?;
+            tx.execute("DELETE FROM tags WHERE run_id = ?1", params![run_id])?;
+            tx.execute("DELETE FROM params WHERE run_id = ?1", params![run_id])?;
+            tx.execute("DELETE FROM batches WHERE run_id = ?1", params![run_id])?;
+            tx.execute("DELETE FROM runs WHERE id = ?1", params![run_id])?;
+        }
+
+        // Clear FK references in audit rows before removing scoped key/project rows.
+        tx.execute(
+            "UPDATE audit_events SET actor_key_id = NULL WHERE actor_key_id IN (SELECT id FROM api_keys WHERE project_id = ?1)",
+            params![project_id],
+        )?;
+        tx.execute(
+            "UPDATE audit_events SET project_id = NULL WHERE project_id = ?1",
+            params![project_id],
+        )?;
+
+        tx.execute(
+            "DELETE FROM api_keys WHERE project_id = ?1",
+            params![project_id],
+        )?;
+        tx.execute(
+            "DELETE FROM project_memberships WHERE project_id = ?1",
+            params![project_id],
+        )?;
+        tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
+
+        tx.commit()?;
+        info!(project_id = %project_id, "Deleted project and scoped data");
+        Ok(())
+    }
+
     // =========================================================================
     // User / membership operations
     // =========================================================================
@@ -765,6 +847,79 @@ impl SqliteStore {
             params![actor_user_id, actor_key_id, project_id, run_id, action, resource_type, resource_id, outcome, metadata_json],
         )?;
         Ok(())
+    }
+
+    /// List audit events for platform admin views.
+    pub async fn list_audit_events_for_admin(
+        &self,
+        project_id: Option<&str>,
+        actor_user_id: Option<&str>,
+        actor_key_id: Option<&str>,
+        action: Option<&str>,
+        outcome: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AuditEventRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let mut sql = String::from(
+            r#"
+            SELECT id, occurred_at, actor_user_id, actor_key_id, project_id, run_id,
+                   action, resource_type, resource_id, outcome, request_id, client_ip, user_agent, metadata
+            FROM audit_events
+            WHERE 1=1
+            "#,
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+
+        if let Some(project_id) = project_id {
+            sql.push_str(" AND project_id = ?");
+            params_vec.push(Box::new(project_id.to_string()));
+        }
+        if let Some(actor_user_id) = actor_user_id {
+            sql.push_str(" AND actor_user_id = ?");
+            params_vec.push(Box::new(actor_user_id.to_string()));
+        }
+        if let Some(actor_key_id) = actor_key_id {
+            sql.push_str(" AND actor_key_id = ?");
+            params_vec.push(Box::new(actor_key_id.to_string()));
+        }
+        if let Some(action) = action {
+            sql.push_str(" AND action = ?");
+            params_vec.push(Box::new(action.to_string()));
+        }
+        if let Some(outcome) = outcome {
+            sql.push_str(" AND outcome = ?");
+            params_vec.push(Box::new(outcome.to_string()));
+        }
+
+        let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        sql.push_str(" ORDER BY occurred_at DESC, id DESC LIMIT ?");
+        params_vec.push(Box::new(sql_limit));
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|value| value.as_ref()).collect();
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            Ok(AuditEventRow {
+                id: row.get(0)?,
+                occurred_at: row.get(1)?,
+                actor_user_id: row.get(2)?,
+                actor_key_id: row.get(3)?,
+                project_id: row.get(4)?,
+                run_id: row.get(5)?,
+                action: row.get(6)?,
+                resource_type: row.get(7)?,
+                resource_id: row.get(8)?,
+                outcome: row.get(9)?,
+                request_id: row.get(10)?,
+                client_ip: row.get(11)?,
+                user_agent: row.get(12)?,
+                metadata: row.get(13)?,
+            })
+        })?;
+        let events: Result<Vec<_>, _> = rows.collect();
+        Ok(events?)
     }
 
     /// Create a UI auth session.
@@ -1084,6 +1239,7 @@ impl SqliteStore {
 
         // Delete related data first (no ON DELETE CASCADE in schema)
         conn.execute("DELETE FROM metrics WHERE run_id = ?1", params![run_id])?;
+        conn.execute("DELETE FROM run_events WHERE run_id = ?1", params![run_id])?;
         conn.execute("DELETE FROM tags WHERE run_id = ?1", params![run_id])?;
         conn.execute("DELETE FROM params WHERE run_id = ?1", params![run_id])?;
         conn.execute("DELETE FROM batches WHERE run_id = ?1", params![run_id])?;
@@ -1302,6 +1458,101 @@ impl SqliteStore {
 
         let names: Result<Vec<_>, _> = rows.collect();
         Ok(names?)
+    }
+
+    // =========================================================================
+    // Run event operations
+    // =========================================================================
+
+    /// Insert structured run events.
+    pub async fn insert_run_events(
+        &self,
+        run_id: &str,
+        events: &[RunEventInput],
+    ) -> Result<usize, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let mut count = 0usize;
+        for event in events {
+            conn.execute(
+                "INSERT INTO run_events (run_id, level, source, message, step, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    run_id,
+                    event.level,
+                    event.source,
+                    event.message,
+                    event.step,
+                    event.timestamp
+                ],
+            )?;
+            count += 1;
+        }
+
+        if count > 0 {
+            conn.execute(
+                "UPDATE runs SET updated_at = datetime('now') WHERE id = ?1",
+                params![run_id],
+            )?;
+        }
+
+        Ok(count)
+    }
+
+    /// List run events in ascending order for incremental polling.
+    pub async fn list_run_events(
+        &self,
+        run_id: &str,
+        after_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<RunEventRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+        let safe_limit = limit.clamp(1, 1000) as i64;
+
+        let rows = if let Some(after) = after_id {
+            let mut stmt = conn.prepare(
+                "SELECT id, run_id, level, source, message, step, timestamp, created_at
+                 FROM run_events
+                 WHERE run_id = ?1 AND id > ?2
+                 ORDER BY id ASC
+                 LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(params![run_id, after, safe_limit], |row| {
+                Ok(RunEventRow {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    level: row.get(2)?,
+                    source: row.get(3)?,
+                    message: row.get(4)?,
+                    step: row.get(5)?,
+                    timestamp: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, run_id, level, source, message, step, timestamp, created_at
+                 FROM run_events
+                 WHERE run_id = ?1
+                 ORDER BY id ASC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![run_id, safe_limit], |row| {
+                Ok(RunEventRow {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    level: row.get(2)?,
+                    source: row.get(3)?,
+                    message: row.get(4)?,
+                    step: row.get(5)?,
+                    timestamp: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        Ok(rows)
     }
 
     // =========================================================================
@@ -1751,6 +2002,25 @@ pub struct AuthSessionAdminRow {
     pub user_agent: Option<String>,
 }
 
+/// An audit event row for platform admin visibility.
+#[derive(Debug, Clone)]
+pub struct AuditEventRow {
+    pub id: i64,
+    pub occurred_at: String,
+    pub actor_user_id: Option<String>,
+    pub actor_key_id: Option<String>,
+    pub project_id: Option<String>,
+    pub run_id: Option<String>,
+    pub action: String,
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+    pub outcome: String,
+    pub request_id: Option<String>,
+    pub client_ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub metadata: String,
+}
+
 /// A share token row.
 #[derive(Debug, Clone)]
 pub struct ShareTokenRow {
@@ -1790,6 +2060,29 @@ pub struct MetricSeriesRow {
     pub downsampled: bool,
 }
 
+/// Insert payload for a run event row.
+#[derive(Debug, Clone)]
+pub struct RunEventInput {
+    pub level: String,
+    pub source: String,
+    pub message: String,
+    pub step: Option<i64>,
+    pub timestamp: Option<f64>,
+}
+
+/// A row from the run_events table.
+#[derive(Debug, Clone)]
+pub struct RunEventRow {
+    pub id: i64,
+    pub run_id: String,
+    pub level: String,
+    pub source: String,
+    pub message: String,
+    pub step: Option<i64>,
+    pub timestamp: Option<f64>,
+    pub created_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1823,6 +2116,66 @@ mod tests {
         assert_eq!(run.id, "run-123");
         assert_eq!(run.name, Some("My Run".to_string()));
         assert_eq!(run.status, "running");
+    }
+
+    #[tokio::test]
+    async fn test_delete_project_removes_scoped_data() {
+        let store = create_test_store().await;
+
+        let project = store.create_project("delete-project", None).await.unwrap();
+        let project_id = project.id.clone();
+
+        store
+            .insert_api_key(
+                "key-delete-project",
+                "hash-delete-project",
+                "mlrunx_d",
+                Some(&project_id),
+                Some("delete-project-key"),
+                r#"["read","write"]"#,
+            )
+            .await
+            .unwrap();
+
+        store
+            .create_run(
+                "run-delete-project",
+                &project_id,
+                Some("delete-run"),
+                Some("key-delete-project"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        store
+            .insert_audit_event(
+                None,
+                Some("key-delete-project"),
+                Some(&project_id),
+                Some("run-delete-project"),
+                "run.init",
+                "run",
+                Some("run-delete-project"),
+                "success",
+                None,
+            )
+            .await
+            .unwrap();
+
+        store.delete_project(&project_id).await.unwrap();
+
+        assert!(
+            store
+                .get_project_by_id(&project_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            store.get_run("run-delete-project").await,
+            Err(SqliteError::NotFound(_))
+        ));
     }
 
     #[tokio::test]
@@ -1976,6 +2329,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_insert_and_list_run_events() {
+        let store = create_test_store().await;
+
+        let project_id = store.get_or_create_project("events-project").await.unwrap();
+        store
+            .create_run("run-events-123", &project_id, None, None, None)
+            .await
+            .unwrap();
+
+        let inserted = store
+            .insert_run_events(
+                "run-events-123",
+                &[
+                    RunEventInput {
+                        level: "info".to_string(),
+                        source: "sdk".to_string(),
+                        message: "initialized".to_string(),
+                        step: Some(0),
+                        timestamp: Some(1700.0),
+                    },
+                    RunEventInput {
+                        level: "warn".to_string(),
+                        source: "trainer".to_string(),
+                        message: "gradient clipped".to_string(),
+                        step: Some(12),
+                        timestamp: Some(1701.0),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(inserted, 2);
+
+        let events = store
+            .list_run_events("run-events-123", None, 100)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].message, "initialized");
+        assert_eq!(events[1].message, "gradient clipped");
+
+        let after_first = store
+            .list_run_events("run-events-123", Some(events[0].id), 100)
+            .await
+            .unwrap();
+        assert_eq!(after_first.len(), 1);
+        assert_eq!(after_first[0].message, "gradient clipped");
+    }
+
+    #[tokio::test]
     async fn test_tags() {
         let store = create_test_store().await;
 
@@ -2110,6 +2513,48 @@ mod tests {
             .unwrap();
         assert_eq!(outcome, "denied");
         assert!(metadata.contains("rbac_denied"));
+    }
+
+    #[tokio::test]
+    async fn test_list_audit_events_for_admin() {
+        let store = create_test_store().await;
+        let project_id = store
+            .get_or_create_project("audit-admin-project")
+            .await
+            .unwrap();
+
+        store
+            .insert_audit_event(
+                None,
+                None,
+                Some(&project_id),
+                None,
+                "project.create",
+                "project",
+                Some(&project_id),
+                "success",
+                Some(r#"{"source":"unit-test"}"#),
+            )
+            .await
+            .unwrap();
+
+        let events = store
+            .list_audit_events_for_admin(
+                Some(&project_id),
+                None,
+                None,
+                Some("project.create"),
+                Some("success"),
+                10,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "project.create");
+        assert_eq!(events[0].resource_type, "project");
+        assert_eq!(events[0].project_id.as_deref(), Some(project_id.as_str()));
+        assert!(events[0].metadata.contains("\"source\":\"unit-test\""));
     }
 
     #[tokio::test]

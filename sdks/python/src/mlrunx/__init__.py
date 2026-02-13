@@ -44,6 +44,7 @@ __all__ = [
     "Config",
     "configure",
     "get_config",
+    "log_event",
 ]
 
 # Global active run (for convenience API)
@@ -138,6 +139,18 @@ def log_params(params: dict) -> None:
     if _active_run is None:
         raise RuntimeError("No active run. Call mlrunx.init() first.")
     _active_run.log_params(params)
+
+
+def log_event(
+    message: str,
+    level: str = "info",
+    step: int | None = None,
+    source: str = "sdk",
+) -> None:
+    """Log a structured event to the active run (convenience function)."""
+    if _active_run is None:
+        raise RuntimeError("No active run. Call mlrunx.init() first.")
+    _active_run.log_event(message, level=level, step=step, source=source)
 
 
 def finish() -> None:

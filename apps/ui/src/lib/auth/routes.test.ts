@@ -6,6 +6,7 @@ describe('auth route helpers', () => {
     expect(isPublicAuthPath('/login')).toBe(true);
     expect(isPublicAuthPath('/signup')).toBe(true);
     expect(isPublicAuthPath('/auth/callback')).toBe(true);
+    expect(isPublicAuthPath('/auth/reset')).toBe(true);
     expect(isPublicAuthPath('/')).toBe(false);
   });
 
@@ -14,6 +15,7 @@ describe('auth route helpers', () => {
     expect(sanitizeNextPath('https://evil.com')).toBe('/');
     expect(sanitizeNextPath('//evil.com')).toBe('/');
     expect(sanitizeNextPath('/login')).toBe('/');
+    expect(sanitizeNextPath('/auth/reset')).toBe('/');
     expect(sanitizeNextPath(undefined, '/dashboard')).toBe('/dashboard');
   });
 });
