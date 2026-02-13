@@ -22,7 +22,7 @@ pub use postgres::{
     RunStatus, RunSummary,
 };
 pub use sqlite::{
-    AggregatedPointRow, ApiKeyRow, AuthSessionAdminRow, AuthSessionRow, MetricRow, MetricSeriesRow,
-    ProjectMembershipRow, ProjectRow, RunRow, SqliteConfig, SqliteError, SqliteStore,
-    UserProjectMembershipRow, UserRow,
+    AggregatedPointRow, ApiKeyRow, AuditEventRow, AuthSessionAdminRow, AuthSessionRow, MetricRow,
+    MetricSeriesRow, ProjectMembershipRow, ProjectRow, RunRow, SqliteConfig, SqliteError,
+    SqliteStore, UserProjectMembershipRow, UserRow,
 };

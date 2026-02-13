@@ -40,6 +40,18 @@ const SettingsIcon = () => (
   </svg>
 );
 
+const ShieldIcon = () => (
+  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth={1.75}
+      d="M12 3l7.5 3v6.5c0 4.15-2.66 7.86-6.6 9.2L12 22l-.9-.3c-3.94-1.34-6.6-5.05-6.6-9.2V6L12 3z"
+    />
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M9.5 12l1.8 1.8 3.2-3.2" />
+  </svg>
+);
+
 const ProfileIcon = () => (
   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15.75 6.75a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.5 20.12a7.5 7.5 0 0115 0" />
@@ -103,6 +115,7 @@ const ACCOUNT_ITEMS = [
   { href: '/settings#profile', label: 'Profile', icon: ProfileIcon },
   { href: '/settings#api-keys', label: 'API Keys', icon: ApiKeyIcon },
   { href: '/settings#settings', label: 'Settings', icon: SettingsIcon },
+  { href: '/admin', label: 'Admin', icon: ShieldIcon },
 ];
 
 export function Sidebar() {
