@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio_postgres::NoTls;
+use tokio_postgres::{NoTls, Row, types::ToSql};
 use tracing::{instrument, warn};
 use uuid::Uuid;
 
@@ -216,6 +216,7 @@ pub struct RunSummary {
 /// Input for creating a new project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateProjectInput {
+    pub id: Option<Uuid>,
     pub name: String,
     pub description: Option<String>,
     pub owner_id: Option<Uuid>,
@@ -225,6 +226,7 @@ pub struct CreateProjectInput {
 /// Input for creating a new run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRunInput {
+    pub id: Option<Uuid>,
     pub project_id: Uuid,
     pub name: Option<String>,
     pub description: Option<String>,
@@ -295,33 +297,190 @@ async fn connect_client() -> Result<tokio_postgres::Client, PostgresError> {
     Ok(client)
 }
 
+fn parse_run_status(raw: &str) -> Result<RunStatus, PostgresError> {
+    match raw {
+        "pending" => Ok(RunStatus::Pending),
+        "running" => Ok(RunStatus::Running),
+        "finished" => Ok(RunStatus::Finished),
+        "failed" => Ok(RunStatus::Failed),
+        "killed" => Ok(RunStatus::Killed),
+        _ => Err(PostgresError::Validation(format!(
+            "Unknown run status from PostgreSQL: {raw}"
+        ))),
+    }
+}
+
+fn parse_artifact_type(raw: &str) -> Result<ArtifactType, PostgresError> {
+    match raw {
+        "model" => Ok(ArtifactType::Model),
+        "dataset" => Ok(ArtifactType::Dataset),
+        "plot" => Ok(ArtifactType::Plot),
+        "table" => Ok(ArtifactType::Table),
+        "file" => Ok(ArtifactType::File),
+        "directory" => Ok(ArtifactType::Directory),
+        "other" => Ok(ArtifactType::Other),
+        _ => Err(PostgresError::Validation(format!(
+            "Unknown artifact type from PostgreSQL: {raw}"
+        ))),
+    }
+}
+
+fn map_project_row(row: &Row) -> Project {
+    let created_at: std::time::SystemTime = row.get("created_at");
+    let updated_at: std::time::SystemTime = row.get("updated_at");
+    Project {
+        id: row.get("id"),
+        name: row.get("name"),
+        description: row.get("description"),
+        owner_id: row.get("owner_id"),
+        settings: row.get("settings"),
+        created_at: chrono::DateTime::<chrono::Utc>::from(created_at),
+        updated_at: chrono::DateTime::<chrono::Utc>::from(updated_at),
+    }
+}
+
+fn map_run_row(row: &Row) -> Result<Run, PostgresError> {
+    let status_text: String = row.get("status");
+    let created_at: std::time::SystemTime = row.get("created_at");
+    let updated_at: std::time::SystemTime = row.get("updated_at");
+    let started_at: Option<std::time::SystemTime> = row.get("started_at");
+    let finished_at: Option<std::time::SystemTime> = row.get("finished_at");
+    Ok(Run {
+        id: row.get("id"),
+        project_id: row.get("project_id"),
+        name: row.get("name"),
+        description: row.get("description"),
+        status: parse_run_status(status_text.as_str())?,
+        exit_code: row.get("exit_code"),
+        error_message: row.get("error_message"),
+        parent_run_id: row.get("parent_run_id"),
+        resume_token: row.get("resume_token"),
+        tags: row.get("tags"),
+        system_info: row.get("system_info"),
+        git_info: row.get("git_info"),
+        created_at: chrono::DateTime::<chrono::Utc>::from(created_at),
+        updated_at: chrono::DateTime::<chrono::Utc>::from(updated_at),
+        started_at: started_at.map(chrono::DateTime::<chrono::Utc>::from),
+        finished_at: finished_at.map(chrono::DateTime::<chrono::Utc>::from),
+        duration_seconds: row.get("duration_seconds"),
+    })
+}
+
+fn map_parameter_row(row: &Row) -> Parameter {
+    let created_at: std::time::SystemTime = row.get("created_at");
+    Parameter {
+        id: row.get("id"),
+        run_id: row.get("run_id"),
+        name: row.get("name"),
+        value_string: row.get("value_string"),
+        value_float: row.get("value_float"),
+        value_int: row.get("value_int"),
+        value_bool: row.get("value_bool"),
+        value_json: row.get("value_json"),
+        value_type: row.get("value_type"),
+        created_at: chrono::DateTime::<chrono::Utc>::from(created_at),
+    }
+}
+
+fn map_artifact_row(row: &Row) -> Result<Artifact, PostgresError> {
+    let artifact_type_text: String = row.get("artifact_type");
+    let created_at: std::time::SystemTime = row.get("created_at");
+    Ok(Artifact {
+        id: row.get("id"),
+        run_id: row.get("run_id"),
+        name: row.get("name"),
+        artifact_type: parse_artifact_type(artifact_type_text.as_str())?,
+        description: row.get("description"),
+        storage_path: row.get("storage_path"),
+        storage_type: row.get("storage_type"),
+        size_bytes: row.get("size_bytes"),
+        mime_type: row.get("mime_type"),
+        checksum_md5: row.get("checksum_md5"),
+        checksum_sha256: row.get("checksum_sha256"),
+        metadata: row.get("metadata"),
+        created_at: chrono::DateTime::<chrono::Utc>::from(created_at),
+    })
+}
+
 /// Repository for projects.
 pub struct ProjectRepository;
 
 impl ProjectRepository {
     /// Create a new project.
     #[instrument(skip_all)]
-    pub async fn create(_input: CreateProjectInput) -> Result<Project, PostgresError> {
-        // TODO: Implement with actual database connection
-        Err(PostgresError::Config(
-            "Database connection not implemented".to_string(),
-        ))
+    pub async fn create(input: CreateProjectInput) -> Result<Project, PostgresError> {
+        let client = connect_client().await?;
+        let row = client
+            .query_one(
+                r#"
+                INSERT INTO projects (id, name, description, owner_id, settings)
+                VALUES (COALESCE($1, uuid_generate_v4()), $2, $3, $4, COALESCE($5, '{}'::jsonb))
+                RETURNING id, name, description, owner_id, settings, created_at, updated_at
+                "#,
+                &[
+                    &input.id,
+                    &input.name,
+                    &input.description,
+                    &input.owner_id,
+                    &input.settings,
+                ],
+            )
+            .await
+            .map_err(|e| {
+                if let Some(code) = e.code() {
+                    if *code == tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                        return PostgresError::Validation(format!(
+                            "Project '{}' already exists",
+                            input.name
+                        ));
+                    }
+                }
+                PostgresError::Database(format!("Failed to create project: {e}"))
+            })?;
+
+        Ok(map_project_row(&row))
     }
 
     /// Get a project by ID.
     #[instrument]
-    pub async fn get_by_id(_id: Uuid) -> Result<Project, PostgresError> {
-        Err(PostgresError::Config(
-            "Database connection not implemented".to_string(),
-        ))
+    pub async fn get_by_id(id: Uuid) -> Result<Project, PostgresError> {
+        let client = connect_client().await?;
+        let row = client
+            .query_opt(
+                r#"
+                SELECT id, name, description, owner_id, settings, created_at, updated_at
+                FROM projects
+                WHERE id = $1 AND deleted_at IS NULL
+                "#,
+                &[&id],
+            )
+            .await
+            .map_err(|e| PostgresError::Database(format!("Failed to query project by id: {e}")))?;
+
+        row.map(|r| map_project_row(&r))
+            .ok_or_else(|| PostgresError::NotFound(format!("Project not found: {id}")))
     }
 
     /// Get a project by name.
     #[instrument]
-    pub async fn get_by_name(_name: &str) -> Result<Project, PostgresError> {
-        Err(PostgresError::Config(
-            "Database connection not implemented".to_string(),
-        ))
+    pub async fn get_by_name(name: &str) -> Result<Project, PostgresError> {
+        let client = connect_client().await?;
+        let row = client
+            .query_opt(
+                r#"
+                SELECT id, name, description, owner_id, settings, created_at, updated_at
+                FROM projects
+                WHERE name = $1 AND deleted_at IS NULL
+                "#,
+                &[&name],
+            )
+            .await
+            .map_err(|e| {
+                PostgresError::Database(format!("Failed to query project by name: {e}"))
+            })?;
+
+        row.map(|r| map_project_row(&r))
+            .ok_or_else(|| PostgresError::NotFound(format!("Project not found: {name}")))
     }
 
     /// Get or create a project by name.
@@ -333,6 +492,7 @@ impl ProjectRepository {
             Err(PostgresError::NotFound(_)) => {
                 // Create new
                 Self::create(CreateProjectInput {
+                    id: None,
                     name: name.to_string(),
                     description: None,
                     owner_id: None,
@@ -351,46 +511,176 @@ pub struct RunRepository;
 impl RunRepository {
     /// Create a new run.
     #[instrument(skip_all)]
-    pub async fn create(_input: CreateRunInput) -> Result<Run, PostgresError> {
-        Err(PostgresError::Config(
-            "Database connection not implemented".to_string(),
-        ))
+    pub async fn create(input: CreateRunInput) -> Result<Run, PostgresError> {
+        let client = connect_client().await?;
+        let status = RunStatus::Running.to_string();
+        let row = client
+            .query_one(
+                r#"
+                INSERT INTO runs
+                    (id, project_id, name, description, status, parent_run_id, tags, system_info, git_info)
+                VALUES
+                    (COALESCE($1, uuid_generate_v4()), $2, $3, $4, $5::run_status, $6, COALESCE($7, '{}'::jsonb), COALESCE($8, '{}'::jsonb), COALESCE($9, '{}'::jsonb))
+                RETURNING
+                    id, project_id, name, description, status::text AS status, exit_code, error_message,
+                    parent_run_id, resume_token, tags, system_info, git_info,
+                    created_at, updated_at, started_at, finished_at, duration_seconds
+                "#,
+                &[
+                    &input.id,
+                    &input.project_id,
+                    &input.name,
+                    &input.description,
+                    &status,
+                    &input.parent_run_id,
+                    &input.tags,
+                    &input.system_info,
+                    &input.git_info,
+                ],
+            )
+            .await
+            .map_err(|e| {
+                if let Some(code) = e.code() {
+                    if *code == tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION {
+                        return PostgresError::NotFound(format!(
+                            "Project not found for run create: {}",
+                            input.project_id
+                        ));
+                    }
+                }
+                PostgresError::Database(format!("Failed to create run: {e}"))
+            })?;
+
+        map_run_row(&row)
     }
 
     /// Get a run by ID.
     #[instrument]
-    pub async fn get_by_id(_id: Uuid) -> Result<Run, PostgresError> {
-        Err(PostgresError::Config(
-            "Database connection not implemented".to_string(),
-        ))
+    pub async fn get_by_id(id: Uuid) -> Result<Run, PostgresError> {
+        let client = connect_client().await?;
+        let row = client
+            .query_opt(
+                r#"
+                SELECT
+                    id, project_id, name, description, status::text AS status, exit_code, error_message,
+                    parent_run_id, resume_token, tags, system_info, git_info,
+                    created_at, updated_at, started_at, finished_at, duration_seconds
+                FROM runs
+                WHERE id = $1 AND deleted_at IS NULL
+                "#,
+                &[&id],
+            )
+            .await
+            .map_err(|e| PostgresError::Database(format!("Failed to query run by id: {e}")))?;
+
+        row.ok_or_else(|| PostgresError::NotFound(format!("Run not found: {id}")))
+            .and_then(|r| map_run_row(&r))
     }
 
     /// List runs with filters.
     #[instrument(skip_all)]
-    pub async fn list(_filter: ListRunsFilter) -> Result<Vec<Run>, PostgresError> {
-        Err(PostgresError::Config(
-            "Database connection not implemented".to_string(),
-        ))
+    pub async fn list(filter: ListRunsFilter) -> Result<Vec<Run>, PostgresError> {
+        let client = connect_client().await?;
+        let mut sql = String::from(
+            r#"
+            SELECT
+                id, project_id, name, description, status::text AS status, exit_code, error_message,
+                parent_run_id, resume_token, tags, system_info, git_info,
+                created_at, updated_at, started_at, finished_at, duration_seconds
+            FROM runs
+            WHERE deleted_at IS NULL
+            "#,
+        );
+        let mut params: Vec<Box<dyn ToSql + Sync>> = Vec::new();
+
+        if let Some(project_id) = filter.project_id {
+            sql.push_str(&format!(" AND project_id = ${}", params.len() + 1));
+            params.push(Box::new(project_id));
+        }
+        if let Some(status) = filter.status {
+            sql.push_str(&format!(" AND status = ${}::run_status", params.len() + 1));
+            params.push(Box::new(status.to_string()));
+        }
+        if let Some(parent_run_id) = filter.parent_run_id {
+            sql.push_str(&format!(" AND parent_run_id = ${}", params.len() + 1));
+            params.push(Box::new(parent_run_id));
+        }
+        if let Some(tags) = filter.tags {
+            sql.push_str(&format!(" AND tags @> ${}::jsonb", params.len() + 1));
+            params.push(Box::new(tags));
+        }
+
+        sql.push_str(" ORDER BY created_at DESC");
+
+        if let Some(limit) = filter.limit {
+            sql.push_str(&format!(" LIMIT ${}", params.len() + 1));
+            params.push(Box::new(limit));
+        }
+        if let Some(offset) = filter.offset {
+            sql.push_str(&format!(" OFFSET ${}", params.len() + 1));
+            params.push(Box::new(offset));
+        }
+
+        let params_refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p.as_ref()).collect();
+        let rows = client
+            .query(sql.as_str(), params_refs.as_slice())
+            .await
+            .map_err(|e| PostgresError::Database(format!("Failed to list runs: {e}")))?;
+
+        rows.iter().map(map_run_row).collect()
     }
 
     /// Update run status.
     #[instrument]
     pub async fn update_status(
-        _id: Uuid,
-        _status: RunStatus,
-        _error_message: Option<String>,
+        id: Uuid,
+        status: RunStatus,
+        error_message: Option<String>,
     ) -> Result<Run, PostgresError> {
-        Err(PostgresError::Config(
-            "Database connection not implemented".to_string(),
-        ))
+        let client = connect_client().await?;
+        let status_text = status.to_string();
+        let row = client
+            .query_opt(
+                r#"
+                UPDATE runs
+                SET status = $2::run_status, error_message = $3
+                WHERE id = $1 AND deleted_at IS NULL
+                RETURNING
+                    id, project_id, name, description, status::text AS status, exit_code, error_message,
+                    parent_run_id, resume_token, tags, system_info, git_info,
+                    created_at, updated_at, started_at, finished_at, duration_seconds
+                "#,
+                &[&id, &status_text, &error_message],
+            )
+            .await
+            .map_err(|e| PostgresError::Database(format!("Failed to update run status: {e}")))?;
+
+        row.ok_or_else(|| PostgresError::NotFound(format!("Run not found: {id}")))
+            .and_then(|r| map_run_row(&r))
     }
 
     /// Update run tags.
     #[instrument]
-    pub async fn update_tags(_id: Uuid, _tags: serde_json::Value) -> Result<Run, PostgresError> {
-        Err(PostgresError::Config(
-            "Database connection not implemented".to_string(),
-        ))
+    pub async fn update_tags(id: Uuid, tags: serde_json::Value) -> Result<Run, PostgresError> {
+        let client = connect_client().await?;
+        let row = client
+            .query_opt(
+                r#"
+                UPDATE runs
+                SET tags = $2
+                WHERE id = $1 AND deleted_at IS NULL
+                RETURNING
+                    id, project_id, name, description, status::text AS status, exit_code, error_message,
+                    parent_run_id, resume_token, tags, system_info, git_info,
+                    created_at, updated_at, started_at, finished_at, duration_seconds
+                "#,
+                &[&id, &tags],
+            )
+            .await
+            .map_err(|e| PostgresError::Database(format!("Failed to update run tags: {e}")))?;
+
+        row.ok_or_else(|| PostgresError::NotFound(format!("Run not found: {id}")))
+            .and_then(|r| map_run_row(&r))
     }
 }
 
@@ -492,10 +782,24 @@ impl ParameterRepository {
 
     /// Get parameters for a run.
     #[instrument]
-    pub async fn get_for_run(_run_id: Uuid) -> Result<Vec<Parameter>, PostgresError> {
-        Err(PostgresError::Config(
-            "Database connection not implemented".to_string(),
-        ))
+    pub async fn get_for_run(run_id: Uuid) -> Result<Vec<Parameter>, PostgresError> {
+        let client = connect_client().await?;
+        let rows = client
+            .query(
+                r#"
+                SELECT id, run_id, name, value_string, value_float, value_int, value_bool, value_json, value_type, created_at
+                FROM parameters
+                WHERE run_id = $1
+                ORDER BY name ASC
+                "#,
+                &[&run_id],
+            )
+            .await
+            .map_err(|e| {
+                PostgresError::Database(format!("Failed to query parameters for run: {e}"))
+            })?;
+
+        Ok(rows.iter().map(map_parameter_row).collect())
     }
 }
 
@@ -505,26 +809,100 @@ pub struct ArtifactRepository;
 impl ArtifactRepository {
     /// Create a new artifact.
     #[instrument(skip_all)]
-    pub async fn create(_input: CreateArtifactInput) -> Result<Artifact, PostgresError> {
-        Err(PostgresError::Config(
-            "Database connection not implemented".to_string(),
-        ))
+    pub async fn create(input: CreateArtifactInput) -> Result<Artifact, PostgresError> {
+        let client = connect_client().await?;
+        let artifact_type = input.artifact_type.to_string();
+        let row = client
+            .query_one(
+                r#"
+                INSERT INTO artifacts
+                    (run_id, name, type, description, storage_path, storage_type, size_bytes, mime_type, checksum_md5, checksum_sha256, metadata)
+                VALUES
+                    ($1, $2, $3::artifact_type, $4, $5, COALESCE($6, 'minio'), $7, $8, $9, $10, COALESCE($11, '{}'::jsonb))
+                RETURNING
+                    id, run_id, name, type::text AS artifact_type, description, storage_path, storage_type,
+                    size_bytes, mime_type, checksum_md5, checksum_sha256, metadata, created_at
+                "#,
+                &[
+                    &input.run_id,
+                    &input.name,
+                    &artifact_type,
+                    &input.description,
+                    &input.storage_path,
+                    &input.storage_type,
+                    &input.size_bytes,
+                    &input.mime_type,
+                    &input.checksum_md5,
+                    &input.checksum_sha256,
+                    &input.metadata,
+                ],
+            )
+            .await
+            .map_err(|e| {
+                if let Some(code) = e.code() {
+                    if *code == tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION {
+                        return PostgresError::NotFound(format!(
+                            "Run not found for artifact create: {}",
+                            input.run_id
+                        ));
+                    }
+                    if *code == tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                        return PostgresError::Validation(format!(
+                            "Artifact '{}' already exists for run '{}'",
+                            input.name, input.run_id
+                        ));
+                    }
+                }
+                PostgresError::Database(format!("Failed to create artifact: {e}"))
+            })?;
+
+        map_artifact_row(&row)
     }
 
     /// Get an artifact by ID.
     #[instrument]
-    pub async fn get_by_id(_id: Uuid) -> Result<Artifact, PostgresError> {
-        Err(PostgresError::Config(
-            "Database connection not implemented".to_string(),
-        ))
+    pub async fn get_by_id(id: Uuid) -> Result<Artifact, PostgresError> {
+        let client = connect_client().await?;
+        let row = client
+            .query_opt(
+                r#"
+                SELECT
+                    id, run_id, name, type::text AS artifact_type, description, storage_path, storage_type,
+                    size_bytes, mime_type, checksum_md5, checksum_sha256, metadata, created_at
+                FROM artifacts
+                WHERE id = $1
+                "#,
+                &[&id],
+            )
+            .await
+            .map_err(|e| PostgresError::Database(format!("Failed to query artifact by id: {e}")))?;
+
+        row.ok_or_else(|| PostgresError::NotFound(format!("Artifact not found: {id}")))
+            .and_then(|r| map_artifact_row(&r))
     }
 
     /// Get artifacts for a run.
     #[instrument]
-    pub async fn get_for_run(_run_id: Uuid) -> Result<Vec<Artifact>, PostgresError> {
-        Err(PostgresError::Config(
-            "Database connection not implemented".to_string(),
-        ))
+    pub async fn get_for_run(run_id: Uuid) -> Result<Vec<Artifact>, PostgresError> {
+        let client = connect_client().await?;
+        let rows = client
+            .query(
+                r#"
+                SELECT
+                    id, run_id, name, type::text AS artifact_type, description, storage_path, storage_type,
+                    size_bytes, mime_type, checksum_md5, checksum_sha256, metadata, created_at
+                FROM artifacts
+                WHERE run_id = $1
+                ORDER BY created_at DESC
+                "#,
+                &[&run_id],
+            )
+            .await
+            .map_err(|e| {
+                PostgresError::Database(format!("Failed to query artifacts for run: {e}"))
+            })?;
+
+        rows.iter().map(map_artifact_row).collect()
     }
 }
 
@@ -567,5 +945,23 @@ mod tests {
         };
 
         assert_eq!(param.value_as_string(), "0.001");
+    }
+
+    #[test]
+    fn test_parse_run_status_values() {
+        assert_eq!(
+            parse_run_status("running").expect("running should parse"),
+            RunStatus::Running
+        );
+        assert!(parse_run_status("unknown-status").is_err());
+    }
+
+    #[test]
+    fn test_parse_artifact_type_values() {
+        assert_eq!(
+            parse_artifact_type("model").expect("model should parse"),
+            ArtifactType::Model
+        );
+        assert!(parse_artifact_type("unknown-type").is_err());
     }
 }

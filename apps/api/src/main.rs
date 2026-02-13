@@ -52,7 +52,11 @@ use services::{
     CardinalityTracker, IdempotencyResult, IdempotencyStore, IngestServiceImpl, MetricPayload,
     ParamPayload, TagPayload, compute_payload_hash, ingest::InMemoryStore,
 };
-use storage::{MetricRow, SqliteStore};
+use storage::{
+    AuthSessionAdminRow, CreateProjectInput, CreateRunInput, MetricRow, ProjectRepository,
+    ProjectRow, RunRepository, RunRow, RunStatus as PostgresRunStatus, SqliteStore,
+    UserProjectMembershipRow, UserRow,
+};
 
 /// Application state shared across handlers.
 #[derive(Clone)]
@@ -143,20 +147,34 @@ fn auth_mode_label(auth: &AuthContext) -> &'static str {
     }
 }
 
+fn auth_user_id(auth: &AuthContext) -> Option<String> {
+    if auth.is_dev_mode || !auth.is_ui_jwt() {
+        return None;
+    }
+    auth.api_key
+        .id
+        .split_once(':')
+        .map(|(_, value)| value.to_string())
+}
+
 fn audit_actor_ids(auth: &AuthContext) -> (Option<String>, Option<String>) {
     if auth.is_dev_mode {
         return (None, None);
     }
 
     if auth.is_ui_jwt() {
-        let user_id = auth
-            .api_key
-            .id
-            .split_once(':')
-            .map(|(_, value)| value.to_string());
-        (user_id, None)
+        (auth_user_id(auth), None)
     } else {
         (None, Some(auth.api_key.id.clone()))
+    }
+}
+
+fn is_unique_project_name_error(err: &storage::SqliteError) -> bool {
+    match err {
+        storage::SqliteError::Database(db_err) => db_err
+            .to_string()
+            .contains("UNIQUE constraint failed: projects.name"),
+        _ => false,
     }
 }
 
@@ -276,6 +294,241 @@ async fn require_endpoint_access(
     }
 
     Ok(())
+}
+
+async fn require_platform_admin_access(
+    state: &AppState,
+    auth: &AuthContext,
+    action: &str,
+    resource_type: &str,
+    resource_id: Option<&str>,
+) -> Result<(), (StatusCode, String)> {
+    require_endpoint_access(
+        state,
+        auth,
+        EndpointRbacTier::Admin,
+        None,
+        None,
+        action,
+        resource_type,
+        resource_id,
+    )
+    .await?;
+
+    if auth.is_global() {
+        return Ok(());
+    }
+
+    emit_audit_event(
+        state,
+        Some(auth),
+        None,
+        None,
+        action,
+        resource_type,
+        resource_id,
+        "denied",
+        serde_json::json!({
+            "reason": "platform_admin_required",
+            "auth_mode": auth_mode_label(auth),
+        }),
+    )
+    .await;
+
+    Err((
+        StatusCode::FORBIDDEN,
+        "Platform admin access required.".to_string(),
+    ))
+}
+
+fn require_ui_run_owner(auth: &AuthContext, run: &RunRow) -> Result<(), (StatusCode, String)> {
+    if auth.is_dev_mode || !auth.is_ui_jwt() {
+        return Ok(());
+    }
+
+    let user_id = auth_user_id(auth).ok_or((
+        StatusCode::FORBIDDEN,
+        "Unable to resolve user identity for run authorization.".to_string(),
+    ))?;
+
+    if let Some(owner_user_id) = run.created_by_user_id.as_deref() {
+        if owner_user_id != user_id {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Access denied: this user cannot access that run.".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn require_api_key_run_owner_for_mutation(
+    auth: &AuthContext,
+    run: &RunRow,
+    action: &str,
+) -> Result<(), (StatusCode, String)> {
+    if auth.is_dev_mode || auth.is_ui_jwt() || auth.require_scope("admin").is_ok() {
+        return Ok(());
+    }
+
+    if let Some(owner_key_id) = run.created_by_key_id.as_deref() {
+        if owner_key_id != auth.api_key.id {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!("Access denied: this API key can only {action} runs it created."),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn postgres_metadata_shadow_writes_enabled() -> bool {
+    env_flag_default("MLRUNX_POSTGRES_METADATA_SHADOW_WRITES_ENABLED", false)
+}
+
+async fn maybe_shadow_write_project_to_postgres(project: &ProjectRow) {
+    if !postgres_metadata_shadow_writes_enabled() {
+        return;
+    }
+
+    let project_uuid = match uuid::Uuid::parse_str(&project.id) {
+        Ok(value) => value,
+        Err(err) => {
+            warn!(
+                project_id = %project.id,
+                error = %err,
+                "Skipped PostgreSQL shadow write for project with non-UUID id"
+            );
+            return;
+        }
+    };
+
+    let result = ProjectRepository::create(CreateProjectInput {
+        id: Some(project_uuid),
+        name: project.name.clone(),
+        description: project.description.clone(),
+        owner_id: None,
+        settings: None,
+    })
+    .await;
+
+    if let Err(err) = result {
+        warn!(
+            project_id = %project.id,
+            error = %err,
+            "PostgreSQL project shadow write failed"
+        );
+    }
+}
+
+async fn maybe_shadow_write_run_to_postgres(
+    run_id: &str,
+    project_id: &str,
+    name: Option<&str>,
+    tags: Option<&std::collections::HashMap<String, String>>,
+) {
+    if !postgres_metadata_shadow_writes_enabled() {
+        return;
+    }
+
+    let run_uuid = match uuid::Uuid::parse_str(run_id) {
+        Ok(value) => value,
+        Err(err) => {
+            warn!(
+                run_id = %run_id,
+                error = %err,
+                "Skipped PostgreSQL run shadow write because run_id is not UUID"
+            );
+            return;
+        }
+    };
+    let project_uuid = match uuid::Uuid::parse_str(project_id) {
+        Ok(value) => value,
+        Err(err) => {
+            warn!(
+                project_id = %project_id,
+                error = %err,
+                "Skipped PostgreSQL run shadow write because project_id is not UUID"
+            );
+            return;
+        }
+    };
+
+    let tags_json = tags
+        .map(|t| serde_json::to_value(t).unwrap_or_else(|_| serde_json::json!({})))
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let result = RunRepository::create(CreateRunInput {
+        id: Some(run_uuid),
+        project_id: project_uuid,
+        name: name.map(ToOwned::to_owned),
+        description: None,
+        parent_run_id: None,
+        tags: Some(tags_json),
+        system_info: None,
+        git_info: None,
+    })
+    .await;
+
+    if let Err(err) = result {
+        warn!(
+            run_id = %run_id,
+            project_id = %project_id,
+            error = %err,
+            "PostgreSQL run shadow write failed"
+        );
+    }
+}
+
+fn postgres_run_status_from_http(status: &str) -> Option<PostgresRunStatus> {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "pending" => Some(PostgresRunStatus::Pending),
+        "running" => Some(PostgresRunStatus::Running),
+        "finished" => Some(PostgresRunStatus::Finished),
+        "failed" => Some(PostgresRunStatus::Failed),
+        "killed" => Some(PostgresRunStatus::Killed),
+        _ => None,
+    }
+}
+
+async fn maybe_shadow_finish_run_in_postgres(run_id: &str, status: &str) {
+    if !postgres_metadata_shadow_writes_enabled() {
+        return;
+    }
+
+    let run_uuid = match uuid::Uuid::parse_str(run_id) {
+        Ok(value) => value,
+        Err(err) => {
+            warn!(
+                run_id = %run_id,
+                error = %err,
+                "Skipped PostgreSQL run status shadow write because run_id is not UUID"
+            );
+            return;
+        }
+    };
+    let status_value = match postgres_run_status_from_http(status) {
+        Some(value) => value,
+        None => {
+            warn!(
+                run_id = %run_id,
+                status = %status,
+                "Skipped PostgreSQL run status shadow write for unknown status"
+            );
+            return;
+        }
+    };
+
+    if let Err(err) = RunRepository::update_status(run_uuid, status_value, None).await {
+        warn!(
+            run_id = %run_id,
+            status = %status,
+            error = %err,
+            "PostgreSQL run status shadow write failed"
+        );
+    }
 }
 
 fn extract_cookie(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
@@ -532,6 +785,597 @@ struct InitRunHttpResponse {
     offline: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateProjectRequest {
+    name: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectResponse {
+    project_id: String,
+    name: String,
+    description: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ListProjectsResponse {
+    projects: Vec<ProjectResponse>,
+}
+
+fn project_response_from_row(row: ProjectRow) -> ProjectResponse {
+    ProjectResponse {
+        project_id: row.id,
+        name: row.name,
+        description: row.description,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
+async fn http_list_projects(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<ListProjectsResponse>, (StatusCode, String)> {
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Read,
+        None,
+        None,
+        "projects.list",
+        "project",
+        None,
+    )
+    .await?;
+
+    let rows = if auth.is_global() && !auth.is_ui_jwt() {
+        state
+            .sqlite_store
+            .list_projects()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else if let Some(allowed_projects) = auth.allowed_project_ids() {
+        let project_ids: Vec<String> = allowed_projects.iter().cloned().collect();
+        state
+            .sqlite_store
+            .list_projects_by_ids(&project_ids)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else if let Some(project_id) = auth.project_id() {
+        state
+            .sqlite_store
+            .list_projects_by_ids(&[project_id.to_string()])
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        Vec::new()
+    };
+
+    let projects = rows.into_iter().map(project_response_from_row).collect();
+    Ok(Json(ListProjectsResponse { projects }))
+}
+
+async fn http_create_project(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<CreateProjectRequest>,
+) -> Result<Json<ProjectResponse>, (StatusCode, String)> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Project name is required.".to_string(),
+        ));
+    }
+
+    if auth.is_ui_jwt() {
+        auth.require_scope("write")?;
+        let user_id = auth_user_id(&auth).ok_or((
+            StatusCode::FORBIDDEN,
+            "Unable to resolve user identity for project creation.".to_string(),
+        ))?;
+
+        let row = state
+            .sqlite_store
+            .create_project(name, req.description.as_deref())
+            .await
+            .map_err(|e| {
+                if is_unique_project_name_error(&e) {
+                    (
+                        StatusCode::CONFLICT,
+                        format!("Project '{}' already exists.", name),
+                    )
+                } else {
+                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                }
+            })?;
+
+        state
+            .sqlite_store
+            .grant_project_membership(&row.id, &user_id, "owner", Some(&user_id))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        maybe_shadow_write_project_to_postgres(&row).await;
+
+        emit_audit_event(
+            &state,
+            Some(&auth),
+            Some(&row.id),
+            None,
+            "project.create",
+            "project",
+            Some(&row.id),
+            "success",
+            serde_json::json!({
+                "name": row.name,
+                "auth_mode": auth_mode_label(&auth),
+            }),
+        )
+        .await;
+
+        return Ok(Json(project_response_from_row(row)));
+    }
+
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Admin,
+        None,
+        None,
+        "project.create",
+        "project",
+        None,
+    )
+    .await?;
+
+    if !auth.is_global() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Project creation requires a global admin key or UI session.".to_string(),
+        ));
+    }
+
+    let row = state
+        .sqlite_store
+        .create_project(name, req.description.as_deref())
+        .await
+        .map_err(|e| {
+            if is_unique_project_name_error(&e) {
+                (
+                    StatusCode::CONFLICT,
+                    format!("Project '{}' already exists.", name),
+                )
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
+        })?;
+    maybe_shadow_write_project_to_postgres(&row).await;
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        Some(&row.id),
+        None,
+        "project.create",
+        "project",
+        Some(&row.id),
+        "success",
+        serde_json::json!({
+            "name": row.name,
+            "auth_mode": auth_mode_label(&auth),
+        }),
+    )
+    .await;
+
+    Ok(Json(project_response_from_row(row)))
+}
+
+#[derive(Debug, Serialize)]
+struct AdminUserResponse {
+    user_id: String,
+    email: Option<String>,
+    display_name: Option<String>,
+    auth_provider: String,
+    external_subject: Option<String>,
+    is_service_account: bool,
+    disabled: bool,
+    active_project_count: i64,
+    active_session_count: i64,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminListUsersResponse {
+    users: Vec<AdminUserResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminMembershipsQuery {
+    #[serde(default)]
+    include_revoked: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminUserMembershipResponse {
+    project_id: String,
+    project_name: String,
+    role: String,
+    granted_by_user_id: Option<String>,
+    created_at: String,
+    revoked_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminListUserMembershipsResponse {
+    user_id: String,
+    memberships: Vec<AdminUserMembershipResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminSessionsQuery {
+    user_id: Option<String>,
+    #[serde(default)]
+    include_revoked: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminSessionResponse {
+    session_id: String,
+    user_id: String,
+    created_at: String,
+    last_seen_at: Option<String>,
+    expires_at: String,
+    revoked_at: Option<String>,
+    client_ip: Option<String>,
+    user_agent: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminListSessionsResponse {
+    sessions: Vec<AdminSessionResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminMutationResponse {
+    status: String,
+}
+
+fn admin_user_response_from_row(row: UserRow) -> AdminUserResponse {
+    AdminUserResponse {
+        user_id: row.id,
+        email: row.email,
+        display_name: row.display_name,
+        auth_provider: row.auth_provider,
+        external_subject: row.external_subject,
+        is_service_account: row.is_service_account,
+        disabled: row.disabled_at.is_some(),
+        active_project_count: row.active_project_count,
+        active_session_count: row.active_session_count,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
+fn admin_membership_response_from_row(
+    row: UserProjectMembershipRow,
+) -> AdminUserMembershipResponse {
+    AdminUserMembershipResponse {
+        project_id: row.project_id,
+        project_name: row.project_name,
+        role: row.role,
+        granted_by_user_id: row.granted_by_user_id,
+        created_at: row.created_at,
+        revoked_at: row.revoked_at,
+    }
+}
+
+fn admin_session_response_from_row(row: AuthSessionAdminRow) -> AdminSessionResponse {
+    AdminSessionResponse {
+        session_id: row.id,
+        user_id: row.user_id,
+        created_at: row.created_at,
+        last_seen_at: row.last_seen_at,
+        expires_at: row.expires_at,
+        revoked_at: row.revoked_at,
+        client_ip: row.client_ip,
+        user_agent: row.user_agent,
+    }
+}
+
+async fn http_admin_list_users(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<AdminListUsersResponse>, (StatusCode, String)> {
+    require_platform_admin_access(&state, &auth, "admin.users.list", "user", None).await?;
+
+    let users = state
+        .sqlite_store
+        .list_users()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .map(admin_user_response_from_row)
+        .collect();
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        None,
+        None,
+        "admin.users.list",
+        "user",
+        None,
+        "success",
+        serde_json::json!({}),
+    )
+    .await;
+
+    Ok(Json(AdminListUsersResponse { users }))
+}
+
+async fn http_admin_list_user_memberships(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(user_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<AdminMembershipsQuery>,
+) -> Result<Json<AdminListUserMembershipsResponse>, (StatusCode, String)> {
+    require_platform_admin_access(
+        &state,
+        &auth,
+        "admin.user.memberships.list",
+        "user",
+        Some(&user_id),
+    )
+    .await?;
+
+    let user_exists = state
+        .sqlite_store
+        .get_user_by_id(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_some();
+    if !user_exists {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("User not found: '{user_id}'"),
+        ));
+    }
+
+    let memberships = state
+        .sqlite_store
+        .list_user_project_memberships(&user_id, query.include_revoked)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .map(admin_membership_response_from_row)
+        .collect();
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        None,
+        None,
+        "admin.user.memberships.list",
+        "user",
+        Some(&user_id),
+        "success",
+        serde_json::json!({
+            "include_revoked": query.include_revoked,
+        }),
+    )
+    .await;
+
+    Ok(Json(AdminListUserMembershipsResponse {
+        user_id,
+        memberships,
+    }))
+}
+
+async fn http_admin_disable_user(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(user_id): axum::extract::Path<String>,
+) -> Result<Json<AdminUserResponse>, (StatusCode, String)> {
+    require_platform_admin_access(&state, &auth, "admin.user.disable", "user", Some(&user_id))
+        .await?;
+
+    let user_exists = state
+        .sqlite_store
+        .get_user_by_id(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_some();
+    if !user_exists {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("User not found: '{user_id}'"),
+        ));
+    }
+
+    state
+        .sqlite_store
+        .set_user_disabled(&user_id, true)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let user = state
+        .sqlite_store
+        .get_user_by_id(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("User not found: '{user_id}'"),
+        ))?;
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        None,
+        None,
+        "admin.user.disable",
+        "user",
+        Some(&user_id),
+        "success",
+        serde_json::json!({}),
+    )
+    .await;
+
+    Ok(Json(admin_user_response_from_row(user)))
+}
+
+async fn http_admin_enable_user(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(user_id): axum::extract::Path<String>,
+) -> Result<Json<AdminUserResponse>, (StatusCode, String)> {
+    require_platform_admin_access(&state, &auth, "admin.user.enable", "user", Some(&user_id))
+        .await?;
+
+    let user_exists = state
+        .sqlite_store
+        .get_user_by_id(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_some();
+    if !user_exists {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("User not found: '{user_id}'"),
+        ));
+    }
+
+    state
+        .sqlite_store
+        .set_user_disabled(&user_id, false)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let user = state
+        .sqlite_store
+        .get_user_by_id(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("User not found: '{user_id}'"),
+        ))?;
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        None,
+        None,
+        "admin.user.enable",
+        "user",
+        Some(&user_id),
+        "success",
+        serde_json::json!({}),
+    )
+    .await;
+
+    Ok(Json(admin_user_response_from_row(user)))
+}
+
+async fn http_admin_list_sessions(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Query(query): axum::extract::Query<AdminSessionsQuery>,
+) -> Result<Json<AdminListSessionsResponse>, (StatusCode, String)> {
+    require_platform_admin_access(&state, &auth, "admin.sessions.list", "auth_session", None)
+        .await?;
+
+    if let Some(ref user_id) = query.user_id {
+        let user_exists = state
+            .sqlite_store
+            .get_user_by_id(user_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .is_some();
+        if !user_exists {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("User not found: '{user_id}'"),
+            ));
+        }
+    }
+
+    let sessions = state
+        .sqlite_store
+        .list_auth_sessions_for_admin(query.user_id.as_deref(), query.include_revoked)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .map(admin_session_response_from_row)
+        .collect();
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        None,
+        None,
+        "admin.sessions.list",
+        "auth_session",
+        None,
+        "success",
+        serde_json::json!({
+            "user_id": query.user_id,
+            "include_revoked": query.include_revoked,
+        }),
+    )
+    .await;
+
+    Ok(Json(AdminListSessionsResponse { sessions }))
+}
+
+async fn http_admin_revoke_session(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<AdminMutationResponse>, (StatusCode, String)> {
+    require_platform_admin_access(
+        &state,
+        &auth,
+        "admin.session.revoke",
+        "auth_session",
+        Some(&session_id),
+    )
+    .await?;
+
+    let revoked = state
+        .sqlite_store
+        .revoke_auth_session_by_id(&session_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !revoked {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("Session not found or already revoked: '{session_id}'"),
+        ));
+    }
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        None,
+        None,
+        "admin.session.revoke",
+        "auth_session",
+        Some(&session_id),
+        "success",
+        serde_json::json!({}),
+    )
+    .await;
+
+    Ok(Json(AdminMutationResponse {
+        status: "ok".to_string(),
+    }))
+}
+
 /// Initialize a run via HTTP (for SDK HTTP transport).
 async fn http_init_run(
     State(state): State<AppState>,
@@ -549,19 +1393,21 @@ async fn http_init_run(
         .await
         .unwrap_or(false)
     {
-        // Verify the caller can access this existing run's project with write scope
-        if let Ok(existing_project) = state.sqlite_store.get_run_project_id(&run_id).await {
+        // Verify the caller can access this existing run and mutate it.
+        if let Ok(existing_run) = state.sqlite_store.get_run(&run_id).await {
             require_endpoint_access(
                 &state,
                 &auth,
                 EndpointRbacTier::Write,
-                Some(&existing_project),
+                Some(&existing_run.project_id),
                 Some(&run_id),
                 "run.init",
                 "run",
                 Some(&run_id),
             )
             .await?;
+            require_ui_run_owner(&auth, &existing_run)?;
+            require_api_key_run_owner_for_mutation(&auth, &existing_run, "reinitialize")?;
         }
         return Ok(Json(InitRunHttpResponse {
             run_id,
@@ -569,75 +1415,38 @@ async fn http_init_run(
         }));
     }
 
-    // Resolve project identity (prefer explicit project_id).
-    let (project_id, resolved_project_name) = if let Some(ref project_id) = req.project_id {
-        let name = state
-            .sqlite_store
-            .get_project_name_by_id(project_id)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    format!("Project not found: '{project_id}'"),
-                )
-            })?;
-
-        if let Some(ref project_name) = req.project {
-            if project_name != &name {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "project_id '{project_id}' does not match project name '{project_name}'"
-                    ),
-                ));
-            }
+    // Phase 1: explicit project boundary.
+    // Run init must target an existing project_id; project creation is handled via /api/v1/projects.
+    let project_id = req.project_id.as_ref().ok_or((
+        StatusCode::BAD_REQUEST,
+        "project_id is required. Create a project first via POST /api/v1/projects.".to_string(),
+    ))?;
+    let resolved_project_name = state
+        .sqlite_store
+        .get_project_name_by_id(project_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Project not found: '{project_id}'"),
+            )
+        })?;
+    if let Some(ref project_name) = req.project {
+        if project_name != &resolved_project_name {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("project_id '{project_id}' does not match project name '{project_name}'"),
+            ));
         }
-
-        (project_id.clone(), Some(name))
-    } else if let Some(ref project_name) = req.project {
-        let looks_like_uuid = uuid::Uuid::parse_str(project_name).is_ok();
-        if looks_like_uuid {
-            if let Some(name) = state
-                .sqlite_store
-                .get_project_name_by_id(project_name)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            {
-                (project_name.clone(), Some(name))
-            } else {
-                warn!(
-                    project = %project_name,
-                    "Project looks like a UUID but no matching project_id was found; treating it as a project name"
-                );
-                let id = state
-                    .sqlite_store
-                    .get_or_create_project(project_name)
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                (id, Some(project_name.clone()))
-            }
-        } else {
-            let id = state
-                .sqlite_store
-                .get_or_create_project(project_name)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            (id, Some(project_name.clone()))
-        }
-    } else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "project or project_id is required.".to_string(),
-        ));
-    };
+    }
 
     // Enforce project scope and write permission
     require_endpoint_access(
         &state,
         &auth,
         EndpointRbacTier::Write,
-        Some(&project_id),
+        Some(project_id),
         Some(&run_id),
         "run.init",
         "run",
@@ -645,10 +1454,41 @@ async fn http_init_run(
     )
     .await?;
 
+    let mut created_by_user_id = None;
+    let mut created_by_key_id = None;
+    if auth.is_ui_jwt() {
+        created_by_user_id = auth_user_id(&auth);
+    } else if !auth.is_dev_mode {
+        created_by_key_id = Some(auth.api_key.id.clone());
+        match state
+            .sqlite_store
+            .get_api_key_by_hash(&auth.api_key.key_hash)
+            .await
+        {
+            Ok(Some(key_row)) => {
+                created_by_user_id = key_row.created_by_user_id;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    key_id = %auth.api_key.id,
+                    "Failed to resolve API key owner during run initialization"
+                );
+            }
+        }
+    }
+
     // Create run in SQLite
     state
         .sqlite_store
-        .create_run(&run_id, &project_id, req.name.as_deref())
+        .create_run(
+            &run_id,
+            project_id,
+            req.name.as_deref(),
+            created_by_key_id.as_deref(),
+            created_by_user_id.as_deref(),
+        )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -662,11 +1502,13 @@ async fn http_init_run(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
+    maybe_shadow_write_run_to_postgres(&run_id, project_id, req.name.as_deref(), req.tags.as_ref())
+        .await;
 
     info!(
         run_id = %run_id,
         project_id = %project_id,
-        project_name = ?resolved_project_name,
+        project_name = %resolved_project_name,
         "HTTP: Initialized run (SQLite)"
     );
 
@@ -680,7 +1522,9 @@ async fn http_init_run(
         Some(&run_id),
         "success",
         serde_json::json!({
-            "project_name": req.project,
+            "project_name": resolved_project_name,
+            "project_id": project_id,
+            "created_by_user_id": created_by_user_id,
             "source": "http_init_run",
         }),
     )
@@ -755,9 +1599,9 @@ async fn http_ingest_batch(
     Json(req): Json<IngestBatchHttpRequest>,
 ) -> Result<Json<IngestBatchHttpResponse>, (StatusCode, String)> {
     // Resolve run project first and fail closed when the run does not exist.
-    let run_project = state
+    let run = state
         .sqlite_store
-        .get_run_project_id(&req.run_id)
+        .get_run(&req.run_id)
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
@@ -769,13 +1613,15 @@ async fn http_ingest_batch(
         &state,
         &auth,
         EndpointRbacTier::Write,
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&req.run_id),
         "run.ingest",
         "run",
         Some(&req.run_id),
     )
     .await?;
+    require_ui_run_owner(&auth, &run)?;
+    require_api_key_run_owner_for_mutation(&auth, &run, "ingest to")?;
     // Generate batch_id if not provided
     let batch_id = req
         .batch_id
@@ -819,7 +1665,7 @@ async fn http_ingest_batch(
     let param_count = req.params.len();
     let tag_count = req.tags.len();
 
-    let project_id = run_project;
+    let project_id = run.project_id.clone();
 
     let idempotency_result = state
         .idempotency_store
@@ -1045,22 +1891,27 @@ async fn http_finish_run(
     Json(req): Json<FinishRunHttpRequest>,
 ) -> Result<Json<FinishRunHttpResponse>, (StatusCode, String)> {
     // Verify the caller can access the run's project and has write scope
-    let run_project = state
+    let run = state
         .sqlite_store
-        .get_run_project_id(&run_id)
+        .get_run(&run_id)
         .await
-        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+        .map_err(|e| match e {
+            storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
     require_endpoint_access(
         &state,
         &auth,
         EndpointRbacTier::Write,
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "run.finish",
         "run",
         Some(&run_id),
     )
     .await?;
+    require_ui_run_owner(&auth, &run)?;
+    require_api_key_run_owner_for_mutation(&auth, &run, "finish")?;
 
     // Update in SQLite
     state
@@ -1068,13 +1919,14 @@ async fn http_finish_run(
         .finish_run(&run_id, &req.status)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    maybe_shadow_finish_run_in_postgres(&run_id, &req.status).await;
 
     info!(run_id = %run_id, status = %req.status, "HTTP: Finished run (SQLite)");
 
     emit_audit_event(
         &state,
         Some(&auth),
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "run.finish",
         "run",
@@ -1103,10 +1955,11 @@ async fn http_delete_run(
     Extension(auth): Extension<AuthContext>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
 ) -> Result<Json<DeleteRunHttpResponse>, (StatusCode, String)> {
-    // Verify the caller can access the run's project and has admin scope
-    let run_project = state
+    // Verify the caller can access the run's project and has write scope.
+    // Ownership checks below prevent cross-user run deletion.
+    let run = state
         .sqlite_store
-        .get_run_project_id(&run_id)
+        .get_run(&run_id)
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
@@ -1115,14 +1968,16 @@ async fn http_delete_run(
     require_endpoint_access(
         &state,
         &auth,
-        EndpointRbacTier::Admin,
-        Some(&run_project),
+        EndpointRbacTier::Write,
+        Some(&run.project_id),
         Some(&run_id),
         "run.delete",
         "run",
         Some(&run_id),
     )
     .await?;
+    require_ui_run_owner(&auth, &run)?;
+    require_api_key_run_owner_for_mutation(&auth, &run, "delete")?;
 
     // Delete from SQLite (cascades to metrics, tags, params, batches)
     state
@@ -1139,7 +1994,7 @@ async fn http_delete_run(
     emit_audit_event(
         &state,
         Some(&auth),
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "run.delete",
         "run",
@@ -1647,9 +2502,9 @@ async fn http_create_share_token(
     Json(req): Json<CreateShareRequest>,
 ) -> Result<Json<CreateShareResponse>, (StatusCode, String)> {
     // Verify the caller can access the run
-    let run_project = state
+    let run = state
         .sqlite_store
-        .get_run_project_id(&run_id)
+        .get_run(&run_id)
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
@@ -1659,13 +2514,15 @@ async fn http_create_share_token(
         &state,
         &auth,
         EndpointRbacTier::Read,
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "share_token.create",
         "run",
         Some(&run_id),
     )
     .await?;
+    require_ui_run_owner(&auth, &run)?;
+    require_api_key_run_owner_for_mutation(&auth, &run, "share")?;
 
     // Generate a short, URL-safe token
     let token = generate_share_token();
@@ -1692,7 +2549,7 @@ async fn http_create_share_token(
     emit_audit_event(
         &state,
         Some(&auth),
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "share_token.create",
         "share_token",
@@ -1837,22 +2694,27 @@ async fn http_revoke_share_token(
     axum::extract::Path((run_id, token)): axum::extract::Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // Verify the caller can access the run
-    let run_project = state
+    let run = state
         .sqlite_store
-        .get_run_project_id(&run_id)
+        .get_run(&run_id)
         .await
-        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+        .map_err(|e| match e {
+            storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
     require_endpoint_access(
         &state,
         &auth,
         EndpointRbacTier::Read,
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "share_token.revoke",
         "share_token",
         Some(&token),
     )
     .await?;
+    require_ui_run_owner(&auth, &run)?;
+    require_api_key_run_owner_for_mutation(&auth, &run, "revoke share links for")?;
 
     state
         .sqlite_store
@@ -1868,7 +2730,7 @@ async fn http_revoke_share_token(
     emit_audit_event(
         &state,
         Some(&auth),
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "share_token.revoke",
         "share_token",
@@ -2037,11 +2899,21 @@ async fn http_list_runs(
         }
     };
 
+    let owner_user_filter = if auth.is_ui_jwt() {
+        Some(auth_user_id(&auth).ok_or((
+            StatusCode::FORBIDDEN,
+            "Unable to resolve user identity for run listing.".to_string(),
+        ))?)
+    } else {
+        None
+    };
+
     // Query from SQLite
     let (sqlite_runs, total) = state
         .sqlite_store
         .list_runs(
             effective_project.as_deref(),
+            owner_user_filter.as_deref(),
             query.status.as_deref(),
             query.q.as_deref(),
             limit,
@@ -2136,6 +3008,7 @@ async fn http_get_run(
         Some(&run_id),
     )
     .await?;
+    require_ui_run_owner(&auth, &run)?;
 
     let tags = state
         .sqlite_store
@@ -2194,22 +3067,23 @@ async fn http_get_metrics(
     axum::extract::Query(query): axum::extract::Query<MetricsQuery>,
 ) -> Result<Json<services::MetricsQueryResponse>, (StatusCode, String)> {
     // Verify run exists, check project access, and require read scope
-    let run_project = state
+    let run = state
         .sqlite_store
-        .get_run_project_id(&run_id)
+        .get_run(&run_id)
         .await
         .map_err(|_| (StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)))?;
     require_endpoint_access(
         &state,
         &auth,
         EndpointRbacTier::Read,
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "run.metrics.read",
         "run",
         Some(&run_id),
     )
     .await?;
+    require_ui_run_owner(&auth, &run)?;
 
     // Parse metric names
     let names: Vec<String> = if query.names.is_empty() {
@@ -2354,6 +3228,7 @@ async fn http_compare_runs(
             Some(run_id),
         )
         .await?;
+        require_ui_run_owner(&auth, &run)?;
 
         let names = if req.metric_names.is_empty() {
             vec![]
@@ -2477,6 +3352,30 @@ fn build_http_router(state: AppState) -> Router {
         .route("/api/v1/runs", post(http_init_run))
         .route("/api/v1/ingest/batch", post(http_ingest_batch))
         .route("/api/v1/runs/{run_id}/finish", post(http_finish_run))
+        // Project management endpoints
+        .route(
+            "/api/v1/projects",
+            get(http_list_projects).post(http_create_project),
+        )
+        // Platform admin control-plane endpoints (global admin only)
+        .route("/api/v1/admin/users", get(http_admin_list_users))
+        .route(
+            "/api/v1/admin/users/{user_id}/memberships",
+            get(http_admin_list_user_memberships),
+        )
+        .route(
+            "/api/v1/admin/users/{user_id}/disable",
+            post(http_admin_disable_user),
+        )
+        .route(
+            "/api/v1/admin/users/{user_id}/enable",
+            post(http_admin_enable_user),
+        )
+        .route("/api/v1/admin/sessions", get(http_admin_list_sessions))
+        .route(
+            "/api/v1/admin/sessions/{session_id}/revoke",
+            post(http_admin_revoke_session),
+        )
         // Query API endpoints
         .route("/api/v1/runs", get(http_list_runs))
         .route(
@@ -2668,6 +3567,8 @@ mod tests {
     struct UiSessionHarness {
         app: Router,
         key_store: Arc<ApiKeyStore>,
+        sqlite_store: Arc<SqliteStore>,
+        user_id: String,
         primary_project_id: String,
         secondary_project_id: String,
         jwt_secret: String,
@@ -2730,7 +3631,7 @@ mod tests {
 
         let state = AppState {
             store,
-            sqlite_store,
+            sqlite_store: sqlite_store.clone(),
             key_store: key_store.clone(),
             idempotency_store,
             cardinality_tracker,
@@ -2739,6 +3640,8 @@ mod tests {
         UiSessionHarness {
             app: build_http_router(state),
             key_store,
+            sqlite_store,
+            user_id,
             primary_project_id,
             secondary_project_id,
             jwt_secret,
@@ -2927,6 +3830,51 @@ mod tests {
 
     #[tokio::test]
     async fn test_init_run_http() {
+        let store = Arc::new(InMemoryStore::new());
+        let sqlite_store = Arc::new(
+            SqliteStore::new(":memory:")
+                .await
+                .expect("Failed to create test SQLite store"),
+        );
+        let project_id = sqlite_store
+            .create_project("test-project", None)
+            .await
+            .expect("Failed to create test project")
+            .id;
+        let key_store = Arc::new(ApiKeyStore::new_dev_mode());
+        let idempotency_store = Arc::new(IdempotencyStore::new());
+        let cardinality_tracker = Arc::new(CardinalityTracker::default());
+        let state = AppState {
+            store,
+            sqlite_store,
+            key_store,
+            idempotency_store,
+            cardinality_tracker,
+        };
+        let app = build_http_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": project_id,
+                            "name": "test-run"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_init_run_http_requires_project_id() {
         let app = test_app().await;
         let response = app
             .oneshot(
@@ -2935,14 +3883,68 @@ mod tests {
                     .uri("/api/v1/runs")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"project": "test-project", "name": "test-run"}"#,
+                        serde_json::json!({
+                            "name": "missing-project-id"
+                        })
+                        .to_string(),
                     ))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_text(response).await;
+        assert!(body.contains("project_id is required"));
+    }
+
+    #[tokio::test]
+    async fn test_project_create_and_list_routes() {
+        let app = test_app().await;
+
+        let create_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "phase1-project",
+                            "description": "Project for route coverage"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_response.status(), StatusCode::OK);
+
+        let list_response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/projects")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_response.status(), StatusCode::OK);
+
+        let payload: serde_json::Value = serde_json::from_str(&response_text(list_response).await)
+            .expect("List projects response should be JSON");
+        let projects = payload["projects"]
+            .as_array()
+            .expect("projects should be an array");
+        assert!(
+            projects
+                .iter()
+                .any(|project| project["name"].as_str() == Some("phase1-project")),
+            "Created project should be returned by list endpoint"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2962,7 +3964,13 @@ mod tests {
             .await
             .unwrap();
         sqlite_store
-            .create_run("run-sqlite-only", &project_id, Some("sqlite-only-run"))
+            .create_run(
+                "run-sqlite-only",
+                &project_id,
+                Some("sqlite-only-run"),
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -3219,6 +4227,350 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ui_session_only_lists_owned_runs() {
+        let harness = ui_session_harness_with_role("owner").await;
+
+        let foreign_user_id = harness
+            .sqlite_store
+            .get_or_create_user_identity(
+                "jwt",
+                "foreign-subject",
+                Some("foreign@example.com"),
+                Some("Foreign User"),
+            )
+            .await
+            .expect("Failed to create foreign user");
+
+        harness
+            .sqlite_store
+            .create_run(
+                "run-owned-by-session-user",
+                &harness.primary_project_id,
+                Some("owned"),
+                None,
+                Some(&harness.user_id),
+            )
+            .await
+            .expect("Failed to create owned run");
+        harness
+            .sqlite_store
+            .create_run(
+                "run-owned-by-foreign-user",
+                &harness.primary_project_id,
+                Some("foreign"),
+                None,
+                Some(&foreign_user_id),
+            )
+            .await
+            .expect("Failed to create foreign run");
+
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/runs")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .body(Body::empty())
+                    .expect("Failed to build list runs request"),
+            )
+            .await
+            .expect("List runs request failed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: serde_json::Value = serde_json::from_str(&response_text(response).await)
+            .expect("List runs response should be JSON");
+        let runs = payload["runs"].as_array().expect("runs should be an array");
+
+        assert!(runs.iter().any(|run| {
+            run["run_id"]
+                .as_str()
+                .map_or(false, |id| id == "run-owned-by-session-user")
+        }));
+        assert!(!runs.iter().any(|run| {
+            run["run_id"]
+                .as_str()
+                .map_or(false, |id| id == "run-owned-by-foreign-user")
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_ui_session_cannot_read_foreign_owned_run() {
+        let harness = ui_session_harness_with_role("owner").await;
+
+        let foreign_user_id = harness
+            .sqlite_store
+            .get_or_create_user_identity(
+                "jwt",
+                "foreign-subject-2",
+                Some("foreign2@example.com"),
+                Some("Foreign User 2"),
+            )
+            .await
+            .expect("Failed to create foreign user");
+
+        harness
+            .sqlite_store
+            .create_run(
+                "run-foreign-read-test",
+                &harness.primary_project_id,
+                Some("foreign"),
+                None,
+                Some(&foreign_user_id),
+            )
+            .await
+            .expect("Failed to create foreign run");
+
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/runs/run-foreign-read-test")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .body(Body::empty())
+                    .expect("Failed to build get run request"),
+            )
+            .await
+            .expect("Get run request failed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_ui_editor_can_delete_own_run_without_admin_scope() {
+        let harness = ui_session_harness_with_role("editor").await;
+        harness
+            .sqlite_store
+            .create_run(
+                "run-editor-delete",
+                &harness.primary_project_id,
+                Some("editor-owned"),
+                None,
+                Some(&harness.user_id),
+            )
+            .await
+            .expect("Failed to create editor-owned run");
+
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/runs/run-editor-delete")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::empty())
+                    .expect("Failed to build delete run request"),
+            )
+            .await
+            .expect("Delete run request failed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_platform_admin_endpoints_require_global_admin_key() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let (scoped_admin_key, _) = harness
+            .key_store
+            .create_key(
+                Some(harness.primary_project_id.clone()),
+                Some("project-admin".to_string()),
+                vec!["admin".to_string()],
+            )
+            .await;
+        let (global_admin_key, _) = harness
+            .key_store
+            .create_key(
+                None,
+                Some("platform-admin".to_string()),
+                vec!["admin".to_string()],
+            )
+            .await;
+
+        let forbidden = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/admin/users")
+                    .header("x-api-key", scoped_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build admin users request"),
+            )
+            .await
+            .expect("Admin users request failed");
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let allowed = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/admin/users")
+                    .header("x-api-key", global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build admin users request"),
+            )
+            .await
+            .expect("Admin users request failed");
+        assert_eq!(allowed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_platform_admin_can_disable_and_enable_user() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let (global_admin_key, _) = harness
+            .key_store
+            .create_key(
+                None,
+                Some("platform-admin".to_string()),
+                vec!["admin".to_string()],
+            )
+            .await;
+
+        let disable_uri = format!("/api/v1/admin/users/{}/disable", harness.user_id);
+        let disable_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(disable_uri.as_str())
+                    .header("x-api-key", &global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build disable request"),
+            )
+            .await
+            .expect("Disable request failed");
+        assert_eq!(disable_response.status(), StatusCode::OK);
+        let disabled_payload: serde_json::Value =
+            serde_json::from_str(&response_text(disable_response).await)
+                .expect("Disable response should be JSON");
+        assert_eq!(disabled_payload["disabled"].as_bool(), Some(true));
+
+        let enable_uri = format!("/api/v1/admin/users/{}/enable", harness.user_id);
+        let enable_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(enable_uri.as_str())
+                    .header("x-api-key", &global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build enable request"),
+            )
+            .await
+            .expect("Enable request failed");
+        assert_eq!(enable_response.status(), StatusCode::OK);
+        let enabled_payload: serde_json::Value =
+            serde_json::from_str(&response_text(enable_response).await)
+                .expect("Enable response should be JSON");
+        assert_eq!(enabled_payload["disabled"].as_bool(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_platform_admin_can_list_and_revoke_ui_sessions() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let (global_admin_key, _) = harness
+            .key_store
+            .create_key(
+                None,
+                Some("platform-admin".to_string()),
+                vec!["admin".to_string()],
+            )
+            .await;
+
+        let sessions_uri = format!(
+            "/api/v1/admin/sessions?user_id={}&include_revoked=true",
+            harness.user_id
+        );
+        let list_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(sessions_uri.as_str())
+                    .header("x-api-key", &global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build list sessions request"),
+            )
+            .await
+            .expect("List sessions request failed");
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_payload: serde_json::Value =
+            serde_json::from_str(&response_text(list_response).await)
+                .expect("List sessions response should be JSON");
+        let sessions = list_payload["sessions"]
+            .as_array()
+            .expect("sessions should be an array");
+        let session_id = sessions
+            .iter()
+            .find_map(|session| {
+                if session["user_id"].as_str() == Some(harness.user_id.as_str())
+                    && session["revoked_at"].is_null()
+                {
+                    session["session_id"].as_str().map(|id| id.to_string())
+                } else {
+                    None
+                }
+            })
+            .expect("Expected at least one active session for test user");
+
+        let revoke_uri = format!("/api/v1/admin/sessions/{session_id}/revoke");
+        let revoke_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(revoke_uri.as_str())
+                    .header("x-api-key", &global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build revoke session request"),
+            )
+            .await
+            .expect("Revoke session request failed");
+        assert_eq!(revoke_response.status(), StatusCode::OK);
+
+        // The revoked session cookie should no longer authenticate.
+        let session_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/ui-auth/session")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .body(Body::empty())
+                    .expect("Failed to build session check request"),
+            )
+            .await
+            .expect("Session check request failed");
+        assert_eq!(session_response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn test_protected_run_init_requires_auth_when_not_in_dev_mode() {
         let app = test_app_with_auth_enabled().await;
         let response = app
@@ -3236,6 +4588,86 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_project_key_cannot_delete_run_owned_by_different_key() {
+        let store = Arc::new(InMemoryStore::new());
+        let sqlite_store = Arc::new(
+            SqliteStore::new(":memory:")
+                .await
+                .expect("Failed to create test SQLite store"),
+        );
+        let key_store = Arc::new(ApiKeyStore::new_with_sqlite(sqlite_store.clone()));
+        let idempotency_store = Arc::new(IdempotencyStore::new());
+        let cardinality_tracker = Arc::new(CardinalityTracker::default());
+
+        let project_id = sqlite_store
+            .create_project("api-key-delete-test", None)
+            .await
+            .expect("Failed to create project")
+            .id;
+        let (owner_raw_key, owner_key) = key_store
+            .create_key(
+                Some(project_id.clone()),
+                Some("owner-key".to_string()),
+                vec!["read".to_string(), "write".to_string()],
+            )
+            .await;
+        let (other_raw_key, _) = key_store
+            .create_key(
+                Some(project_id.clone()),
+                Some("other-key".to_string()),
+                vec!["read".to_string(), "write".to_string()],
+            )
+            .await;
+
+        sqlite_store
+            .create_run(
+                "run-owned-by-owner-key",
+                &project_id,
+                Some("owned"),
+                Some(&owner_key.id),
+                None,
+            )
+            .await
+            .expect("Failed to create owned run");
+
+        let state = AppState {
+            store,
+            sqlite_store,
+            key_store,
+            idempotency_store,
+            cardinality_tracker,
+        };
+        let app = build_http_router(state);
+
+        let forbidden = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/runs/run-owned-by-owner-key")
+                    .header("x-api-key", &other_raw_key)
+                    .body(Body::empty())
+                    .expect("Failed to build delete request"),
+            )
+            .await
+            .expect("Delete request failed");
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let allowed = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/runs/run-owned-by-owner-key")
+                    .header("x-api-key", &owner_raw_key)
+                    .body(Body::empty())
+                    .expect("Failed to build delete request"),
+            )
+            .await
+            .expect("Delete request failed");
+        assert_eq!(allowed.status(), StatusCode::OK);
     }
 
     #[tokio::test(flavor = "multi_thread")]

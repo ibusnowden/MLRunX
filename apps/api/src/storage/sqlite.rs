@@ -11,8 +11,9 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-const SQLITE_SCHEMA_VERSION: &str = "2026-02-12.1";
-const SQLITE_SCHEMA_DESCRIPTION: &str = "bootstrap schema with auth, audit, and share tables";
+const SQLITE_SCHEMA_VERSION: &str = "2026-02-13.1";
+const SQLITE_SCHEMA_DESCRIPTION: &str =
+    "adds explicit project APIs and run ownership metadata columns";
 
 /// Errors that can occur in SQLite operations.
 #[derive(Error, Debug)]
@@ -59,6 +60,27 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, SqliteError> {
+        let pragma_sql = format!("PRAGMA table_info({table})");
+        let mut stmt = conn.prepare(&pragma_sql)?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let columns: Result<Vec<_>, _> = rows.collect();
+        Ok(columns?.iter().any(|name| name == column))
+    }
+
+    fn ensure_table_column(
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        alter_sql: &str,
+    ) -> Result<(), SqliteError> {
+        if Self::table_has_column(conn, table, column)? {
+            return Ok(());
+        }
+        conn.execute(alter_sql, [])?;
+        Ok(())
+    }
+
     /// Create a new SQLite store, initializing the database schema.
     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self, SqliteError> {
         let conn = Connection::open(path)?;
@@ -110,16 +132,22 @@ impl SqliteStore {
                 project_id TEXT NOT NULL,
                 name TEXT,
                 status TEXT NOT NULL DEFAULT 'running',
+                created_by_key_id TEXT,
+                created_by_user_id TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                 finished_at TEXT,
                 metrics_count INTEGER NOT NULL DEFAULT 0,
                 params_count INTEGER NOT NULL DEFAULT 0,
-                FOREIGN KEY (project_id) REFERENCES projects(id)
+                FOREIGN KEY (project_id) REFERENCES projects(id),
+                FOREIGN KEY (created_by_key_id) REFERENCES api_keys(id),
+                FOREIGN KEY (created_by_user_id) REFERENCES users(id)
             );
             CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
             CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
             CREATE INDEX IF NOT EXISTS idx_runs_created ON runs(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_runs_created_by_key ON runs(created_by_key_id);
+            CREATE INDEX IF NOT EXISTS idx_runs_created_by_user ON runs(created_by_user_id);
 
             -- Tags table (key-value pairs for runs)
             CREATE TABLE IF NOT EXISTS tags (
@@ -289,6 +317,28 @@ impl SqliteStore {
             );
         "#)?;
 
+        // Backward-compatible migration for SQLite files created before run ownership columns.
+        Self::ensure_table_column(
+            &conn,
+            "runs",
+            "created_by_key_id",
+            "ALTER TABLE runs ADD COLUMN created_by_key_id TEXT",
+        )?;
+        Self::ensure_table_column(
+            &conn,
+            "runs",
+            "created_by_user_id",
+            "ALTER TABLE runs ADD COLUMN created_by_user_id TEXT",
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runs_created_by_key ON runs(created_by_key_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runs_created_by_user ON runs(created_by_user_id)",
+            [],
+        )?;
+
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?1, ?2)",
             params![SQLITE_SCHEMA_VERSION, SQLITE_SCHEMA_DESCRIPTION],
@@ -340,20 +390,109 @@ impl SqliteStore {
         Ok(id)
     }
 
+    /// Create a project with explicit metadata.
+    pub async fn create_project(
+        &self,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<ProjectRow, SqliteError> {
+        let conn = self.conn.lock().await;
+        let id = uuid::Uuid::now_v7().to_string();
+        conn.execute(
+            "INSERT INTO projects (id, name, description) VALUES (?1, ?2, ?3)",
+            params![id, name, description],
+        )?;
+
+        let row = conn.query_row(
+            "SELECT id, name, description, created_at, updated_at FROM projects WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(ProjectRow {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    description: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            },
+        )?;
+
+        info!(project_id = %row.id, name = %row.name, "Created project");
+        Ok(row)
+    }
+
+    /// Resolve a project by ID.
+    pub async fn get_project_by_id(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<ProjectRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+        let project = conn
+            .query_row(
+                "SELECT id, name, description, created_at, updated_at FROM projects WHERE id = ?1",
+                params![project_id],
+                |row| {
+                    Ok(ProjectRow {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        description: row.get(2)?,
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(project)
+    }
+
     /// Resolve a project name by ID.
     pub async fn get_project_name_by_id(
         &self,
         project_id: &str,
     ) -> Result<Option<String>, SqliteError> {
+        Ok(self
+            .get_project_by_id(project_id)
+            .await?
+            .map(|project| project.name))
+    }
+
+    /// List all projects.
+    pub async fn list_projects(&self) -> Result<Vec<ProjectRow>, SqliteError> {
         let conn = self.conn.lock().await;
-        let name: Option<String> = conn
-            .query_row(
-                "SELECT name FROM projects WHERE id = ?1",
-                params![project_id],
-                |row| row.get(0),
-            )
-            .ok();
-        Ok(name)
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, created_at, updated_at FROM projects ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ProjectRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?;
+        let projects: Result<Vec<_>, _> = rows.collect();
+        Ok(projects?)
+    }
+
+    /// List projects for a specific set of project IDs.
+    pub async fn list_projects_by_ids(
+        &self,
+        project_ids: &[String],
+    ) -> Result<Vec<ProjectRow>, SqliteError> {
+        if project_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut projects = Vec::new();
+        for project_id in project_ids {
+            if let Some(project) = self.get_project_by_id(project_id).await? {
+                projects.push(project);
+            }
+        }
+
+        projects.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(projects)
     }
 
     // =========================================================================
@@ -393,6 +532,130 @@ impl SqliteStore {
         )?;
 
         Ok(user_id)
+    }
+
+    /// List users for platform admin control-plane views.
+    pub async fn list_users(&self) -> Result<Vec<UserRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                u.id,
+                u.email,
+                u.display_name,
+                u.auth_provider,
+                u.external_subject,
+                u.is_service_account,
+                u.created_at,
+                u.updated_at,
+                u.disabled_at,
+                (
+                    SELECT COUNT(*)
+                    FROM project_memberships pm
+                    WHERE pm.user_id = u.id AND pm.revoked_at IS NULL
+                ) AS active_project_count,
+                (
+                    SELECT COUNT(*)
+                    FROM auth_sessions s
+                    WHERE s.user_id = u.id
+                      AND s.revoked_at IS NULL
+                      AND s.expires_at > datetime('now')
+                ) AS active_session_count
+            FROM users u
+            ORDER BY u.created_at DESC
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(UserRow {
+                id: row.get(0)?,
+                email: row.get(1)?,
+                display_name: row.get(2)?,
+                auth_provider: row.get(3)?,
+                external_subject: row.get(4)?,
+                is_service_account: row.get::<_, i64>(5)? != 0,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+                disabled_at: row.get(8)?,
+                active_project_count: row.get(9)?,
+                active_session_count: row.get(10)?,
+            })
+        })?;
+
+        let users: Result<Vec<_>, _> = rows.collect();
+        Ok(users?)
+    }
+
+    /// Fetch a user by ID for control-plane operations.
+    pub async fn get_user_by_id(&self, user_id: &str) -> Result<Option<UserRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            r#"
+            SELECT
+                u.id,
+                u.email,
+                u.display_name,
+                u.auth_provider,
+                u.external_subject,
+                u.is_service_account,
+                u.created_at,
+                u.updated_at,
+                u.disabled_at,
+                (
+                    SELECT COUNT(*)
+                    FROM project_memberships pm
+                    WHERE pm.user_id = u.id AND pm.revoked_at IS NULL
+                ) AS active_project_count,
+                (
+                    SELECT COUNT(*)
+                    FROM auth_sessions s
+                    WHERE s.user_id = u.id
+                      AND s.revoked_at IS NULL
+                      AND s.expires_at > datetime('now')
+                ) AS active_session_count
+            FROM users u
+            WHERE u.id = ?1
+            LIMIT 1
+            "#,
+            params![user_id],
+            |row| {
+                Ok(UserRow {
+                    id: row.get(0)?,
+                    email: row.get(1)?,
+                    display_name: row.get(2)?,
+                    auth_provider: row.get(3)?,
+                    external_subject: row.get(4)?,
+                    is_service_account: row.get::<_, i64>(5)? != 0,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                    disabled_at: row.get(8)?,
+                    active_project_count: row.get(9)?,
+                    active_session_count: row.get(10)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(SqliteError::from)
+    }
+
+    /// Update user disabled status.
+    pub async fn set_user_disabled(
+        &self,
+        user_id: &str,
+        disabled: bool,
+    ) -> Result<bool, SqliteError> {
+        let conn = self.conn.lock().await;
+        let changed = if disabled {
+            conn.execute(
+                "UPDATE users SET disabled_at = datetime('now'), updated_at = datetime('now') WHERE id = ?1 AND disabled_at IS NULL",
+                params![user_id],
+            )?
+        } else {
+            conn.execute(
+                "UPDATE users SET disabled_at = NULL, updated_at = datetime('now') WHERE id = ?1 AND disabled_at IS NOT NULL",
+                params![user_id],
+            )?
+        };
+        Ok(changed > 0)
     }
 
     /// Grant a project membership role to a user.
@@ -435,6 +698,47 @@ impl SqliteStore {
             Ok(ProjectMembershipRow {
                 project_id: row.get(0)?,
                 role: row.get(1)?,
+            })
+        })?;
+
+        let memberships: Result<Vec<_>, _> = rows.collect();
+        Ok(memberships?)
+    }
+
+    /// List project memberships for a user.
+    pub async fn list_user_project_memberships(
+        &self,
+        user_id: &str,
+        include_revoked: bool,
+    ) -> Result<Vec<UserProjectMembershipRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+        let sql = if include_revoked {
+            r#"
+            SELECT pm.project_id, p.name, pm.role, pm.granted_by_user_id, pm.created_at, pm.revoked_at
+            FROM project_memberships pm
+            JOIN projects p ON p.id = pm.project_id
+            WHERE pm.user_id = ?1
+            ORDER BY pm.created_at DESC
+            "#
+        } else {
+            r#"
+            SELECT pm.project_id, p.name, pm.role, pm.granted_by_user_id, pm.created_at, pm.revoked_at
+            FROM project_memberships pm
+            JOIN projects p ON p.id = pm.project_id
+            WHERE pm.user_id = ?1 AND pm.revoked_at IS NULL
+            ORDER BY pm.created_at DESC
+            "#
+        };
+
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![user_id], |row| {
+            Ok(UserProjectMembershipRow {
+                project_id: row.get(0)?,
+                project_name: row.get(1)?,
+                role: row.get(2)?,
+                granted_by_user_id: row.get(3)?,
+                created_at: row.get(4)?,
+                revoked_at: row.get(5)?,
             })
         })?;
 
@@ -539,6 +843,61 @@ impl SqliteStore {
         Ok(changed > 0)
     }
 
+    /// List auth sessions for control-plane visibility.
+    pub async fn list_auth_sessions_for_admin(
+        &self,
+        user_id: Option<&str>,
+        include_revoked: bool,
+    ) -> Result<Vec<AuthSessionAdminRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let mut sql = String::from(
+            r#"
+            SELECT id, user_id, created_at, last_seen_at, expires_at, revoked_at, client_ip, user_agent
+            FROM auth_sessions
+            WHERE 1=1
+            "#,
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+
+        if let Some(uid) = user_id {
+            sql.push_str(" AND user_id = ?");
+            params_vec.push(Box::new(uid.to_string()));
+        }
+        if !include_revoked {
+            sql.push_str(" AND revoked_at IS NULL");
+        }
+        sql.push_str(" ORDER BY created_at DESC");
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            Ok(AuthSessionAdminRow {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                created_at: row.get(2)?,
+                last_seen_at: row.get(3)?,
+                expires_at: row.get(4)?,
+                revoked_at: row.get(5)?,
+                client_ip: row.get(6)?,
+                user_agent: row.get(7)?,
+            })
+        })?;
+        let sessions: Result<Vec<_>, _> = rows.collect();
+        Ok(sessions?)
+    }
+
+    /// Revoke an auth session by session ID.
+    pub async fn revoke_auth_session_by_id(&self, session_id: &str) -> Result<bool, SqliteError> {
+        let conn = self.conn.lock().await;
+        let changed = conn.execute(
+            "UPDATE auth_sessions SET revoked_at = datetime('now'), updated_at = datetime('now') WHERE id = ?1 AND revoked_at IS NULL",
+            params![session_id],
+        )?;
+        Ok(changed > 0)
+    }
+
     // =========================================================================
     // Run operations
     // =========================================================================
@@ -549,12 +908,14 @@ impl SqliteStore {
         run_id: &str,
         project_id: &str,
         name: Option<&str>,
+        created_by_key_id: Option<&str>,
+        created_by_user_id: Option<&str>,
     ) -> Result<(), SqliteError> {
         let conn = self.conn.lock().await;
 
         conn.execute(
-            "INSERT INTO runs (id, project_id, name, status) VALUES (?1, ?2, ?3, 'running')",
-            params![run_id, project_id, name],
+            "INSERT INTO runs (id, project_id, name, status, created_by_key_id, created_by_user_id) VALUES (?1, ?2, ?3, 'running', ?4, ?5)",
+            params![run_id, project_id, name, created_by_key_id, created_by_user_id],
         )?;
 
         debug!(run_id = %run_id, project = %project_id, "Created run");
@@ -596,7 +957,7 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
 
         conn.query_row(
-            r#"SELECT id, project_id, name, status, created_at, updated_at,
+            r#"SELECT id, project_id, name, status, created_by_key_id, created_by_user_id, created_at, updated_at,
                       finished_at, metrics_count, params_count,
                       (julianday(COALESCE(finished_at, updated_at)) - julianday(created_at)) * 86400.0
                FROM runs WHERE id = ?1"#,
@@ -607,12 +968,14 @@ impl SqliteStore {
                     project_id: row.get(1)?,
                     name: row.get(2)?,
                     status: row.get(3)?,
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
-                    finished_at: row.get(6)?,
-                    metrics_count: row.get(7)?,
-                    params_count: row.get(8)?,
-                    duration_seconds: row.get(9)?,
+                    created_by_key_id: row.get(4)?,
+                    created_by_user_id: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                    finished_at: row.get(8)?,
+                    metrics_count: row.get(9)?,
+                    params_count: row.get(10)?,
+                    duration_seconds: row.get(11)?,
                 })
             },
         )
@@ -628,6 +991,7 @@ impl SqliteStore {
     pub async fn list_runs(
         &self,
         project: Option<&str>,
+        owner_user_id: Option<&str>,
         status: Option<&str>,
         query: Option<&str>,
         limit: usize,
@@ -636,7 +1000,7 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
 
         let mut sql = String::from(
-            "SELECT r.id, r.project_id, r.name, r.status, r.created_at, r.updated_at,
+            "SELECT r.id, r.project_id, r.name, r.status, r.created_by_key_id, r.created_by_user_id, r.created_at, r.updated_at,
                     r.finished_at, r.metrics_count, r.params_count,
                     (julianday(COALESCE(r.finished_at, r.updated_at)) - julianday(r.created_at)) * 86400.0
              FROM runs r
@@ -654,6 +1018,12 @@ impl SqliteStore {
             count_sql.push_str(" AND (r.project_id = ? OR p.name = ?)");
             params_vec.push(Box::new(p.to_string()));
             params_vec.push(Box::new(p.to_string()));
+        }
+
+        if let Some(owner) = owner_user_id {
+            sql.push_str(" AND r.created_by_user_id = ?");
+            count_sql.push_str(" AND r.created_by_user_id = ?");
+            params_vec.push(Box::new(owner.to_string()));
         }
 
         if let Some(s) = status {
@@ -693,12 +1063,14 @@ impl SqliteStore {
                 project_id: row.get(1)?,
                 name: row.get(2)?,
                 status: row.get(3)?,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
-                finished_at: row.get(6)?,
-                metrics_count: row.get(7)?,
-                params_count: row.get(8)?,
-                duration_seconds: row.get(9)?,
+                created_by_key_id: row.get(4)?,
+                created_by_user_id: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+                finished_at: row.get(8)?,
+                metrics_count: row.get(9)?,
+                params_count: row.get(10)?,
+                duration_seconds: row.get(11)?,
             })
         })?;
 
@@ -1055,7 +1427,7 @@ impl SqliteStore {
 
         let row = conn
             .query_row(
-                r#"SELECT id, key_hash, key_prefix, project_id, name, scopes, created_at, last_used_at, revoked_at
+                r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at
                    FROM api_keys
                    WHERE key_hash = ?1"#,
                 params![key_hash],
@@ -1065,11 +1437,12 @@ impl SqliteStore {
                         key_hash: row.get(1)?,
                         key_prefix: row.get(2)?,
                         project_id: row.get(3)?,
-                        name: row.get(4)?,
-                        scopes_json: row.get(5)?,
-                        created_at: row.get(6)?,
-                        last_used_at: row.get(7)?,
-                        revoked_at: row.get(8)?,
+                        created_by_user_id: row.get(4)?,
+                        name: row.get(5)?,
+                        scopes_json: row.get(6)?,
+                        created_at: row.get(7)?,
+                        last_used_at: row.get(8)?,
+                        revoked_at: row.get(9)?,
                     })
                 },
             )
@@ -1114,7 +1487,7 @@ impl SqliteStore {
         match project_id {
             Some(project_id) => {
                 let mut stmt = conn.prepare(
-                    r#"SELECT id, key_hash, key_prefix, project_id, name, scopes, created_at, last_used_at, revoked_at
+                    r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at
                        FROM api_keys
                        WHERE project_id = ?1
                        ORDER BY created_at DESC"#,
@@ -1125,11 +1498,12 @@ impl SqliteStore {
                         key_hash: row.get(1)?,
                         key_prefix: row.get(2)?,
                         project_id: row.get(3)?,
-                        name: row.get(4)?,
-                        scopes_json: row.get(5)?,
-                        created_at: row.get(6)?,
-                        last_used_at: row.get(7)?,
-                        revoked_at: row.get(8)?,
+                        created_by_user_id: row.get(4)?,
+                        name: row.get(5)?,
+                        scopes_json: row.get(6)?,
+                        created_at: row.get(7)?,
+                        last_used_at: row.get(8)?,
+                        revoked_at: row.get(9)?,
                     })
                 })?;
                 for row in rows {
@@ -1138,7 +1512,7 @@ impl SqliteStore {
             }
             None => {
                 let mut stmt = conn.prepare(
-                    r#"SELECT id, key_hash, key_prefix, project_id, name, scopes, created_at, last_used_at, revoked_at
+                    r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at
                        FROM api_keys
                        ORDER BY created_at DESC"#,
                 )?;
@@ -1148,11 +1522,12 @@ impl SqliteStore {
                         key_hash: row.get(1)?,
                         key_prefix: row.get(2)?,
                         project_id: row.get(3)?,
-                        name: row.get(4)?,
-                        scopes_json: row.get(5)?,
-                        created_at: row.get(6)?,
-                        last_used_at: row.get(7)?,
-                        revoked_at: row.get(8)?,
+                        created_by_user_id: row.get(4)?,
+                        name: row.get(5)?,
+                        scopes_json: row.get(6)?,
+                        created_at: row.get(7)?,
+                        last_used_at: row.get(8)?,
+                        revoked_at: row.get(9)?,
                     })
                 })?;
                 for row in rows {
@@ -1283,12 +1658,24 @@ pub struct RunRow {
     pub project_id: String,
     pub name: Option<String>,
     pub status: String,
+    pub created_by_key_id: Option<String>,
+    pub created_by_user_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub finished_at: Option<String>,
     pub metrics_count: i64,
     pub params_count: i64,
     pub duration_seconds: Option<f64>,
+}
+
+/// A row from the projects table.
+#[derive(Debug, Clone)]
+pub struct ProjectRow {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// An API key row from sqlite.
@@ -1298,6 +1685,7 @@ pub struct ApiKeyRow {
     pub key_hash: String,
     pub key_prefix: String,
     pub project_id: Option<String>,
+    pub created_by_user_id: Option<String>,
     pub name: Option<String>,
     pub scopes_json: String,
     pub created_at: String,
@@ -1312,6 +1700,33 @@ pub struct ProjectMembershipRow {
     pub role: String,
 }
 
+/// A user row with aggregate metadata for control-plane views.
+#[derive(Debug, Clone)]
+pub struct UserRow {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub auth_provider: String,
+    pub external_subject: Option<String>,
+    pub is_service_account: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    pub disabled_at: Option<String>,
+    pub active_project_count: i64,
+    pub active_session_count: i64,
+}
+
+/// A detailed project membership row for a specific user.
+#[derive(Debug, Clone)]
+pub struct UserProjectMembershipRow {
+    pub project_id: String,
+    pub project_name: String,
+    pub role: String,
+    pub granted_by_user_id: Option<String>,
+    pub created_at: String,
+    pub revoked_at: Option<String>,
+}
+
 /// A UI auth session row.
 #[derive(Debug, Clone)]
 pub struct AuthSessionRow {
@@ -1321,6 +1736,19 @@ pub struct AuthSessionRow {
     pub csrf_hash: String,
     pub expires_at: String,
     pub revoked_at: Option<String>,
+}
+
+/// A session row for platform admin management.
+#[derive(Debug, Clone)]
+pub struct AuthSessionAdminRow {
+    pub id: String,
+    pub user_id: String,
+    pub created_at: String,
+    pub last_seen_at: Option<String>,
+    pub expires_at: String,
+    pub revoked_at: Option<String>,
+    pub client_ip: Option<String>,
+    pub user_agent: Option<String>,
 }
 
 /// A share token row.
@@ -1387,7 +1815,7 @@ mod tests {
 
         let project_id = store.get_or_create_project("test-project").await.unwrap();
         store
-            .create_run("run-123", &project_id, Some("My Run"))
+            .create_run("run-123", &project_id, Some("My Run"), None, None)
             .await
             .unwrap();
 
@@ -1395,6 +1823,62 @@ mod tests {
         assert_eq!(run.id, "run-123");
         assert_eq!(run.name, Some("My Run".to_string()));
         assert_eq!(run.status, "running");
+    }
+
+    #[tokio::test]
+    async fn test_list_runs_can_filter_by_owner_user_id() {
+        let store = create_test_store().await;
+        let project_id = store
+            .get_or_create_project("owner-filter-project")
+            .await
+            .unwrap();
+        let owner_a = store
+            .get_or_create_user_identity(
+                "jwt",
+                "owner-a-subject",
+                Some("owner-a@example.com"),
+                Some("Owner A"),
+            )
+            .await
+            .unwrap();
+        let owner_b = store
+            .get_or_create_user_identity(
+                "jwt",
+                "owner-b-subject",
+                Some("owner-b@example.com"),
+                Some("Owner B"),
+            )
+            .await
+            .unwrap();
+
+        store
+            .create_run(
+                "run-owner-a",
+                &project_id,
+                Some("Owner A Run"),
+                None,
+                Some(&owner_a),
+            )
+            .await
+            .unwrap();
+        store
+            .create_run(
+                "run-owner-b",
+                &project_id,
+                Some("Owner B Run"),
+                None,
+                Some(&owner_b),
+            )
+            .await
+            .unwrap();
+
+        let (runs, total) = store
+            .list_runs(Some(&project_id), Some(&owner_a), None, None, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, "run-owner-a");
     }
 
     #[tokio::test]
@@ -1416,7 +1900,13 @@ mod tests {
                 .await
                 .unwrap();
             store
-                .create_run("run-persist-123", &project_id, Some("Persisted Run"))
+                .create_run(
+                    "run-persist-123",
+                    &project_id,
+                    Some("Persisted Run"),
+                    None,
+                    None,
+                )
                 .await
                 .unwrap();
             store
@@ -1455,7 +1945,7 @@ mod tests {
 
         let project_id = store.get_or_create_project("test-project").await.unwrap();
         store
-            .create_run("run-123", &project_id, None)
+            .create_run("run-123", &project_id, None, None, None)
             .await
             .unwrap();
 
@@ -1491,7 +1981,7 @@ mod tests {
 
         let project_id = store.get_or_create_project("test-project").await.unwrap();
         store
-            .create_run("run-123", &project_id, None)
+            .create_run("run-123", &project_id, None, None, None)
             .await
             .unwrap();
 
@@ -1518,7 +2008,7 @@ mod tests {
 
         let project_id = store.get_or_create_project("auth-project").await.unwrap();
         store
-            .create_run("run-auth-123", &project_id, Some("Auth Run"))
+            .create_run("run-auth-123", &project_id, Some("Auth Run"), None, None)
             .await
             .unwrap();
 
@@ -1581,7 +2071,7 @@ mod tests {
         let store = create_test_store().await;
         let project_id = store.get_or_create_project("audit-project").await.unwrap();
         store
-            .create_run("run-audit-123", &project_id, Some("Audit Run"))
+            .create_run("run-audit-123", &project_id, Some("Audit Run"), None, None)
             .await
             .unwrap();
 
@@ -1705,5 +2195,110 @@ mod tests {
         assert_eq!(memberships.len(), 1);
         assert_eq!(memberships[0].project_id, project_id);
         assert_eq!(memberships[0].role, "viewer");
+    }
+
+    #[tokio::test]
+    async fn test_list_users_and_toggle_disabled() {
+        let store = create_test_store().await;
+        let user_id = store
+            .get_or_create_user_identity(
+                "jwt",
+                "subject-admin-list",
+                Some("admin-list@example.com"),
+                Some("Admin List User"),
+            )
+            .await
+            .unwrap();
+
+        let users = store.list_users().await.unwrap();
+        let user = users
+            .iter()
+            .find(|u| u.id == user_id)
+            .expect("Expected user in list");
+        assert!(!user.is_service_account);
+        assert!(user.disabled_at.is_none());
+
+        let disabled = store.set_user_disabled(&user_id, true).await.unwrap();
+        assert!(disabled);
+        let disabled_user = store
+            .get_user_by_id(&user_id)
+            .await
+            .unwrap()
+            .expect("user should exist");
+        assert!(disabled_user.disabled_at.is_some());
+
+        let enabled = store.set_user_disabled(&user_id, false).await.unwrap();
+        assert!(enabled);
+        let enabled_user = store
+            .get_user_by_id(&user_id)
+            .await
+            .unwrap()
+            .expect("user should exist");
+        assert!(enabled_user.disabled_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_user_memberships_and_admin_sessions() {
+        let store = create_test_store().await;
+        let project_id = store
+            .get_or_create_project("admin-membership-project")
+            .await
+            .unwrap();
+        let user_id = store
+            .get_or_create_user_identity(
+                "jwt",
+                "subject-admin-membership",
+                Some("membership@example.com"),
+                Some("Membership User"),
+            )
+            .await
+            .unwrap();
+
+        store
+            .grant_project_membership(&project_id, &user_id, "owner", None)
+            .await
+            .unwrap();
+
+        let memberships = store
+            .list_user_project_memberships(&user_id, false)
+            .await
+            .unwrap();
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].project_id, project_id);
+        assert_eq!(memberships[0].role, "owner");
+
+        store
+            .insert_auth_session(
+                "session-admin-1",
+                &user_id,
+                "token-hash-1",
+                "csrf-hash-1",
+                "2099-01-01 00:00:00",
+                Some("test-agent"),
+                Some("127.0.0.1"),
+            )
+            .await
+            .unwrap();
+
+        let sessions = store
+            .list_auth_sessions_for_admin(Some(&user_id), false)
+            .await
+            .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "session-admin-1");
+        assert!(sessions[0].revoked_at.is_none());
+
+        let revoked = store
+            .revoke_auth_session_by_id("session-admin-1")
+            .await
+            .unwrap();
+        assert!(revoked);
+
+        let with_revoked = store
+            .list_auth_sessions_for_admin(Some(&user_id), true)
+            .await
+            .unwrap();
+        assert_eq!(with_revoked.len(), 1);
+        assert!(with_revoked[0].revoked_at.is_some());
     }
 }
