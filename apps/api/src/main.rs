@@ -52,7 +52,7 @@ use services::{
     CardinalityTracker, IdempotencyResult, IdempotencyStore, IngestServiceImpl, MetricPayload,
     ParamPayload, TagPayload, compute_payload_hash, ingest::InMemoryStore,
 };
-use storage::{MetricRow, ProjectRow, SqliteStore};
+use storage::{MetricRow, ProjectRow, RunRow, SqliteStore};
 
 /// Application state shared across handlers.
 #[derive(Clone)]
@@ -286,6 +286,49 @@ async fn require_endpoint_access(
             )
             .await;
             return Err((status, message));
+        }
+    }
+
+    Ok(())
+}
+
+fn require_ui_run_owner(auth: &AuthContext, run: &RunRow) -> Result<(), (StatusCode, String)> {
+    if auth.is_dev_mode || !auth.is_ui_jwt() {
+        return Ok(());
+    }
+
+    let user_id = auth_user_id(auth).ok_or((
+        StatusCode::FORBIDDEN,
+        "Unable to resolve user identity for run authorization.".to_string(),
+    ))?;
+
+    if let Some(owner_user_id) = run.created_by_user_id.as_deref() {
+        if owner_user_id != user_id {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Access denied: this user cannot access that run.".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn require_api_key_run_owner_for_mutation(
+    auth: &AuthContext,
+    run: &RunRow,
+    action: &str,
+) -> Result<(), (StatusCode, String)> {
+    if auth.is_dev_mode || auth.is_ui_jwt() || auth.require_scope("admin").is_ok() {
+        return Ok(());
+    }
+
+    if let Some(owner_key_id) = run.created_by_key_id.as_deref() {
+        if owner_key_id != auth.api_key.id {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!("Access denied: this API key can only {action} runs it created."),
+            ));
         }
     }
 
@@ -749,19 +792,21 @@ async fn http_init_run(
         .await
         .unwrap_or(false)
     {
-        // Verify the caller can access this existing run's project with write scope
-        if let Ok(existing_project) = state.sqlite_store.get_run_project_id(&run_id).await {
+        // Verify the caller can access this existing run and mutate it.
+        if let Ok(existing_run) = state.sqlite_store.get_run(&run_id).await {
             require_endpoint_access(
                 &state,
                 &auth,
                 EndpointRbacTier::Write,
-                Some(&existing_project),
+                Some(&existing_run.project_id),
                 Some(&run_id),
                 "run.init",
                 "run",
                 Some(&run_id),
             )
             .await?;
+            require_ui_run_owner(&auth, &existing_run)?;
+            require_api_key_run_owner_for_mutation(&auth, &existing_run, "reinitialize")?;
         }
         return Ok(Json(InitRunHttpResponse {
             run_id,
@@ -808,10 +853,41 @@ async fn http_init_run(
     )
     .await?;
 
+    let mut created_by_user_id = None;
+    let mut created_by_key_id = None;
+    if auth.is_ui_jwt() {
+        created_by_user_id = auth_user_id(&auth);
+    } else if !auth.is_dev_mode {
+        created_by_key_id = Some(auth.api_key.id.clone());
+        match state
+            .sqlite_store
+            .get_api_key_by_hash(&auth.api_key.key_hash)
+            .await
+        {
+            Ok(Some(key_row)) => {
+                created_by_user_id = key_row.created_by_user_id;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    key_id = %auth.api_key.id,
+                    "Failed to resolve API key owner during run initialization"
+                );
+            }
+        }
+    }
+
     // Create run in SQLite
     state
         .sqlite_store
-        .create_run(&run_id, project_id, req.name.as_deref())
+        .create_run(
+            &run_id,
+            project_id,
+            req.name.as_deref(),
+            created_by_key_id.as_deref(),
+            created_by_user_id.as_deref(),
+        )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -845,6 +921,7 @@ async fn http_init_run(
         serde_json::json!({
             "project_name": resolved_project_name,
             "project_id": project_id,
+            "created_by_user_id": created_by_user_id,
             "source": "http_init_run",
         }),
     )
@@ -919,9 +996,9 @@ async fn http_ingest_batch(
     Json(req): Json<IngestBatchHttpRequest>,
 ) -> Result<Json<IngestBatchHttpResponse>, (StatusCode, String)> {
     // Resolve run project first and fail closed when the run does not exist.
-    let run_project = state
+    let run = state
         .sqlite_store
-        .get_run_project_id(&req.run_id)
+        .get_run(&req.run_id)
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
@@ -933,13 +1010,15 @@ async fn http_ingest_batch(
         &state,
         &auth,
         EndpointRbacTier::Write,
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&req.run_id),
         "run.ingest",
         "run",
         Some(&req.run_id),
     )
     .await?;
+    require_ui_run_owner(&auth, &run)?;
+    require_api_key_run_owner_for_mutation(&auth, &run, "ingest to")?;
     // Generate batch_id if not provided
     let batch_id = req
         .batch_id
@@ -983,7 +1062,7 @@ async fn http_ingest_batch(
     let param_count = req.params.len();
     let tag_count = req.tags.len();
 
-    let project_id = run_project;
+    let project_id = run.project_id.clone();
 
     let idempotency_result = state
         .idempotency_store
@@ -1209,22 +1288,27 @@ async fn http_finish_run(
     Json(req): Json<FinishRunHttpRequest>,
 ) -> Result<Json<FinishRunHttpResponse>, (StatusCode, String)> {
     // Verify the caller can access the run's project and has write scope
-    let run_project = state
+    let run = state
         .sqlite_store
-        .get_run_project_id(&run_id)
+        .get_run(&run_id)
         .await
-        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+        .map_err(|e| match e {
+            storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
     require_endpoint_access(
         &state,
         &auth,
         EndpointRbacTier::Write,
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "run.finish",
         "run",
         Some(&run_id),
     )
     .await?;
+    require_ui_run_owner(&auth, &run)?;
+    require_api_key_run_owner_for_mutation(&auth, &run, "finish")?;
 
     // Update in SQLite
     state
@@ -1238,7 +1322,7 @@ async fn http_finish_run(
     emit_audit_event(
         &state,
         Some(&auth),
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "run.finish",
         "run",
@@ -1267,10 +1351,11 @@ async fn http_delete_run(
     Extension(auth): Extension<AuthContext>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
 ) -> Result<Json<DeleteRunHttpResponse>, (StatusCode, String)> {
-    // Verify the caller can access the run's project and has admin scope
-    let run_project = state
+    // Verify the caller can access the run's project and has write scope.
+    // Ownership checks below prevent cross-user run deletion.
+    let run = state
         .sqlite_store
-        .get_run_project_id(&run_id)
+        .get_run(&run_id)
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
@@ -1279,14 +1364,16 @@ async fn http_delete_run(
     require_endpoint_access(
         &state,
         &auth,
-        EndpointRbacTier::Admin,
-        Some(&run_project),
+        EndpointRbacTier::Write,
+        Some(&run.project_id),
         Some(&run_id),
         "run.delete",
         "run",
         Some(&run_id),
     )
     .await?;
+    require_ui_run_owner(&auth, &run)?;
+    require_api_key_run_owner_for_mutation(&auth, &run, "delete")?;
 
     // Delete from SQLite (cascades to metrics, tags, params, batches)
     state
@@ -1303,7 +1390,7 @@ async fn http_delete_run(
     emit_audit_event(
         &state,
         Some(&auth),
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "run.delete",
         "run",
@@ -1811,9 +1898,9 @@ async fn http_create_share_token(
     Json(req): Json<CreateShareRequest>,
 ) -> Result<Json<CreateShareResponse>, (StatusCode, String)> {
     // Verify the caller can access the run
-    let run_project = state
+    let run = state
         .sqlite_store
-        .get_run_project_id(&run_id)
+        .get_run(&run_id)
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
@@ -1823,13 +1910,15 @@ async fn http_create_share_token(
         &state,
         &auth,
         EndpointRbacTier::Read,
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "share_token.create",
         "run",
         Some(&run_id),
     )
     .await?;
+    require_ui_run_owner(&auth, &run)?;
+    require_api_key_run_owner_for_mutation(&auth, &run, "share")?;
 
     // Generate a short, URL-safe token
     let token = generate_share_token();
@@ -1856,7 +1945,7 @@ async fn http_create_share_token(
     emit_audit_event(
         &state,
         Some(&auth),
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "share_token.create",
         "share_token",
@@ -2001,22 +2090,27 @@ async fn http_revoke_share_token(
     axum::extract::Path((run_id, token)): axum::extract::Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // Verify the caller can access the run
-    let run_project = state
+    let run = state
         .sqlite_store
-        .get_run_project_id(&run_id)
+        .get_run(&run_id)
         .await
-        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+        .map_err(|e| match e {
+            storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
     require_endpoint_access(
         &state,
         &auth,
         EndpointRbacTier::Read,
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "share_token.revoke",
         "share_token",
         Some(&token),
     )
     .await?;
+    require_ui_run_owner(&auth, &run)?;
+    require_api_key_run_owner_for_mutation(&auth, &run, "revoke share links for")?;
 
     state
         .sqlite_store
@@ -2032,7 +2126,7 @@ async fn http_revoke_share_token(
     emit_audit_event(
         &state,
         Some(&auth),
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "share_token.revoke",
         "share_token",
@@ -2201,11 +2295,21 @@ async fn http_list_runs(
         }
     };
 
+    let owner_user_filter = if auth.is_ui_jwt() {
+        Some(auth_user_id(&auth).ok_or((
+            StatusCode::FORBIDDEN,
+            "Unable to resolve user identity for run listing.".to_string(),
+        ))?)
+    } else {
+        None
+    };
+
     // Query from SQLite
     let (sqlite_runs, total) = state
         .sqlite_store
         .list_runs(
             effective_project.as_deref(),
+            owner_user_filter.as_deref(),
             query.status.as_deref(),
             query.q.as_deref(),
             limit,
@@ -2300,6 +2404,7 @@ async fn http_get_run(
         Some(&run_id),
     )
     .await?;
+    require_ui_run_owner(&auth, &run)?;
 
     let tags = state
         .sqlite_store
@@ -2358,22 +2463,23 @@ async fn http_get_metrics(
     axum::extract::Query(query): axum::extract::Query<MetricsQuery>,
 ) -> Result<Json<services::MetricsQueryResponse>, (StatusCode, String)> {
     // Verify run exists, check project access, and require read scope
-    let run_project = state
+    let run = state
         .sqlite_store
-        .get_run_project_id(&run_id)
+        .get_run(&run_id)
         .await
         .map_err(|_| (StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)))?;
     require_endpoint_access(
         &state,
         &auth,
         EndpointRbacTier::Read,
-        Some(&run_project),
+        Some(&run.project_id),
         Some(&run_id),
         "run.metrics.read",
         "run",
         Some(&run_id),
     )
     .await?;
+    require_ui_run_owner(&auth, &run)?;
 
     // Parse metric names
     let names: Vec<String> = if query.names.is_empty() {
@@ -2518,6 +2624,7 @@ async fn http_compare_runs(
             Some(run_id),
         )
         .await?;
+        require_ui_run_owner(&auth, &run)?;
 
         let names = if req.metric_names.is_empty() {
             vec![]
@@ -2837,6 +2944,8 @@ mod tests {
     struct UiSessionHarness {
         app: Router,
         key_store: Arc<ApiKeyStore>,
+        sqlite_store: Arc<SqliteStore>,
+        user_id: String,
         primary_project_id: String,
         secondary_project_id: String,
         jwt_secret: String,
@@ -2899,7 +3008,7 @@ mod tests {
 
         let state = AppState {
             store,
-            sqlite_store,
+            sqlite_store: sqlite_store.clone(),
             key_store: key_store.clone(),
             idempotency_store,
             cardinality_tracker,
@@ -2908,6 +3017,8 @@ mod tests {
         UiSessionHarness {
             app: build_http_router(state),
             key_store,
+            sqlite_store,
+            user_id,
             primary_project_id,
             secondary_project_id,
             jwt_secret,
@@ -3230,7 +3341,13 @@ mod tests {
             .await
             .unwrap();
         sqlite_store
-            .create_run("run-sqlite-only", &project_id, Some("sqlite-only-run"))
+            .create_run(
+                "run-sqlite-only",
+                &project_id,
+                Some("sqlite-only-run"),
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -3487,6 +3604,161 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ui_session_only_lists_owned_runs() {
+        let harness = ui_session_harness_with_role("owner").await;
+
+        let foreign_user_id = harness
+            .sqlite_store
+            .get_or_create_user_identity(
+                "jwt",
+                "foreign-subject",
+                Some("foreign@example.com"),
+                Some("Foreign User"),
+            )
+            .await
+            .expect("Failed to create foreign user");
+
+        harness
+            .sqlite_store
+            .create_run(
+                "run-owned-by-session-user",
+                &harness.primary_project_id,
+                Some("owned"),
+                None,
+                Some(&harness.user_id),
+            )
+            .await
+            .expect("Failed to create owned run");
+        harness
+            .sqlite_store
+            .create_run(
+                "run-owned-by-foreign-user",
+                &harness.primary_project_id,
+                Some("foreign"),
+                None,
+                Some(&foreign_user_id),
+            )
+            .await
+            .expect("Failed to create foreign run");
+
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/runs")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .body(Body::empty())
+                    .expect("Failed to build list runs request"),
+            )
+            .await
+            .expect("List runs request failed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: serde_json::Value = serde_json::from_str(&response_text(response).await)
+            .expect("List runs response should be JSON");
+        let runs = payload["runs"].as_array().expect("runs should be an array");
+
+        assert!(runs.iter().any(|run| {
+            run["run_id"]
+                .as_str()
+                .map_or(false, |id| id == "run-owned-by-session-user")
+        }));
+        assert!(!runs.iter().any(|run| {
+            run["run_id"]
+                .as_str()
+                .map_or(false, |id| id == "run-owned-by-foreign-user")
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_ui_session_cannot_read_foreign_owned_run() {
+        let harness = ui_session_harness_with_role("owner").await;
+
+        let foreign_user_id = harness
+            .sqlite_store
+            .get_or_create_user_identity(
+                "jwt",
+                "foreign-subject-2",
+                Some("foreign2@example.com"),
+                Some("Foreign User 2"),
+            )
+            .await
+            .expect("Failed to create foreign user");
+
+        harness
+            .sqlite_store
+            .create_run(
+                "run-foreign-read-test",
+                &harness.primary_project_id,
+                Some("foreign"),
+                None,
+                Some(&foreign_user_id),
+            )
+            .await
+            .expect("Failed to create foreign run");
+
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/runs/run-foreign-read-test")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .body(Body::empty())
+                    .expect("Failed to build get run request"),
+            )
+            .await
+            .expect("Get run request failed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_ui_editor_can_delete_own_run_without_admin_scope() {
+        let harness = ui_session_harness_with_role("editor").await;
+        harness
+            .sqlite_store
+            .create_run(
+                "run-editor-delete",
+                &harness.primary_project_id,
+                Some("editor-owned"),
+                None,
+                Some(&harness.user_id),
+            )
+            .await
+            .expect("Failed to create editor-owned run");
+
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/runs/run-editor-delete")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::empty())
+                    .expect("Failed to build delete run request"),
+            )
+            .await
+            .expect("Delete run request failed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn test_protected_run_init_requires_auth_when_not_in_dev_mode() {
         let app = test_app_with_auth_enabled().await;
         let response = app
@@ -3504,6 +3776,86 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_project_key_cannot_delete_run_owned_by_different_key() {
+        let store = Arc::new(InMemoryStore::new());
+        let sqlite_store = Arc::new(
+            SqliteStore::new(":memory:")
+                .await
+                .expect("Failed to create test SQLite store"),
+        );
+        let key_store = Arc::new(ApiKeyStore::new_with_sqlite(sqlite_store.clone()));
+        let idempotency_store = Arc::new(IdempotencyStore::new());
+        let cardinality_tracker = Arc::new(CardinalityTracker::default());
+
+        let project_id = sqlite_store
+            .create_project("api-key-delete-test", None)
+            .await
+            .expect("Failed to create project")
+            .id;
+        let (owner_raw_key, owner_key) = key_store
+            .create_key(
+                Some(project_id.clone()),
+                Some("owner-key".to_string()),
+                vec!["read".to_string(), "write".to_string()],
+            )
+            .await;
+        let (other_raw_key, _) = key_store
+            .create_key(
+                Some(project_id.clone()),
+                Some("other-key".to_string()),
+                vec!["read".to_string(), "write".to_string()],
+            )
+            .await;
+
+        sqlite_store
+            .create_run(
+                "run-owned-by-owner-key",
+                &project_id,
+                Some("owned"),
+                Some(&owner_key.id),
+                None,
+            )
+            .await
+            .expect("Failed to create owned run");
+
+        let state = AppState {
+            store,
+            sqlite_store,
+            key_store,
+            idempotency_store,
+            cardinality_tracker,
+        };
+        let app = build_http_router(state);
+
+        let forbidden = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/runs/run-owned-by-owner-key")
+                    .header("x-api-key", &other_raw_key)
+                    .body(Body::empty())
+                    .expect("Failed to build delete request"),
+            )
+            .await
+            .expect("Delete request failed");
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let allowed = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/runs/run-owned-by-owner-key")
+                    .header("x-api-key", &owner_raw_key)
+                    .body(Body::empty())
+                    .expect("Failed to build delete request"),
+            )
+            .await
+            .expect("Delete request failed");
+        assert_eq!(allowed.status(), StatusCode::OK);
     }
 
     #[tokio::test(flavor = "multi_thread")]
