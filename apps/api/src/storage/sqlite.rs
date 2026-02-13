@@ -340,20 +340,109 @@ impl SqliteStore {
         Ok(id)
     }
 
+    /// Create a project with explicit metadata.
+    pub async fn create_project(
+        &self,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<ProjectRow, SqliteError> {
+        let conn = self.conn.lock().await;
+        let id = uuid::Uuid::now_v7().to_string();
+        conn.execute(
+            "INSERT INTO projects (id, name, description) VALUES (?1, ?2, ?3)",
+            params![id, name, description],
+        )?;
+
+        let row = conn.query_row(
+            "SELECT id, name, description, created_at, updated_at FROM projects WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(ProjectRow {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    description: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            },
+        )?;
+
+        info!(project_id = %row.id, name = %row.name, "Created project");
+        Ok(row)
+    }
+
+    /// Resolve a project by ID.
+    pub async fn get_project_by_id(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<ProjectRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+        let project = conn
+            .query_row(
+                "SELECT id, name, description, created_at, updated_at FROM projects WHERE id = ?1",
+                params![project_id],
+                |row| {
+                    Ok(ProjectRow {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        description: row.get(2)?,
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(project)
+    }
+
     /// Resolve a project name by ID.
     pub async fn get_project_name_by_id(
         &self,
         project_id: &str,
     ) -> Result<Option<String>, SqliteError> {
+        Ok(self
+            .get_project_by_id(project_id)
+            .await?
+            .map(|project| project.name))
+    }
+
+    /// List all projects.
+    pub async fn list_projects(&self) -> Result<Vec<ProjectRow>, SqliteError> {
         let conn = self.conn.lock().await;
-        let name: Option<String> = conn
-            .query_row(
-                "SELECT name FROM projects WHERE id = ?1",
-                params![project_id],
-                |row| row.get(0),
-            )
-            .ok();
-        Ok(name)
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, created_at, updated_at FROM projects ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ProjectRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?;
+        let projects: Result<Vec<_>, _> = rows.collect();
+        Ok(projects?)
+    }
+
+    /// List projects for a specific set of project IDs.
+    pub async fn list_projects_by_ids(
+        &self,
+        project_ids: &[String],
+    ) -> Result<Vec<ProjectRow>, SqliteError> {
+        if project_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut projects = Vec::new();
+        for project_id in project_ids {
+            if let Some(project) = self.get_project_by_id(project_id).await? {
+                projects.push(project);
+            }
+        }
+
+        projects.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(projects)
     }
 
     // =========================================================================
@@ -1289,6 +1378,16 @@ pub struct RunRow {
     pub metrics_count: i64,
     pub params_count: i64,
     pub duration_seconds: Option<f64>,
+}
+
+/// A row from the projects table.
+#[derive(Debug, Clone)]
+pub struct ProjectRow {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// An API key row from sqlite.
