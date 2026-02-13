@@ -515,7 +515,7 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
   )?.label;
 
   return (
-    <div className="rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
+    <div className="mlrx-fade-up mlrx-fade-up-delay-2 rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
       <div className="flex flex-col gap-4 border-b border-border px-5 py-4 sm:px-6">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div className="flex items-center gap-3">
@@ -528,7 +528,7 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative min-w-[220px] flex-1 md:w-[360px]">
-              <div className="flex h-11 items-center gap-2 rounded-xl border border-border bg-background px-3 text-text-secondary focus-within:border-accent">
+              <div className="flex h-11 items-center gap-2 rounded-xl border border-border bg-background px-3 text-text-secondary transition-all duration-200 focus-within:border-accent focus-within:shadow-[0_0_0_3px_rgba(59,125,255,0.12)]">
                 <SearchIcon />
                 <input
                   type="text"
@@ -547,7 +547,7 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
               <button
                 type="button"
                 onClick={() => setStatusMenuOpen((open) => !open)}
-                className="inline-flex h-11 items-center gap-2 rounded-xl border border-border bg-background px-3.5 text-sm font-medium text-text-secondary hover:border-[color:rgba(255,255,255,0.12)] hover:text-text-primary"
+                className="inline-flex h-11 items-center gap-2 rounded-xl border border-border bg-background px-3.5 text-sm font-medium text-text-secondary transition-all duration-200 hover:-translate-y-0.5 hover:border-[color:rgba(255,255,255,0.12)] hover:text-text-primary"
               >
                 <FilterIcon />
                 {selectedStatusLabel || 'Filter'}
@@ -582,7 +582,7 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
               onClick={() => {
                 void fetchRuns();
               }}
-              className="inline-flex h-11 items-center gap-2 rounded-xl border border-border bg-background px-3.5 text-sm font-medium text-text-secondary hover:border-[color:rgba(255,255,255,0.12)] hover:text-text-primary"
+              className="inline-flex h-11 items-center gap-2 rounded-xl border border-border bg-background px-3.5 text-sm font-medium text-text-secondary transition-all duration-200 hover:-translate-y-0.5 hover:border-[color:rgba(255,255,255,0.12)] hover:text-text-primary"
             >
               <RefreshIcon />
               Refresh
@@ -638,7 +638,7 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
                 </td>
               </tr>
             ) : (
-              runs.map((run) => {
+              runs.map((run, index) => {
                 const details = runDetailsById[run.run_id];
                 const lossInfo = getLossInfo(run, details);
                 const stepCount = getStepCount(run, details);
@@ -647,7 +647,8 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
                   <tr
                     key={run.run_id}
                     onClick={() => onRunClick?.(run)}
-                    className="group border-b border-border-subtle text-sm transition-colors hover:bg-surface-hover"
+                    className="mlrx-row-enter group border-b border-border-subtle text-sm transition-all duration-200 odd:bg-[rgba(255,255,255,0.01)] hover:bg-surface-hover"
+                    style={{ animationDelay: `${Math.min(index * 35, 210)}ms` }}
                   >
                     <td className="px-6 py-4">
                       <div className="text-[15px] font-semibold tracking-[-0.01em] text-text-primary">
@@ -685,7 +686,7 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
                       <div className="text-xs text-text-muted">{relativeCreatedAt}</div>
                     </td>
                     <td className="px-4 py-4">
-                      <div className="flex justify-end gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                      <div className="flex justify-end gap-1 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
                         {deleteConfirmId === run.run_id ? (
                           <>
                             <button
@@ -772,7 +773,7 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
             const lossInfo = getLossInfo(run, details);
             const stepCount = getStepCount(run, details);
             return (
-              <div key={run.run_id} className="rounded-xl border border-border bg-background p-4">
+              <div key={run.run_id} className="rounded-xl border border-border bg-background p-4 transition-all duration-200 hover:border-[color:rgba(91,148,255,0.32)]">
                 <div className="flex items-start justify-between gap-3">
                   <button
                     type="button"

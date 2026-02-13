@@ -55,14 +55,16 @@ function StatCard({
   value,
   sublabel,
   dotClassName,
+  className,
 }: {
   label: string;
   value: string;
   sublabel?: string;
   dotClassName?: string;
+  className?: string;
 }) {
   return (
-    <div className="rounded-2xl border border-border bg-surface px-5 py-4 sm:px-6 sm:py-5">
+    <div className={`rounded-2xl border border-border bg-surface px-5 py-4 shadow-[0_0_0_1px_rgba(255,255,255,0.01)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[color:rgba(91,148,255,0.35)] sm:px-6 sm:py-5 ${className || ''}`}>
       <div className="flex items-center gap-2 text-sm font-medium text-text-secondary">
         {dotClassName && <span className={`h-2 w-2 rounded-full ${dotClassName}`} />}
         {label}
@@ -127,9 +129,9 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(59,125,255,0.08)_0%,_transparent_38%),linear-gradient(180deg,_rgba(10,13,18,1)_0%,_rgba(10,13,18,1)_100%)]">
-      <div className="sticky top-0 z-20 border-b border-border bg-background">
+      <div className="sticky top-0 z-20 border-b border-border bg-background/95 backdrop-blur-sm">
         <div className="mx-auto flex w-full max-w-[1600px] items-center justify-between gap-4 px-5 py-5 sm:px-8">
-          <div className="flex items-center gap-3">
+          <div className="mlrx-fade-up flex items-center gap-3">
             <div className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-accent-subtle text-accent">
               <BoltIcon />
             </div>
@@ -138,17 +140,17 @@ export default function Home() {
               <p className="text-sm text-text-muted">Experiment tracking for ML runs anywhere</p>
             </div>
           </div>
-          <div className="hidden items-center gap-2 sm:flex">
+          <div className="mlrx-fade-up mlrx-fade-up-delay-1 hidden items-center gap-2 sm:flex">
             <Link
               href="/onboarding"
-              className="inline-flex h-11 items-center gap-2 rounded-xl border border-border bg-surface px-4 text-sm font-medium text-text-secondary hover:bg-surface-hover hover:text-text-primary"
+              className="inline-flex h-11 items-center gap-2 rounded-xl border border-border bg-surface px-4 text-sm font-medium text-text-secondary transition-all duration-200 hover:-translate-y-0.5 hover:bg-surface-hover hover:text-text-primary"
             >
               <BookIcon />
               Docs
             </Link>
             <Link
               href="/onboarding"
-              className="inline-flex h-11 items-center gap-2 rounded-xl bg-accent px-4 text-sm font-semibold text-white hover:bg-accent-hover"
+              className="inline-flex h-11 items-center gap-2 rounded-xl bg-accent px-4 text-sm font-semibold text-white transition-all duration-200 hover:-translate-y-0.5 hover:bg-accent-hover"
             >
               <PlusIcon />
               New Run
@@ -163,18 +165,21 @@ export default function Home() {
             label="Total Runs"
             value={overviewTotal.toLocaleString()}
             sublabel={`${tableStats.pageRuns} on this page`}
+            className="mlrx-fade-up"
           />
           <StatCard
             label="Running"
             value={overviewRunning.toLocaleString()}
             dotClassName="bg-[var(--badge-running-text)]"
+            className="mlrx-fade-up mlrx-fade-up-delay-1"
           />
           <StatCard
             label="Finished"
             value={overviewFinished.toLocaleString()}
             dotClassName="bg-[var(--badge-finished-text)]"
+            className="mlrx-fade-up mlrx-fade-up-delay-2"
           />
-          <StatCard label="Avg Duration" value={avgDurationLabel} />
+          <StatCard label="Avg Duration" value={avgDurationLabel} className="mlrx-fade-up mlrx-fade-up-delay-3" />
         </div>
 
         <Suspense fallback={<LoadingSkeleton />}>

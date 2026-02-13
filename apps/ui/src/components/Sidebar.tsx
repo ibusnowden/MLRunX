@@ -160,9 +160,9 @@ function SidebarLink({
     <Link
       href={href}
       onClick={onClick}
-      className={`group flex items-center gap-3 rounded-lg px-3 py-2 text-[15px] font-medium transition-colors ${
+      className={`group relative flex items-center gap-3 rounded-lg px-3 py-2 text-[15px] font-medium transition-all duration-200 ${
         active
-          ? 'bg-sidebar-active text-accent'
+          ? 'bg-sidebar-active text-accent shadow-[inset_0_0_0_1px_rgba(59,125,255,0.16)]'
           : 'text-sidebar-text hover:bg-sidebar-hover hover:text-sidebar-text-active'
       }`}
     >
@@ -233,7 +233,7 @@ export function Sidebar() {
       />
 
       <aside
-        className={`fixed left-0 top-0 z-50 flex h-screen w-56 flex-col border-r border-sidebar-border bg-sidebar-bg transition-transform duration-200 ${
+        className={`fixed left-0 top-0 z-50 flex h-screen w-56 flex-col border-r border-sidebar-border bg-[linear-gradient(180deg,_rgba(15,18,24,1)_0%,_rgba(12,15,21,1)_100%)] transition-transform duration-200 ${
           mobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'
         }`}
       >
@@ -290,7 +290,7 @@ export function Sidebar() {
         </nav>
 
         <div className="border-t border-sidebar-border p-4">
-          <div className="rounded-xl border border-sidebar-border bg-background px-3 py-3">
+          <div className="rounded-xl border border-sidebar-border bg-background px-3 py-3 shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
             <div className="flex items-center gap-3">
               <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-[#6366f1] to-[#3b7dff] text-xs font-semibold text-white">
                 {initials}
@@ -305,7 +305,7 @@ export function Sidebar() {
                 type="button"
                 onClick={() => void handleLogout()}
                 disabled={loggingOut}
-                className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-sidebar-border bg-surface px-2 py-1.5 text-xs font-medium text-text-secondary hover:bg-surface-hover hover:text-text-primary disabled:opacity-60"
+                className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-sidebar-border bg-surface px-2 py-1.5 text-xs font-medium text-text-secondary transition-all duration-200 hover:-translate-y-0.5 hover:bg-surface-hover hover:text-text-primary disabled:opacity-60"
               >
                 <LogoutIcon />
                 {loggingOut ? 'Signing out...' : 'Sign Out'}
@@ -313,7 +313,7 @@ export function Sidebar() {
               <button
                 type="button"
                 onClick={toggleTheme}
-                className="inline-flex items-center justify-center rounded-md border border-sidebar-border bg-surface p-1.5 text-text-secondary hover:bg-surface-hover hover:text-text-primary"
+                className="inline-flex items-center justify-center rounded-md border border-sidebar-border bg-surface p-1.5 text-text-secondary transition-all duration-200 hover:-translate-y-0.5 hover:bg-surface-hover hover:text-text-primary"
                 title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
               >
                 <ThemeIcon isDark={isDark} />

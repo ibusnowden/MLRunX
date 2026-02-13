@@ -153,3 +153,46 @@ body {
 .u-legend {
   font-family: var(--font-geist-sans), system-ui, sans-serif !important;
 }
+
+/* Dashboard motion helpers */
+@keyframes mlrxFadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes mlrxRowIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.mlrx-fade-up {
+  animation: mlrxFadeUp 0.34s ease-out both;
+}
+
+.mlrx-fade-up-delay-1 {
+  animation-delay: 0.06s;
+}
+
+.mlrx-fade-up-delay-2 {
+  animation-delay: 0.12s;
+}
+
+.mlrx-fade-up-delay-3 {
+  animation-delay: 0.18s;
+}
+
+.mlrx-row-enter {
+  animation: mlrxRowIn 0.26s ease-out both;
+}
