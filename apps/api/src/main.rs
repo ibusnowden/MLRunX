@@ -52,7 +52,7 @@ use services::{
     CardinalityTracker, IdempotencyResult, IdempotencyStore, IngestServiceImpl, MetricPayload,
     ParamPayload, TagPayload, compute_payload_hash, ingest::InMemoryStore,
 };
-use storage::{MetricRow, SqliteStore};
+use storage::{MetricRow, ProjectRow, SqliteStore};
 
 /// Application state shared across handlers.
 #[derive(Clone)]
@@ -143,20 +143,34 @@ fn auth_mode_label(auth: &AuthContext) -> &'static str {
     }
 }
 
+fn auth_user_id(auth: &AuthContext) -> Option<String> {
+    if auth.is_dev_mode || !auth.is_ui_jwt() {
+        return None;
+    }
+    auth.api_key
+        .id
+        .split_once(':')
+        .map(|(_, value)| value.to_string())
+}
+
 fn audit_actor_ids(auth: &AuthContext) -> (Option<String>, Option<String>) {
     if auth.is_dev_mode {
         return (None, None);
     }
 
     if auth.is_ui_jwt() {
-        let user_id = auth
-            .api_key
-            .id
-            .split_once(':')
-            .map(|(_, value)| value.to_string());
-        (user_id, None)
+        (auth_user_id(auth), None)
     } else {
         (None, Some(auth.api_key.id.clone()))
+    }
+}
+
+fn is_unique_project_name_error(err: &storage::SqliteError) -> bool {
+    match err {
+        storage::SqliteError::Database(db_err) => db_err
+            .to_string()
+            .contains("UNIQUE constraint failed: projects.name"),
+        _ => false,
     }
 }
 
@@ -532,6 +546,192 @@ struct InitRunHttpResponse {
     offline: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateProjectRequest {
+    name: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectResponse {
+    project_id: String,
+    name: String,
+    description: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ListProjectsResponse {
+    projects: Vec<ProjectResponse>,
+}
+
+fn project_response_from_row(row: ProjectRow) -> ProjectResponse {
+    ProjectResponse {
+        project_id: row.id,
+        name: row.name,
+        description: row.description,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
+async fn http_list_projects(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<ListProjectsResponse>, (StatusCode, String)> {
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Read,
+        None,
+        None,
+        "projects.list",
+        "project",
+        None,
+    )
+    .await?;
+
+    let rows = if auth.is_global() && !auth.is_ui_jwt() {
+        state
+            .sqlite_store
+            .list_projects()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else if let Some(allowed_projects) = auth.allowed_project_ids() {
+        let project_ids: Vec<String> = allowed_projects.iter().cloned().collect();
+        state
+            .sqlite_store
+            .list_projects_by_ids(&project_ids)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else if let Some(project_id) = auth.project_id() {
+        state
+            .sqlite_store
+            .list_projects_by_ids(&[project_id.to_string()])
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        Vec::new()
+    };
+
+    let projects = rows.into_iter().map(project_response_from_row).collect();
+    Ok(Json(ListProjectsResponse { projects }))
+}
+
+async fn http_create_project(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<CreateProjectRequest>,
+) -> Result<Json<ProjectResponse>, (StatusCode, String)> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Project name is required.".to_string(),
+        ));
+    }
+
+    if auth.is_ui_jwt() {
+        auth.require_scope("write")?;
+        let user_id = auth_user_id(&auth).ok_or((
+            StatusCode::FORBIDDEN,
+            "Unable to resolve user identity for project creation.".to_string(),
+        ))?;
+
+        let row = state
+            .sqlite_store
+            .create_project(name, req.description.as_deref())
+            .await
+            .map_err(|e| {
+                if is_unique_project_name_error(&e) {
+                    (
+                        StatusCode::CONFLICT,
+                        format!("Project '{}' already exists.", name),
+                    )
+                } else {
+                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                }
+            })?;
+
+        state
+            .sqlite_store
+            .grant_project_membership(&row.id, &user_id, "owner", Some(&user_id))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        emit_audit_event(
+            &state,
+            Some(&auth),
+            Some(&row.id),
+            None,
+            "project.create",
+            "project",
+            Some(&row.id),
+            "success",
+            serde_json::json!({
+                "name": row.name,
+                "auth_mode": auth_mode_label(&auth),
+            }),
+        )
+        .await;
+
+        return Ok(Json(project_response_from_row(row)));
+    }
+
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Admin,
+        None,
+        None,
+        "project.create",
+        "project",
+        None,
+    )
+    .await?;
+
+    if !auth.is_global() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Project creation requires a global admin key or UI session.".to_string(),
+        ));
+    }
+
+    let row = state
+        .sqlite_store
+        .create_project(name, req.description.as_deref())
+        .await
+        .map_err(|e| {
+            if is_unique_project_name_error(&e) {
+                (
+                    StatusCode::CONFLICT,
+                    format!("Project '{}' already exists.", name),
+                )
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
+        })?;
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        Some(&row.id),
+        None,
+        "project.create",
+        "project",
+        Some(&row.id),
+        "success",
+        serde_json::json!({
+            "name": row.name,
+            "auth_mode": auth_mode_label(&auth),
+        }),
+    )
+    .await;
+
+    Ok(Json(project_response_from_row(row)))
+}
+
 /// Initialize a run via HTTP (for SDK HTTP transport).
 async fn http_init_run(
     State(state): State<AppState>,
@@ -569,75 +769,38 @@ async fn http_init_run(
         }));
     }
 
-    // Resolve project identity (prefer explicit project_id).
-    let (project_id, resolved_project_name) = if let Some(ref project_id) = req.project_id {
-        let name = state
-            .sqlite_store
-            .get_project_name_by_id(project_id)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    format!("Project not found: '{project_id}'"),
-                )
-            })?;
-
-        if let Some(ref project_name) = req.project {
-            if project_name != &name {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "project_id '{project_id}' does not match project name '{project_name}'"
-                    ),
-                ));
-            }
+    // Phase 1: explicit project boundary.
+    // Run init must target an existing project_id; project creation is handled via /api/v1/projects.
+    let project_id = req.project_id.as_ref().ok_or((
+        StatusCode::BAD_REQUEST,
+        "project_id is required. Create a project first via POST /api/v1/projects.".to_string(),
+    ))?;
+    let resolved_project_name = state
+        .sqlite_store
+        .get_project_name_by_id(project_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Project not found: '{project_id}'"),
+            )
+        })?;
+    if let Some(ref project_name) = req.project {
+        if project_name != &resolved_project_name {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("project_id '{project_id}' does not match project name '{project_name}'"),
+            ));
         }
-
-        (project_id.clone(), Some(name))
-    } else if let Some(ref project_name) = req.project {
-        let looks_like_uuid = uuid::Uuid::parse_str(project_name).is_ok();
-        if looks_like_uuid {
-            if let Some(name) = state
-                .sqlite_store
-                .get_project_name_by_id(project_name)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            {
-                (project_name.clone(), Some(name))
-            } else {
-                warn!(
-                    project = %project_name,
-                    "Project looks like a UUID but no matching project_id was found; treating it as a project name"
-                );
-                let id = state
-                    .sqlite_store
-                    .get_or_create_project(project_name)
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                (id, Some(project_name.clone()))
-            }
-        } else {
-            let id = state
-                .sqlite_store
-                .get_or_create_project(project_name)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            (id, Some(project_name.clone()))
-        }
-    } else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "project or project_id is required.".to_string(),
-        ));
-    };
+    }
 
     // Enforce project scope and write permission
     require_endpoint_access(
         &state,
         &auth,
         EndpointRbacTier::Write,
-        Some(&project_id),
+        Some(project_id),
         Some(&run_id),
         "run.init",
         "run",
@@ -648,7 +811,7 @@ async fn http_init_run(
     // Create run in SQLite
     state
         .sqlite_store
-        .create_run(&run_id, &project_id, req.name.as_deref())
+        .create_run(&run_id, project_id, req.name.as_deref())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -666,7 +829,7 @@ async fn http_init_run(
     info!(
         run_id = %run_id,
         project_id = %project_id,
-        project_name = ?resolved_project_name,
+        project_name = %resolved_project_name,
         "HTTP: Initialized run (SQLite)"
     );
 
@@ -680,7 +843,8 @@ async fn http_init_run(
         Some(&run_id),
         "success",
         serde_json::json!({
-            "project_name": req.project,
+            "project_name": resolved_project_name,
+            "project_id": project_id,
             "source": "http_init_run",
         }),
     )
@@ -2477,6 +2641,11 @@ fn build_http_router(state: AppState) -> Router {
         .route("/api/v1/runs", post(http_init_run))
         .route("/api/v1/ingest/batch", post(http_ingest_batch))
         .route("/api/v1/runs/{run_id}/finish", post(http_finish_run))
+        // Project management endpoints
+        .route(
+            "/api/v1/projects",
+            get(http_list_projects).post(http_create_project),
+        )
         // Query API endpoints
         .route("/api/v1/runs", get(http_list_runs))
         .route(
@@ -2927,6 +3096,51 @@ mod tests {
 
     #[tokio::test]
     async fn test_init_run_http() {
+        let store = Arc::new(InMemoryStore::new());
+        let sqlite_store = Arc::new(
+            SqliteStore::new(":memory:")
+                .await
+                .expect("Failed to create test SQLite store"),
+        );
+        let project_id = sqlite_store
+            .create_project("test-project", None)
+            .await
+            .expect("Failed to create test project")
+            .id;
+        let key_store = Arc::new(ApiKeyStore::new_dev_mode());
+        let idempotency_store = Arc::new(IdempotencyStore::new());
+        let cardinality_tracker = Arc::new(CardinalityTracker::default());
+        let state = AppState {
+            store,
+            sqlite_store,
+            key_store,
+            idempotency_store,
+            cardinality_tracker,
+        };
+        let app = build_http_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": project_id,
+                            "name": "test-run"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_init_run_http_requires_project_id() {
         let app = test_app().await;
         let response = app
             .oneshot(
@@ -2935,14 +3149,68 @@ mod tests {
                     .uri("/api/v1/runs")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"project": "test-project", "name": "test-run"}"#,
+                        serde_json::json!({
+                            "name": "missing-project-id"
+                        })
+                        .to_string(),
                     ))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_text(response).await;
+        assert!(body.contains("project_id is required"));
+    }
+
+    #[tokio::test]
+    async fn test_project_create_and_list_routes() {
+        let app = test_app().await;
+
+        let create_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "phase1-project",
+                            "description": "Project for route coverage"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_response.status(), StatusCode::OK);
+
+        let list_response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/projects")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_response.status(), StatusCode::OK);
+
+        let payload: serde_json::Value = serde_json::from_str(&response_text(list_response).await)
+            .expect("List projects response should be JSON");
+        let projects = payload["projects"]
+            .as_array()
+            .expect("projects should be an array");
+        assert!(
+            projects
+                .iter()
+                .any(|project| project["name"].as_str() == Some("phase1-project")),
+            "Created project should be returned by list endpoint"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

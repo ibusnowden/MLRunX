@@ -12,6 +12,8 @@ from mlrunx.config import Config
 from mlrunx.queue import Event, EventQueue, EventType
 from mlrunx.run import Run
 
+TEST_PROJECT_ID = "019c55f9-084a-7511-9393-6c17ede4a70f"
+
 
 class TestConfig:
     """Tests for configuration."""
@@ -108,9 +110,9 @@ class TestRun:
         mock_transport.init_run.return_value = {"run_id": "test-123"}
         mock_transport_cls.return_value = mock_transport
 
-        run = Run(project="test-project", name="test-run")
+        run = Run(project_id=TEST_PROJECT_ID, name="test-run")
 
-        assert run.project == "test-project"
+        assert run.project == TEST_PROJECT_ID
         assert run.name == "test-run"
         assert not run.is_finished
 
@@ -124,7 +126,7 @@ class TestRun:
         mock_transport.init_run.return_value = {"run_id": "test-123"}
         mock_transport_cls.return_value = mock_transport
 
-        run = Run(project="test-project")
+        run = Run(project_id=TEST_PROJECT_ID)
 
         # Log some metrics
         run.log({"loss": 0.5, "accuracy": 0.8}, step=0)
@@ -143,7 +145,7 @@ class TestRun:
         mock_transport.init_run.return_value = {"run_id": "test-123"}
         mock_transport_cls.return_value = mock_transport
 
-        with Run(project="test-project") as run:
+        with Run(project_id=TEST_PROJECT_ID) as run:
             run.log({"loss": 0.5})
             assert not run.is_finished
 
@@ -157,10 +159,16 @@ class TestRun:
         mock_transport.init_run.return_value = {"run_id": "offline-123", "offline": True}
         mock_transport_cls.return_value = mock_transport
 
-        run = Run(project="test-project")
+        run = Run(project_id=TEST_PROJECT_ID)
 
         assert run.is_offline
         run.finish()
+
+    @pytest.mark.unit
+    def test_run_init_rejects_project_name_without_id(self) -> None:
+        """Project boundaries require explicit project_id values."""
+        with pytest.raises(ValueError, match="project_id is required"):
+            Run(project="test-project-name")
 
 
 class TestModuleAPI:
@@ -174,7 +182,7 @@ class TestModuleAPI:
         mock_transport.init_run.return_value = {"run_id": "test-123"}
         mock_transport_cls.return_value = mock_transport
 
-        run = mlrunx.init(project="test-project")
+        run = mlrunx.init(project_id=TEST_PROJECT_ID)
         assert run is not None
 
         # Should work via module-level API
@@ -204,7 +212,7 @@ class TestNonBlocking:
         mock_transport.init_run.return_value = {"run_id": "test-123"}
         mock_transport_cls.return_value = mock_transport
 
-        run = Run(project="test-project")
+        run = Run(project_id=TEST_PROJECT_ID)
 
         # Log many metrics and measure time
         start = time.perf_counter()
