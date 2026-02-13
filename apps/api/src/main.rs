@@ -53,9 +53,9 @@ use services::{
     ParamPayload, TagPayload, compute_payload_hash, ingest::InMemoryStore,
 };
 use storage::{
-    AuthSessionAdminRow, CreateProjectInput, CreateRunInput, MetricRow, ProjectRepository,
-    ProjectRow, RunRepository, RunRow, RunStatus as PostgresRunStatus, SqliteStore,
-    UserProjectMembershipRow, UserRow,
+    AuditEventRow, AuthSessionAdminRow, CreateProjectInput, CreateRunInput, MetricRow,
+    ProjectRepository, ProjectRow, RunRepository, RunRow, RunStatus as PostgresRunStatus,
+    SqliteStore, UserProjectMembershipRow, UserRow,
 };
 
 /// Application state shared across handlers.
@@ -1022,6 +1022,16 @@ struct AdminSessionsQuery {
     include_revoked: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct AdminAuditEventsQuery {
+    project_id: Option<String>,
+    user_id: Option<String>,
+    key_id: Option<String>,
+    action: Option<String>,
+    outcome: Option<String>,
+    limit: Option<usize>,
+}
+
 #[derive(Debug, Serialize)]
 struct AdminSessionResponse {
     session_id: String,
@@ -1037,6 +1047,29 @@ struct AdminSessionResponse {
 #[derive(Debug, Serialize)]
 struct AdminListSessionsResponse {
     sessions: Vec<AdminSessionResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminAuditEventResponse {
+    id: i64,
+    occurred_at: String,
+    actor_user_id: Option<String>,
+    actor_key_id: Option<String>,
+    project_id: Option<String>,
+    run_id: Option<String>,
+    action: String,
+    resource_type: String,
+    resource_id: Option<String>,
+    outcome: String,
+    request_id: Option<String>,
+    client_ip: Option<String>,
+    user_agent: Option<String>,
+    metadata: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminListAuditEventsResponse {
+    events: Vec<AdminAuditEventResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1083,6 +1116,28 @@ fn admin_session_response_from_row(row: AuthSessionAdminRow) -> AdminSessionResp
         revoked_at: row.revoked_at,
         client_ip: row.client_ip,
         user_agent: row.user_agent,
+    }
+}
+
+fn admin_audit_event_response_from_row(row: AuditEventRow) -> AdminAuditEventResponse {
+    let metadata = serde_json::from_str::<serde_json::Value>(&row.metadata)
+        .unwrap_or_else(|_| serde_json::json!({ "raw": row.metadata }));
+
+    AdminAuditEventResponse {
+        id: row.id,
+        occurred_at: row.occurred_at,
+        actor_user_id: row.actor_user_id,
+        actor_key_id: row.actor_key_id,
+        project_id: row.project_id,
+        run_id: row.run_id,
+        action: row.action,
+        resource_type: row.resource_type,
+        resource_id: row.resource_id,
+        outcome: row.outcome,
+        request_id: row.request_id,
+        client_ip: row.client_ip,
+        user_agent: row.user_agent,
+        metadata,
     }
 }
 
@@ -1374,6 +1429,53 @@ async fn http_admin_revoke_session(
     Ok(Json(AdminMutationResponse {
         status: "ok".to_string(),
     }))
+}
+
+async fn http_admin_list_audit_events(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Query(query): axum::extract::Query<AdminAuditEventsQuery>,
+) -> Result<Json<AdminListAuditEventsResponse>, (StatusCode, String)> {
+    require_platform_admin_access(&state, &auth, "admin.audit.list", "audit_event", None).await?;
+
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let events = state
+        .sqlite_store
+        .list_audit_events_for_admin(
+            query.project_id.as_deref(),
+            query.user_id.as_deref(),
+            query.key_id.as_deref(),
+            query.action.as_deref(),
+            query.outcome.as_deref(),
+            limit,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .map(admin_audit_event_response_from_row)
+        .collect();
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        None,
+        None,
+        "admin.audit.list",
+        "audit_event",
+        None,
+        "success",
+        serde_json::json!({
+            "project_id": query.project_id,
+            "user_id": query.user_id,
+            "key_id": query.key_id,
+            "action": query.action,
+            "outcome": query.outcome,
+            "limit": limit,
+        }),
+    )
+    .await;
+
+    Ok(Json(AdminListAuditEventsResponse { events }))
 }
 
 /// Initialize a run via HTTP (for SDK HTTP transport).
@@ -3376,6 +3478,10 @@ fn build_http_router(state: AppState) -> Router {
             "/api/v1/admin/sessions/{session_id}/revoke",
             post(http_admin_revoke_session),
         )
+        .route(
+            "/api/v1/admin/audit-events",
+            get(http_admin_list_audit_events),
+        )
         // Query API endpoints
         .route("/api/v1/runs", get(http_list_runs))
         .route(
@@ -4568,6 +4674,62 @@ mod tests {
             .await
             .expect("Session check request failed");
         assert_eq!(session_response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_platform_admin_can_list_audit_events() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let (global_admin_key, _) = harness
+            .key_store
+            .create_key(
+                None,
+                Some("platform-admin".to_string()),
+                vec!["admin".to_string()],
+            )
+            .await;
+
+        // Prime at least one audit event under the admin namespace.
+        let seed_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/admin/users")
+                    .header("x-api-key", &global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build admin users request"),
+            )
+            .await
+            .expect("Admin users request failed");
+        assert_eq!(seed_response.status(), StatusCode::OK);
+
+        let audit_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/admin/audit-events?action=admin.users.list&limit=20")
+                    .header("x-api-key", &global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build admin audit request"),
+            )
+            .await
+            .expect("Admin audit request failed");
+        assert_eq!(audit_response.status(), StatusCode::OK);
+
+        let payload: serde_json::Value = serde_json::from_str(&response_text(audit_response).await)
+            .expect("Admin audit response should be JSON");
+        let events = payload["events"]
+            .as_array()
+            .expect("events should be an array");
+        assert!(
+            events
+                .iter()
+                .any(|event| event["action"].as_str() == Some("admin.users.list")),
+            "Expected admin.users.list audit entry"
+        );
     }
 
     #[tokio::test]

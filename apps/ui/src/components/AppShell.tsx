@@ -24,6 +24,7 @@ function getPageTitle(pathname: string): string {
   if (pathname.startsWith('/runs/')) return 'Run Details';
   if (pathname === '/compare') return 'Compare';
   if (pathname === '/settings') return 'Access Console';
+  if (pathname === '/admin') return 'Platform Admin';
   if (pathname === '/login') return 'Login';
   if (pathname === '/signup') return 'Sign Up';
   return 'MLRunX';

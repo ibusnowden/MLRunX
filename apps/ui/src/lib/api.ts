@@ -70,7 +70,7 @@ export interface RunDetail extends Run {
   }>;
 }
 
-class ApiError extends Error {
+export class ApiError extends Error {
   constructor(
     public status: number,
     message: string
@@ -129,6 +129,86 @@ export interface ApiKeyInfo {
 
 export interface ListApiKeysResponse {
   keys: ApiKeyInfo[];
+}
+
+export interface ProjectInfo {
+  project_id: string;
+  name: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ListProjectsResponse {
+  projects: ProjectInfo[];
+}
+
+export interface AdminUser {
+  user_id: string;
+  email: string | null;
+  display_name: string | null;
+  auth_provider: string;
+  external_subject: string | null;
+  is_service_account: boolean;
+  disabled: boolean;
+  active_project_count: number;
+  active_session_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminListUsersResponse {
+  users: AdminUser[];
+}
+
+export interface AdminUserMembership {
+  project_id: string;
+  project_name: string;
+  role: string;
+  granted_by_user_id: string | null;
+  created_at: string;
+  revoked_at: string | null;
+}
+
+export interface AdminListUserMembershipsResponse {
+  user_id: string;
+  memberships: AdminUserMembership[];
+}
+
+export interface AdminSession {
+  session_id: string;
+  user_id: string;
+  created_at: string;
+  last_seen_at: string | null;
+  expires_at: string;
+  revoked_at: string | null;
+  client_ip: string | null;
+  user_agent: string | null;
+}
+
+export interface AdminListSessionsResponse {
+  sessions: AdminSession[];
+}
+
+export interface AdminAuditEvent {
+  id: number;
+  occurred_at: string;
+  actor_user_id: string | null;
+  actor_key_id: string | null;
+  project_id: string | null;
+  run_id: string | null;
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  outcome: string;
+  request_id: string | null;
+  client_ip: string | null;
+  user_agent: string | null;
+  metadata: unknown;
+}
+
+export interface AdminListAuditEventsResponse {
+  events: AdminAuditEvent[];
 }
 
 function normalizeApiBaseUrl(value: string): string {
@@ -324,6 +404,78 @@ export const api = {
       `/api/v1/keys/${encodeURIComponent(keyId)}`,
       { method: 'DELETE' },
       { skipApiKey: true }
+    );
+  },
+
+  async listProjects(): Promise<ListProjectsResponse> {
+    return fetchApi<ListProjectsResponse>('/api/v1/projects', {}, { skipApiKey: true });
+  },
+
+  async listAdminUsers(): Promise<AdminListUsersResponse> {
+    return fetchApi<AdminListUsersResponse>('/api/v1/admin/users');
+  },
+
+  async listAdminUserMemberships(
+    userId: string,
+    params: { includeRevoked?: boolean } = {}
+  ): Promise<AdminListUserMembershipsResponse> {
+    const searchParams = new URLSearchParams();
+    if (params.includeRevoked) searchParams.set('include_revoked', 'true');
+    const query = searchParams.toString();
+    return fetchApi<AdminListUserMembershipsResponse>(
+      `/api/v1/admin/users/${encodeURIComponent(userId)}/memberships${query ? `?${query}` : ''}`
+    );
+  },
+
+  async disableAdminUser(userId: string): Promise<AdminUser> {
+    return fetchApi<AdminUser>(`/api/v1/admin/users/${encodeURIComponent(userId)}/disable`, {
+      method: 'POST',
+    });
+  },
+
+  async enableAdminUser(userId: string): Promise<AdminUser> {
+    return fetchApi<AdminUser>(`/api/v1/admin/users/${encodeURIComponent(userId)}/enable`, {
+      method: 'POST',
+    });
+  },
+
+  async listAdminSessions(
+    params: { userId?: string; includeRevoked?: boolean } = {}
+  ): Promise<AdminListSessionsResponse> {
+    const searchParams = new URLSearchParams();
+    if (params.userId) searchParams.set('user_id', params.userId);
+    if (params.includeRevoked) searchParams.set('include_revoked', 'true');
+    const query = searchParams.toString();
+    return fetchApi<AdminListSessionsResponse>(`/api/v1/admin/sessions${query ? `?${query}` : ''}`);
+  },
+
+  async revokeAdminSession(sessionId: string): Promise<{ status: string }> {
+    return fetchApi<{ status: string }>(
+      `/api/v1/admin/sessions/${encodeURIComponent(sessionId)}/revoke`,
+      { method: 'POST' }
+    );
+  },
+
+  async listAdminAuditEvents(
+    params: {
+      projectId?: string;
+      userId?: string;
+      keyId?: string;
+      action?: string;
+      outcome?: string;
+      limit?: number;
+    } = {}
+  ): Promise<AdminListAuditEventsResponse> {
+    const searchParams = new URLSearchParams();
+    if (params.projectId) searchParams.set('project_id', params.projectId);
+    if (params.userId) searchParams.set('user_id', params.userId);
+    if (params.keyId) searchParams.set('key_id', params.keyId);
+    if (params.action) searchParams.set('action', params.action);
+    if (params.outcome) searchParams.set('outcome', params.outcome);
+    if (params.limit) searchParams.set('limit', String(params.limit));
+    const query = searchParams.toString();
+    return fetchApi<AdminListAuditEventsResponse>(
+      `/api/v1/admin/audit-events${query ? `?${query}` : ''}`
     );
   },
 

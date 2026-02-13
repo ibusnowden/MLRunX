@@ -134,4 +134,49 @@ describe('api key management client', () => {
     expect(headers['Authorization']).toBe('Bearer provider-jwt-token');
     expect(headers['X-API-Key']).toBeUndefined();
   });
+
+  it('lists admin audit events with encoded query filters', async () => {
+    window.localStorage.setItem(API_URL_STORAGE_KEY, 'https://mlrunx.ibra-niang.com');
+    window.localStorage.setItem(API_KEY_STORAGE_KEY, 'mlrunx_platform_admin_key');
+
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse({ events: [] }));
+
+    await api.listAdminAuditEvents({
+      action: 'admin.users.list',
+      userId: 'user/123',
+      limit: 50,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = headersToRecord(options.headers);
+
+    expect(url).toBe(
+      'https://mlrunx.ibra-niang.com/api/v1/admin/audit-events?user_id=user%2F123&action=admin.users.list&limit=50'
+    );
+    expect(headers['X-API-Key']).toBe('mlrunx_platform_admin_key');
+    expect(options.credentials).toBe('same-origin');
+  });
+
+  it('lists projects using UI-session auth', async () => {
+    window.localStorage.setItem(API_URL_STORAGE_KEY, 'https://mlrunx.ibra-niang.com');
+    window.localStorage.setItem(API_KEY_STORAGE_KEY, 'mlrunx_local_key');
+
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse({ projects: [] }));
+
+    const result = await api.listProjects();
+    expect(result.projects).toEqual([]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = headersToRecord(options.headers);
+
+    expect(url).toBe('https://mlrunx.ibra-niang.com/api/v1/projects');
+    expect(options.credentials).toBe('include');
+    expect(headers['X-API-Key']).toBeUndefined();
+  });
 });

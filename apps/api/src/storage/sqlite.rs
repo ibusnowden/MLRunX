@@ -767,6 +767,79 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// List audit events for platform admin views.
+    pub async fn list_audit_events_for_admin(
+        &self,
+        project_id: Option<&str>,
+        actor_user_id: Option<&str>,
+        actor_key_id: Option<&str>,
+        action: Option<&str>,
+        outcome: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AuditEventRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let mut sql = String::from(
+            r#"
+            SELECT id, occurred_at, actor_user_id, actor_key_id, project_id, run_id,
+                   action, resource_type, resource_id, outcome, request_id, client_ip, user_agent, metadata
+            FROM audit_events
+            WHERE 1=1
+            "#,
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+
+        if let Some(project_id) = project_id {
+            sql.push_str(" AND project_id = ?");
+            params_vec.push(Box::new(project_id.to_string()));
+        }
+        if let Some(actor_user_id) = actor_user_id {
+            sql.push_str(" AND actor_user_id = ?");
+            params_vec.push(Box::new(actor_user_id.to_string()));
+        }
+        if let Some(actor_key_id) = actor_key_id {
+            sql.push_str(" AND actor_key_id = ?");
+            params_vec.push(Box::new(actor_key_id.to_string()));
+        }
+        if let Some(action) = action {
+            sql.push_str(" AND action = ?");
+            params_vec.push(Box::new(action.to_string()));
+        }
+        if let Some(outcome) = outcome {
+            sql.push_str(" AND outcome = ?");
+            params_vec.push(Box::new(outcome.to_string()));
+        }
+
+        let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        sql.push_str(" ORDER BY occurred_at DESC, id DESC LIMIT ?");
+        params_vec.push(Box::new(sql_limit));
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|value| value.as_ref()).collect();
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            Ok(AuditEventRow {
+                id: row.get(0)?,
+                occurred_at: row.get(1)?,
+                actor_user_id: row.get(2)?,
+                actor_key_id: row.get(3)?,
+                project_id: row.get(4)?,
+                run_id: row.get(5)?,
+                action: row.get(6)?,
+                resource_type: row.get(7)?,
+                resource_id: row.get(8)?,
+                outcome: row.get(9)?,
+                request_id: row.get(10)?,
+                client_ip: row.get(11)?,
+                user_agent: row.get(12)?,
+                metadata: row.get(13)?,
+            })
+        })?;
+        let events: Result<Vec<_>, _> = rows.collect();
+        Ok(events?)
+    }
+
     /// Create a UI auth session.
     pub async fn insert_auth_session(
         &self,
@@ -1751,6 +1824,25 @@ pub struct AuthSessionAdminRow {
     pub user_agent: Option<String>,
 }
 
+/// An audit event row for platform admin visibility.
+#[derive(Debug, Clone)]
+pub struct AuditEventRow {
+    pub id: i64,
+    pub occurred_at: String,
+    pub actor_user_id: Option<String>,
+    pub actor_key_id: Option<String>,
+    pub project_id: Option<String>,
+    pub run_id: Option<String>,
+    pub action: String,
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+    pub outcome: String,
+    pub request_id: Option<String>,
+    pub client_ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub metadata: String,
+}
+
 /// A share token row.
 #[derive(Debug, Clone)]
 pub struct ShareTokenRow {
@@ -2110,6 +2202,48 @@ mod tests {
             .unwrap();
         assert_eq!(outcome, "denied");
         assert!(metadata.contains("rbac_denied"));
+    }
+
+    #[tokio::test]
+    async fn test_list_audit_events_for_admin() {
+        let store = create_test_store().await;
+        let project_id = store
+            .get_or_create_project("audit-admin-project")
+            .await
+            .unwrap();
+
+        store
+            .insert_audit_event(
+                None,
+                None,
+                Some(&project_id),
+                None,
+                "project.create",
+                "project",
+                Some(&project_id),
+                "success",
+                Some(r#"{"source":"unit-test"}"#),
+            )
+            .await
+            .unwrap();
+
+        let events = store
+            .list_audit_events_for_admin(
+                Some(&project_id),
+                None,
+                None,
+                Some("project.create"),
+                Some("success"),
+                10,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "project.create");
+        assert_eq!(events[0].resource_type, "project");
+        assert_eq!(events[0].project_id.as_deref(), Some(project_id.as_str()));
+        assert!(events[0].metadata.contains("\"source\":\"unit-test\""));
     }
 
     #[tokio::test]
