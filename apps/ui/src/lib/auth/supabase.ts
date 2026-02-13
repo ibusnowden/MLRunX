@@ -44,7 +44,7 @@ function throwIfSupabaseError(error: { message: string } | null): void {
   }
 }
 
-export type OAuthProvider = Extract<Provider, 'github' | 'google' | 'azure'>;
+export type OAuthProvider = Extract<Provider, 'google'>;
 
 export async function signInWithEmailPassword(email: string, password: string): Promise<Session> {
   const { data, error } = await requireSupabaseClient().auth.signInWithPassword({
@@ -101,6 +101,30 @@ export async function getSupabaseAccessToken(): Promise<string | null> {
   const { data, error } = await requireSupabaseClient().auth.getSession();
   throwIfSupabaseError(error);
   return data.session?.access_token ?? null;
+}
+
+export interface SupabaseUserIdentity {
+  id: string;
+  email: string | null;
+  displayName: string | null;
+}
+
+export async function getSupabaseUserIdentity(): Promise<SupabaseUserIdentity | null> {
+  const { data, error } = await requireSupabaseClient().auth.getUser();
+  throwIfSupabaseError(error);
+
+  const user = data.user;
+  if (!user) return null;
+
+  const metadata = user.user_metadata as Record<string, unknown> | null;
+  const rawDisplayName = metadata?.display_name;
+  const displayName = typeof rawDisplayName === 'string' ? rawDisplayName : null;
+
+  return {
+    id: user.id,
+    email: user.email ?? null,
+    displayName,
+  };
 }
 
 export async function signOutSupabase(): Promise<void> {

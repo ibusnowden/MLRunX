@@ -13,9 +13,7 @@ import {
 } from '@/lib/auth/supabase';
 
 const OAUTH_PROVIDERS: Array<{ provider: OAuthProvider; label: string }> = [
-  { provider: 'github', label: 'GitHub' },
   { provider: 'google', label: 'Google' },
-  { provider: 'azure', label: 'Microsoft' },
 ];
 
 function LoginContent() {
@@ -68,7 +66,7 @@ function LoginContent() {
       <div className="w-full max-w-lg rounded-xl border border-border bg-surface p-6 sm:p-8">
         <h1 className="text-2xl font-bold text-text-primary">Log in to your account</h1>
         <p className="mt-2 text-sm text-text-secondary">
-          Sign in with email/password or OAuth, then mint API keys from Access Console.
+          Sign in with email/password or Google, then mint API keys from Access Console.
         </p>
 
         {!configured ? (
@@ -78,7 +76,7 @@ function LoginContent() {
           </div>
         ) : (
           <>
-            <div className="mt-6 grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <div className="mt-6 grid grid-cols-1 gap-2">
               {OAUTH_PROVIDERS.map(({ provider, label }) => (
                 <button
                   key={provider}

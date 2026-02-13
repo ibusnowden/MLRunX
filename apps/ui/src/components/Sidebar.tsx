@@ -1,9 +1,12 @@
 'use client';
 
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { useState } from 'react';
 import { useTheme } from './ThemeProvider';
 import { useSidebar } from './SidebarProvider';
+import { api, clearStoredApiConfig } from '@/lib/api';
+import { signOutSupabase } from '@/lib/auth/supabase';
 
 // ── Icons ──
 
@@ -34,6 +37,26 @@ const SettingsIcon = () => (
   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+  </svg>
+);
+
+const ProfileIcon = () => (
+  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15.75 6.75a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.5 20.12a7.5 7.5 0 0115 0" />
+  </svg>
+);
+
+const ApiKeyIcon = () => (
+  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15.75 5.25a3 3 0 014.24 4.24l-5.92 5.92a4.5 4.5 0 01-6.36 0l-.2-.2a4.5 4.5 0 010-6.36l1.44-1.43" />
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M9.75 18.75l2.25-2.25M13.5 15l2.25-2.25" />
+  </svg>
+);
+
+const LogoutIcon = () => (
+  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15.75 9V5.625A2.625 2.625 0 0013.125 3h-6.75A2.625 2.625 0 003.75 5.625v12.75A2.625 2.625 0 006.375 21h6.75a2.625 2.625 0 002.625-2.625V15" />
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M18 12H9m9 0l-3-3m3 3l-3 3" />
   </svg>
 );
 
@@ -76,18 +99,43 @@ const NAV_ITEMS = [
   { href: '/compare', label: 'Compare', icon: CompareIcon },
 ];
 
-const BOTTOM_ITEMS = [
-  { href: '/settings', label: 'Access', icon: SettingsIcon },
+const ACCOUNT_ITEMS = [
+  { href: '/settings#profile', label: 'Profile', icon: ProfileIcon },
+  { href: '/settings#api-keys', label: 'API Keys', icon: ApiKeyIcon },
+  { href: '/settings#settings', label: 'Settings', icon: SettingsIcon },
 ];
 
 export function Sidebar() {
+  const router = useRouter();
   const pathname = usePathname();
   const { toggleTheme, isDark } = useTheme();
   const { collapsed, toggleCollapsed, mobileOpen, closeMobile } = useSidebar();
+  const [loggingOut, setLoggingOut] = useState(false);
 
   const isActive = (href: string) => {
+    if (href.startsWith('/settings#')) return pathname === '/settings';
     if (href === '/') return pathname === '/';
     return pathname.startsWith(href);
+  };
+
+  const handleLogout = async () => {
+    setLoggingOut(true);
+    try {
+      await api.logoutUiSession();
+    } catch {
+      // Ignore UI-session logout failures and continue best-effort sign-out.
+    }
+
+    try {
+      await signOutSupabase();
+    } catch {
+      // Ignore Supabase logout failures and still clear local browser state.
+    }
+
+    clearStoredApiConfig();
+    closeMobile();
+    router.replace('/login');
+    setLoggingOut(false);
   };
 
   return (
@@ -144,7 +192,10 @@ export function Sidebar() {
         </nav>
 
         <div className="border-t border-sidebar-border py-3 px-2 space-y-1">
-          {BOTTOM_ITEMS.map((item) => {
+          <p className={`px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-text-muted ${collapsed ? 'md:hidden' : ''}`}>
+            Account
+          </p>
+          {ACCOUNT_ITEMS.map((item) => {
             const active = isActive(item.href);
             return (
               <Link
@@ -163,6 +214,19 @@ export function Sidebar() {
               </Link>
             );
           })}
+
+          <button
+            type="button"
+            onClick={() => void handleLogout()}
+            disabled={loggingOut}
+            className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors w-full text-sidebar-text hover:bg-sidebar-hover hover:text-sidebar-text-active disabled:opacity-60 disabled:cursor-not-allowed ${
+              collapsed ? 'md:justify-center' : ''
+            }`}
+            title={collapsed ? 'Log out' : undefined}
+          >
+            <LogoutIcon />
+            <span className={collapsed ? 'md:hidden' : ''}>{loggingOut ? 'Logging out...' : 'Log out'}</span>
+          </button>
 
           <button
             type="button"
