@@ -52,7 +52,10 @@ use services::{
     CardinalityTracker, IdempotencyResult, IdempotencyStore, IngestServiceImpl, MetricPayload,
     ParamPayload, TagPayload, compute_payload_hash, ingest::InMemoryStore,
 };
-use storage::{MetricRow, ProjectRow, RunRow, SqliteStore};
+use storage::{
+    AuthSessionAdminRow, MetricRow, ProjectRow, RunRow, SqliteStore, UserProjectMembershipRow,
+    UserRow,
+};
 
 /// Application state shared across handlers.
 #[derive(Clone)]
@@ -290,6 +293,51 @@ async fn require_endpoint_access(
     }
 
     Ok(())
+}
+
+async fn require_platform_admin_access(
+    state: &AppState,
+    auth: &AuthContext,
+    action: &str,
+    resource_type: &str,
+    resource_id: Option<&str>,
+) -> Result<(), (StatusCode, String)> {
+    require_endpoint_access(
+        state,
+        auth,
+        EndpointRbacTier::Admin,
+        None,
+        None,
+        action,
+        resource_type,
+        resource_id,
+    )
+    .await?;
+
+    if auth.is_global() {
+        return Ok(());
+    }
+
+    emit_audit_event(
+        state,
+        Some(auth),
+        None,
+        None,
+        action,
+        resource_type,
+        resource_id,
+        "denied",
+        serde_json::json!({
+            "reason": "platform_admin_required",
+            "auth_mode": auth_mode_label(auth),
+        }),
+    )
+    .await;
+
+    Err((
+        StatusCode::FORBIDDEN,
+        "Platform admin access required.".to_string(),
+    ))
 }
 
 fn require_ui_run_owner(auth: &AuthContext, run: &RunRow) -> Result<(), (StatusCode, String)> {
@@ -773,6 +821,409 @@ async fn http_create_project(
     .await;
 
     Ok(Json(project_response_from_row(row)))
+}
+
+#[derive(Debug, Serialize)]
+struct AdminUserResponse {
+    user_id: String,
+    email: Option<String>,
+    display_name: Option<String>,
+    auth_provider: String,
+    external_subject: Option<String>,
+    is_service_account: bool,
+    disabled: bool,
+    active_project_count: i64,
+    active_session_count: i64,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminListUsersResponse {
+    users: Vec<AdminUserResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminMembershipsQuery {
+    #[serde(default)]
+    include_revoked: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminUserMembershipResponse {
+    project_id: String,
+    project_name: String,
+    role: String,
+    granted_by_user_id: Option<String>,
+    created_at: String,
+    revoked_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminListUserMembershipsResponse {
+    user_id: String,
+    memberships: Vec<AdminUserMembershipResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminSessionsQuery {
+    user_id: Option<String>,
+    #[serde(default)]
+    include_revoked: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminSessionResponse {
+    session_id: String,
+    user_id: String,
+    created_at: String,
+    last_seen_at: Option<String>,
+    expires_at: String,
+    revoked_at: Option<String>,
+    client_ip: Option<String>,
+    user_agent: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminListSessionsResponse {
+    sessions: Vec<AdminSessionResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminMutationResponse {
+    status: String,
+}
+
+fn admin_user_response_from_row(row: UserRow) -> AdminUserResponse {
+    AdminUserResponse {
+        user_id: row.id,
+        email: row.email,
+        display_name: row.display_name,
+        auth_provider: row.auth_provider,
+        external_subject: row.external_subject,
+        is_service_account: row.is_service_account,
+        disabled: row.disabled_at.is_some(),
+        active_project_count: row.active_project_count,
+        active_session_count: row.active_session_count,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
+fn admin_membership_response_from_row(
+    row: UserProjectMembershipRow,
+) -> AdminUserMembershipResponse {
+    AdminUserMembershipResponse {
+        project_id: row.project_id,
+        project_name: row.project_name,
+        role: row.role,
+        granted_by_user_id: row.granted_by_user_id,
+        created_at: row.created_at,
+        revoked_at: row.revoked_at,
+    }
+}
+
+fn admin_session_response_from_row(row: AuthSessionAdminRow) -> AdminSessionResponse {
+    AdminSessionResponse {
+        session_id: row.id,
+        user_id: row.user_id,
+        created_at: row.created_at,
+        last_seen_at: row.last_seen_at,
+        expires_at: row.expires_at,
+        revoked_at: row.revoked_at,
+        client_ip: row.client_ip,
+        user_agent: row.user_agent,
+    }
+}
+
+async fn http_admin_list_users(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<AdminListUsersResponse>, (StatusCode, String)> {
+    require_platform_admin_access(&state, &auth, "admin.users.list", "user", None).await?;
+
+    let users = state
+        .sqlite_store
+        .list_users()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .map(admin_user_response_from_row)
+        .collect();
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        None,
+        None,
+        "admin.users.list",
+        "user",
+        None,
+        "success",
+        serde_json::json!({}),
+    )
+    .await;
+
+    Ok(Json(AdminListUsersResponse { users }))
+}
+
+async fn http_admin_list_user_memberships(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(user_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<AdminMembershipsQuery>,
+) -> Result<Json<AdminListUserMembershipsResponse>, (StatusCode, String)> {
+    require_platform_admin_access(
+        &state,
+        &auth,
+        "admin.user.memberships.list",
+        "user",
+        Some(&user_id),
+    )
+    .await?;
+
+    let user_exists = state
+        .sqlite_store
+        .get_user_by_id(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_some();
+    if !user_exists {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("User not found: '{user_id}'"),
+        ));
+    }
+
+    let memberships = state
+        .sqlite_store
+        .list_user_project_memberships(&user_id, query.include_revoked)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .map(admin_membership_response_from_row)
+        .collect();
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        None,
+        None,
+        "admin.user.memberships.list",
+        "user",
+        Some(&user_id),
+        "success",
+        serde_json::json!({
+            "include_revoked": query.include_revoked,
+        }),
+    )
+    .await;
+
+    Ok(Json(AdminListUserMembershipsResponse {
+        user_id,
+        memberships,
+    }))
+}
+
+async fn http_admin_disable_user(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(user_id): axum::extract::Path<String>,
+) -> Result<Json<AdminUserResponse>, (StatusCode, String)> {
+    require_platform_admin_access(&state, &auth, "admin.user.disable", "user", Some(&user_id))
+        .await?;
+
+    let user_exists = state
+        .sqlite_store
+        .get_user_by_id(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_some();
+    if !user_exists {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("User not found: '{user_id}'"),
+        ));
+    }
+
+    state
+        .sqlite_store
+        .set_user_disabled(&user_id, true)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let user = state
+        .sqlite_store
+        .get_user_by_id(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("User not found: '{user_id}'"),
+        ))?;
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        None,
+        None,
+        "admin.user.disable",
+        "user",
+        Some(&user_id),
+        "success",
+        serde_json::json!({}),
+    )
+    .await;
+
+    Ok(Json(admin_user_response_from_row(user)))
+}
+
+async fn http_admin_enable_user(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(user_id): axum::extract::Path<String>,
+) -> Result<Json<AdminUserResponse>, (StatusCode, String)> {
+    require_platform_admin_access(&state, &auth, "admin.user.enable", "user", Some(&user_id))
+        .await?;
+
+    let user_exists = state
+        .sqlite_store
+        .get_user_by_id(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_some();
+    if !user_exists {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("User not found: '{user_id}'"),
+        ));
+    }
+
+    state
+        .sqlite_store
+        .set_user_disabled(&user_id, false)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let user = state
+        .sqlite_store
+        .get_user_by_id(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("User not found: '{user_id}'"),
+        ))?;
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        None,
+        None,
+        "admin.user.enable",
+        "user",
+        Some(&user_id),
+        "success",
+        serde_json::json!({}),
+    )
+    .await;
+
+    Ok(Json(admin_user_response_from_row(user)))
+}
+
+async fn http_admin_list_sessions(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Query(query): axum::extract::Query<AdminSessionsQuery>,
+) -> Result<Json<AdminListSessionsResponse>, (StatusCode, String)> {
+    require_platform_admin_access(&state, &auth, "admin.sessions.list", "auth_session", None)
+        .await?;
+
+    if let Some(ref user_id) = query.user_id {
+        let user_exists = state
+            .sqlite_store
+            .get_user_by_id(user_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .is_some();
+        if !user_exists {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("User not found: '{user_id}'"),
+            ));
+        }
+    }
+
+    let sessions = state
+        .sqlite_store
+        .list_auth_sessions_for_admin(query.user_id.as_deref(), query.include_revoked)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .map(admin_session_response_from_row)
+        .collect();
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        None,
+        None,
+        "admin.sessions.list",
+        "auth_session",
+        None,
+        "success",
+        serde_json::json!({
+            "user_id": query.user_id,
+            "include_revoked": query.include_revoked,
+        }),
+    )
+    .await;
+
+    Ok(Json(AdminListSessionsResponse { sessions }))
+}
+
+async fn http_admin_revoke_session(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<AdminMutationResponse>, (StatusCode, String)> {
+    require_platform_admin_access(
+        &state,
+        &auth,
+        "admin.session.revoke",
+        "auth_session",
+        Some(&session_id),
+    )
+    .await?;
+
+    let revoked = state
+        .sqlite_store
+        .revoke_auth_session_by_id(&session_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !revoked {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("Session not found or already revoked: '{session_id}'"),
+        ));
+    }
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        None,
+        None,
+        "admin.session.revoke",
+        "auth_session",
+        Some(&session_id),
+        "success",
+        serde_json::json!({}),
+    )
+    .await;
+
+    Ok(Json(AdminMutationResponse {
+        status: "ok".to_string(),
+    }))
 }
 
 /// Initialize a run via HTTP (for SDK HTTP transport).
@@ -2753,6 +3204,25 @@ fn build_http_router(state: AppState) -> Router {
             "/api/v1/projects",
             get(http_list_projects).post(http_create_project),
         )
+        // Platform admin control-plane endpoints (global admin only)
+        .route("/api/v1/admin/users", get(http_admin_list_users))
+        .route(
+            "/api/v1/admin/users/{user_id}/memberships",
+            get(http_admin_list_user_memberships),
+        )
+        .route(
+            "/api/v1/admin/users/{user_id}/disable",
+            post(http_admin_disable_user),
+        )
+        .route(
+            "/api/v1/admin/users/{user_id}/enable",
+            post(http_admin_enable_user),
+        )
+        .route("/api/v1/admin/sessions", get(http_admin_list_sessions))
+        .route(
+            "/api/v1/admin/sessions/{session_id}/revoke",
+            post(http_admin_revoke_session),
+        )
         // Query API endpoints
         .route("/api/v1/runs", get(http_list_runs))
         .route(
@@ -3756,6 +4226,195 @@ mod tests {
             .expect("Delete run request failed");
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_platform_admin_endpoints_require_global_admin_key() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let (scoped_admin_key, _) = harness
+            .key_store
+            .create_key(
+                Some(harness.primary_project_id.clone()),
+                Some("project-admin".to_string()),
+                vec!["admin".to_string()],
+            )
+            .await;
+        let (global_admin_key, _) = harness
+            .key_store
+            .create_key(
+                None,
+                Some("platform-admin".to_string()),
+                vec!["admin".to_string()],
+            )
+            .await;
+
+        let forbidden = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/admin/users")
+                    .header("x-api-key", scoped_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build admin users request"),
+            )
+            .await
+            .expect("Admin users request failed");
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let allowed = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/admin/users")
+                    .header("x-api-key", global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build admin users request"),
+            )
+            .await
+            .expect("Admin users request failed");
+        assert_eq!(allowed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_platform_admin_can_disable_and_enable_user() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let (global_admin_key, _) = harness
+            .key_store
+            .create_key(
+                None,
+                Some("platform-admin".to_string()),
+                vec!["admin".to_string()],
+            )
+            .await;
+
+        let disable_uri = format!("/api/v1/admin/users/{}/disable", harness.user_id);
+        let disable_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(disable_uri.as_str())
+                    .header("x-api-key", &global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build disable request"),
+            )
+            .await
+            .expect("Disable request failed");
+        assert_eq!(disable_response.status(), StatusCode::OK);
+        let disabled_payload: serde_json::Value =
+            serde_json::from_str(&response_text(disable_response).await)
+                .expect("Disable response should be JSON");
+        assert_eq!(disabled_payload["disabled"].as_bool(), Some(true));
+
+        let enable_uri = format!("/api/v1/admin/users/{}/enable", harness.user_id);
+        let enable_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(enable_uri.as_str())
+                    .header("x-api-key", &global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build enable request"),
+            )
+            .await
+            .expect("Enable request failed");
+        assert_eq!(enable_response.status(), StatusCode::OK);
+        let enabled_payload: serde_json::Value =
+            serde_json::from_str(&response_text(enable_response).await)
+                .expect("Enable response should be JSON");
+        assert_eq!(enabled_payload["disabled"].as_bool(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_platform_admin_can_list_and_revoke_ui_sessions() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let (global_admin_key, _) = harness
+            .key_store
+            .create_key(
+                None,
+                Some("platform-admin".to_string()),
+                vec!["admin".to_string()],
+            )
+            .await;
+
+        let sessions_uri = format!(
+            "/api/v1/admin/sessions?user_id={}&include_revoked=true",
+            harness.user_id
+        );
+        let list_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(sessions_uri.as_str())
+                    .header("x-api-key", &global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build list sessions request"),
+            )
+            .await
+            .expect("List sessions request failed");
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_payload: serde_json::Value =
+            serde_json::from_str(&response_text(list_response).await)
+                .expect("List sessions response should be JSON");
+        let sessions = list_payload["sessions"]
+            .as_array()
+            .expect("sessions should be an array");
+        let session_id = sessions
+            .iter()
+            .find_map(|session| {
+                if session["user_id"].as_str() == Some(harness.user_id.as_str())
+                    && session["revoked_at"].is_null()
+                {
+                    session["session_id"].as_str().map(|id| id.to_string())
+                } else {
+                    None
+                }
+            })
+            .expect("Expected at least one active session for test user");
+
+        let revoke_uri = format!("/api/v1/admin/sessions/{session_id}/revoke");
+        let revoke_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(revoke_uri.as_str())
+                    .header("x-api-key", &global_admin_key)
+                    .body(Body::empty())
+                    .expect("Failed to build revoke session request"),
+            )
+            .await
+            .expect("Revoke session request failed");
+        assert_eq!(revoke_response.status(), StatusCode::OK);
+
+        // The revoked session cookie should no longer authenticate.
+        let session_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/ui-auth/session")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .body(Body::empty())
+                    .expect("Failed to build session check request"),
+            )
+            .await
+            .expect("Session check request failed");
+        assert_eq!(session_response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
