@@ -368,7 +368,7 @@ def main():
 
     # Initialize MLRunX
     run = mlrunx.init(
-        project="manifold-optimization",
+        project_id=os.getenv("MLRUNX_PROJECT_ID", "project-uuid"),
         name=f"{args.update}-lr{args.lr}-bs{args.batch_size}",
         tags={
             "update_rule": args.update,

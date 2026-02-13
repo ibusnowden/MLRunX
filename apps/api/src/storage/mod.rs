@@ -23,5 +23,5 @@ pub use postgres::{
 };
 pub use sqlite::{
     AggregatedPointRow, ApiKeyRow, AuthSessionRow, MetricRow, MetricSeriesRow,
-    ProjectMembershipRow, RunRow, SqliteConfig, SqliteError, SqliteStore,
+    ProjectMembershipRow, ProjectRow, RunRow, SqliteConfig, SqliteError, SqliteStore,
 };

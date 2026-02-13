@@ -30,7 +30,7 @@ class Run:
     - Artifacts (files like models, datasets)
 
     Example:
-        run = Run(project="my-project", name="experiment-1")
+        run = Run(project_id="project-uuid", name="experiment-1")
         run.log({"loss": 0.5, "accuracy": 0.8}, step=1)
         run.log_params({"lr": 0.001, "batch_size": 32})
         run.finish()
@@ -49,7 +49,7 @@ class Run:
         """Initialize a new run.
 
         Args:
-            project: Project name
+            project: Optional project name for validation/compatibility.
             project_id: Project ID (preferred for scoped API keys)
             name: Human-readable run name (auto-generated if not provided)
             run_id: Explicit run ID (auto-generated if not provided)
@@ -69,16 +69,23 @@ class Run:
             try:
                 uuid.UUID(project_name)
                 logger.warning(
-                    "Project value looks like a UUID; treating it as project_id. "
+                    "project argument looks like a UUID; treating it as project_id. "
                     "Pass project_id explicitly to avoid ambiguity."
                 )
                 resolved_project_id = project_name
                 project_name = None
-            except ValueError:
-                pass
+            except ValueError as exc:
+                raise ValueError(
+                    "project_id is required. Project names are no longer accepted "
+                    "for run initialization. Use mlrunx.init(project_id=...) or "
+                    "set MLRUNX_PROJECT_ID."
+                ) from exc
 
         if resolved_project_id is None and project_name is None:
-            raise ValueError("project or project_id is required")
+            raise ValueError(
+                "project_id is required. Set MLRUNX_PROJECT_ID or pass "
+                "mlrunx.init(project_id=...)."
+            )
 
         self._project_name = project_name
         self._project_id = resolved_project_id
@@ -168,7 +175,7 @@ class Run:
 
     @property
     def project(self) -> str:
-        """The project name or ID."""
+        """The resolved project identifier."""
         return self._project_name or self._project_id or ""
 
     @property
