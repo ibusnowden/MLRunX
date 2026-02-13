@@ -918,44 +918,63 @@ async fn http_ingest_batch(
         ));
     }
 
-    // Count only accepted items
-    let accepted_metric_count = req
+    // Filter metrics for cardinality acceptance plus finite numeric payloads.
+    // Without this, a single NaN/inf can poison the whole insert batch.
+    let mut non_finite_metric_count = 0usize;
+    let sqlite_metrics: Vec<MetricRow> = req
         .metrics
         .iter()
         .filter(|m| accepted_metrics.contains(&m.name))
-        .count();
+        .filter_map(|m| {
+            let finite_value = m.value.is_finite();
+            let finite_timestamp = m.timestamp.map(|ts| ts.is_finite()).unwrap_or(true);
+            if finite_value && finite_timestamp {
+                Some(MetricRow {
+                    name: m.name.clone(),
+                    step: m.step,
+                    value: m.value,
+                    timestamp: m.timestamp,
+                })
+            } else {
+                non_finite_metric_count += 1;
+                None
+            }
+        })
+        .collect();
+
+    if non_finite_metric_count > 0 {
+        warnings.push(format!(
+            "Dropped {non_finite_metric_count} metrics with non-finite values/timestamps"
+        ));
+    }
+
+    let accepted_metric_count = sqlite_metrics.len();
     let accepted_tag_count = accepted_tags.len();
 
-    // Persist metrics to SQLite
+    // Persist metrics to SQLite.
+    // Fail closed on storage errors to avoid reporting successful ingestion when metrics are missing.
     if accepted_metric_count > 0 {
-        let sqlite_metrics: Vec<MetricRow> = req
-            .metrics
-            .iter()
-            .filter(|m| accepted_metrics.contains(&m.name))
-            .map(|m| MetricRow {
-                name: m.name.clone(),
-                step: m.step,
-                value: m.value,
-                timestamp: m.timestamp,
-            })
-            .collect();
-
-        if let Err(e) = state
+        state
             .sqlite_store
             .insert_metrics(&req.run_id, &sqlite_metrics)
             .await
-        {
-            warn!(error = %e, "Failed to persist metrics to SQLite");
-        }
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to persist metrics to SQLite: {e}"),
+                )
+            })?;
 
-        // Also update metrics count in SQLite
-        if let Err(e) = state
+        state
             .sqlite_store
             .increment_metrics_count(&req.run_id, accepted_metric_count as i64)
             .await
-        {
-            warn!(error = %e, "Failed to update metrics count in SQLite");
-        }
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to update metrics count in SQLite: {e}"),
+                )
+            })?;
     }
 
     // Persist tags to SQLite

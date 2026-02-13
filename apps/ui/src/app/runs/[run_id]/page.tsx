@@ -118,6 +118,9 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     void fetchAllMetrics();
   }, [fetchAllMetrics]);
 
+  const shouldAutoRefresh = run?.status === 'running'
+    || (!!run && run.metrics_count > 0 && availableMetrics.length === 0);
+
   useAutoRefresh(
     async () => {
       await Promise.all([
@@ -125,7 +128,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
         fetchAllMetrics({ silent: true }),
       ]);
     },
-    { enabled: run?.status === 'running', intervalMs: 15000, runOnMount: false }
+    { enabled: shouldAutoRefresh, intervalMs: 15000, runOnMount: false }
   );
 
   // Filter and group metrics
@@ -355,7 +358,9 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
       {/* No Metrics State */}
       {!metricsLoading && !metricsError && availableMetrics.length === 0 && (
         <div className="text-center py-16 text-text-muted">
-          No metrics recorded for this run
+          {run?.metrics_count && run.metrics_count > 0
+            ? `Metrics are still syncing (${run.metrics_count} ingested so far).`
+            : 'No metrics recorded for this run'}
         </div>
       )}
 
