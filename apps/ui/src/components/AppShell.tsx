@@ -33,7 +33,7 @@ function getPageTitle(pathname: string): string {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
-  const { collapsed, toggleMobile } = useSidebar();
+  const { toggleMobile } = useSidebar();
   const pageTitle = useMemo(() => getPageTitle(pathname), [pathname]);
   const [authChecked, setAuthChecked] = useState(false);
   const [authorized, setAuthorized] = useState(false);
@@ -99,13 +99,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="flex min-h-screen bg-background">
+    <div className="min-h-screen bg-background md:pl-56">
       <Sidebar />
-      <div
-        className={`flex-1 min-h-screen transition-all duration-200 ${
-          collapsed ? 'md:ml-16' : 'md:ml-56'
-        }`}
-      >
+      <div className="min-h-screen">
         <header className="sticky top-0 z-30 flex items-center gap-3 border-b border-border bg-surface px-4 py-3 md:hidden">
           <button
             type="button"
