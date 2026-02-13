@@ -11,8 +11,9 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-const SQLITE_SCHEMA_VERSION: &str = "2026-02-12.1";
-const SQLITE_SCHEMA_DESCRIPTION: &str = "bootstrap schema with auth, audit, and share tables";
+const SQLITE_SCHEMA_VERSION: &str = "2026-02-13.1";
+const SQLITE_SCHEMA_DESCRIPTION: &str =
+    "adds explicit project APIs and run ownership metadata columns";
 
 /// Errors that can occur in SQLite operations.
 #[derive(Error, Debug)]
@@ -59,6 +60,27 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, SqliteError> {
+        let pragma_sql = format!("PRAGMA table_info({table})");
+        let mut stmt = conn.prepare(&pragma_sql)?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let columns: Result<Vec<_>, _> = rows.collect();
+        Ok(columns?.iter().any(|name| name == column))
+    }
+
+    fn ensure_table_column(
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        alter_sql: &str,
+    ) -> Result<(), SqliteError> {
+        if Self::table_has_column(conn, table, column)? {
+            return Ok(());
+        }
+        conn.execute(alter_sql, [])?;
+        Ok(())
+    }
+
     /// Create a new SQLite store, initializing the database schema.
     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self, SqliteError> {
         let conn = Connection::open(path)?;
@@ -110,16 +132,22 @@ impl SqliteStore {
                 project_id TEXT NOT NULL,
                 name TEXT,
                 status TEXT NOT NULL DEFAULT 'running',
+                created_by_key_id TEXT,
+                created_by_user_id TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                 finished_at TEXT,
                 metrics_count INTEGER NOT NULL DEFAULT 0,
                 params_count INTEGER NOT NULL DEFAULT 0,
-                FOREIGN KEY (project_id) REFERENCES projects(id)
+                FOREIGN KEY (project_id) REFERENCES projects(id),
+                FOREIGN KEY (created_by_key_id) REFERENCES api_keys(id),
+                FOREIGN KEY (created_by_user_id) REFERENCES users(id)
             );
             CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
             CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
             CREATE INDEX IF NOT EXISTS idx_runs_created ON runs(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_runs_created_by_key ON runs(created_by_key_id);
+            CREATE INDEX IF NOT EXISTS idx_runs_created_by_user ON runs(created_by_user_id);
 
             -- Tags table (key-value pairs for runs)
             CREATE TABLE IF NOT EXISTS tags (
@@ -288,6 +316,28 @@ impl SqliteStore {
                 applied_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
         "#)?;
+
+        // Backward-compatible migration for SQLite files created before run ownership columns.
+        Self::ensure_table_column(
+            &conn,
+            "runs",
+            "created_by_key_id",
+            "ALTER TABLE runs ADD COLUMN created_by_key_id TEXT",
+        )?;
+        Self::ensure_table_column(
+            &conn,
+            "runs",
+            "created_by_user_id",
+            "ALTER TABLE runs ADD COLUMN created_by_user_id TEXT",
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runs_created_by_key ON runs(created_by_key_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runs_created_by_user ON runs(created_by_user_id)",
+            [],
+        )?;
 
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?1, ?2)",
@@ -638,12 +688,14 @@ impl SqliteStore {
         run_id: &str,
         project_id: &str,
         name: Option<&str>,
+        created_by_key_id: Option<&str>,
+        created_by_user_id: Option<&str>,
     ) -> Result<(), SqliteError> {
         let conn = self.conn.lock().await;
 
         conn.execute(
-            "INSERT INTO runs (id, project_id, name, status) VALUES (?1, ?2, ?3, 'running')",
-            params![run_id, project_id, name],
+            "INSERT INTO runs (id, project_id, name, status, created_by_key_id, created_by_user_id) VALUES (?1, ?2, ?3, 'running', ?4, ?5)",
+            params![run_id, project_id, name, created_by_key_id, created_by_user_id],
         )?;
 
         debug!(run_id = %run_id, project = %project_id, "Created run");
@@ -685,7 +737,7 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
 
         conn.query_row(
-            r#"SELECT id, project_id, name, status, created_at, updated_at,
+            r#"SELECT id, project_id, name, status, created_by_key_id, created_by_user_id, created_at, updated_at,
                       finished_at, metrics_count, params_count,
                       (julianday(COALESCE(finished_at, updated_at)) - julianday(created_at)) * 86400.0
                FROM runs WHERE id = ?1"#,
@@ -696,12 +748,14 @@ impl SqliteStore {
                     project_id: row.get(1)?,
                     name: row.get(2)?,
                     status: row.get(3)?,
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
-                    finished_at: row.get(6)?,
-                    metrics_count: row.get(7)?,
-                    params_count: row.get(8)?,
-                    duration_seconds: row.get(9)?,
+                    created_by_key_id: row.get(4)?,
+                    created_by_user_id: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                    finished_at: row.get(8)?,
+                    metrics_count: row.get(9)?,
+                    params_count: row.get(10)?,
+                    duration_seconds: row.get(11)?,
                 })
             },
         )
@@ -717,6 +771,7 @@ impl SqliteStore {
     pub async fn list_runs(
         &self,
         project: Option<&str>,
+        owner_user_id: Option<&str>,
         status: Option<&str>,
         query: Option<&str>,
         limit: usize,
@@ -725,7 +780,7 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
 
         let mut sql = String::from(
-            "SELECT r.id, r.project_id, r.name, r.status, r.created_at, r.updated_at,
+            "SELECT r.id, r.project_id, r.name, r.status, r.created_by_key_id, r.created_by_user_id, r.created_at, r.updated_at,
                     r.finished_at, r.metrics_count, r.params_count,
                     (julianday(COALESCE(r.finished_at, r.updated_at)) - julianday(r.created_at)) * 86400.0
              FROM runs r
@@ -743,6 +798,12 @@ impl SqliteStore {
             count_sql.push_str(" AND (r.project_id = ? OR p.name = ?)");
             params_vec.push(Box::new(p.to_string()));
             params_vec.push(Box::new(p.to_string()));
+        }
+
+        if let Some(owner) = owner_user_id {
+            sql.push_str(" AND r.created_by_user_id = ?");
+            count_sql.push_str(" AND r.created_by_user_id = ?");
+            params_vec.push(Box::new(owner.to_string()));
         }
 
         if let Some(s) = status {
@@ -782,12 +843,14 @@ impl SqliteStore {
                 project_id: row.get(1)?,
                 name: row.get(2)?,
                 status: row.get(3)?,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
-                finished_at: row.get(6)?,
-                metrics_count: row.get(7)?,
-                params_count: row.get(8)?,
-                duration_seconds: row.get(9)?,
+                created_by_key_id: row.get(4)?,
+                created_by_user_id: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+                finished_at: row.get(8)?,
+                metrics_count: row.get(9)?,
+                params_count: row.get(10)?,
+                duration_seconds: row.get(11)?,
             })
         })?;
 
@@ -1144,7 +1207,7 @@ impl SqliteStore {
 
         let row = conn
             .query_row(
-                r#"SELECT id, key_hash, key_prefix, project_id, name, scopes, created_at, last_used_at, revoked_at
+                r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at
                    FROM api_keys
                    WHERE key_hash = ?1"#,
                 params![key_hash],
@@ -1154,11 +1217,12 @@ impl SqliteStore {
                         key_hash: row.get(1)?,
                         key_prefix: row.get(2)?,
                         project_id: row.get(3)?,
-                        name: row.get(4)?,
-                        scopes_json: row.get(5)?,
-                        created_at: row.get(6)?,
-                        last_used_at: row.get(7)?,
-                        revoked_at: row.get(8)?,
+                        created_by_user_id: row.get(4)?,
+                        name: row.get(5)?,
+                        scopes_json: row.get(6)?,
+                        created_at: row.get(7)?,
+                        last_used_at: row.get(8)?,
+                        revoked_at: row.get(9)?,
                     })
                 },
             )
@@ -1203,7 +1267,7 @@ impl SqliteStore {
         match project_id {
             Some(project_id) => {
                 let mut stmt = conn.prepare(
-                    r#"SELECT id, key_hash, key_prefix, project_id, name, scopes, created_at, last_used_at, revoked_at
+                    r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at
                        FROM api_keys
                        WHERE project_id = ?1
                        ORDER BY created_at DESC"#,
@@ -1214,11 +1278,12 @@ impl SqliteStore {
                         key_hash: row.get(1)?,
                         key_prefix: row.get(2)?,
                         project_id: row.get(3)?,
-                        name: row.get(4)?,
-                        scopes_json: row.get(5)?,
-                        created_at: row.get(6)?,
-                        last_used_at: row.get(7)?,
-                        revoked_at: row.get(8)?,
+                        created_by_user_id: row.get(4)?,
+                        name: row.get(5)?,
+                        scopes_json: row.get(6)?,
+                        created_at: row.get(7)?,
+                        last_used_at: row.get(8)?,
+                        revoked_at: row.get(9)?,
                     })
                 })?;
                 for row in rows {
@@ -1227,7 +1292,7 @@ impl SqliteStore {
             }
             None => {
                 let mut stmt = conn.prepare(
-                    r#"SELECT id, key_hash, key_prefix, project_id, name, scopes, created_at, last_used_at, revoked_at
+                    r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at
                        FROM api_keys
                        ORDER BY created_at DESC"#,
                 )?;
@@ -1237,11 +1302,12 @@ impl SqliteStore {
                         key_hash: row.get(1)?,
                         key_prefix: row.get(2)?,
                         project_id: row.get(3)?,
-                        name: row.get(4)?,
-                        scopes_json: row.get(5)?,
-                        created_at: row.get(6)?,
-                        last_used_at: row.get(7)?,
-                        revoked_at: row.get(8)?,
+                        created_by_user_id: row.get(4)?,
+                        name: row.get(5)?,
+                        scopes_json: row.get(6)?,
+                        created_at: row.get(7)?,
+                        last_used_at: row.get(8)?,
+                        revoked_at: row.get(9)?,
                     })
                 })?;
                 for row in rows {
@@ -1372,6 +1438,8 @@ pub struct RunRow {
     pub project_id: String,
     pub name: Option<String>,
     pub status: String,
+    pub created_by_key_id: Option<String>,
+    pub created_by_user_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub finished_at: Option<String>,
@@ -1397,6 +1465,7 @@ pub struct ApiKeyRow {
     pub key_hash: String,
     pub key_prefix: String,
     pub project_id: Option<String>,
+    pub created_by_user_id: Option<String>,
     pub name: Option<String>,
     pub scopes_json: String,
     pub created_at: String,
@@ -1486,7 +1555,7 @@ mod tests {
 
         let project_id = store.get_or_create_project("test-project").await.unwrap();
         store
-            .create_run("run-123", &project_id, Some("My Run"))
+            .create_run("run-123", &project_id, Some("My Run"), None, None)
             .await
             .unwrap();
 
@@ -1494,6 +1563,62 @@ mod tests {
         assert_eq!(run.id, "run-123");
         assert_eq!(run.name, Some("My Run".to_string()));
         assert_eq!(run.status, "running");
+    }
+
+    #[tokio::test]
+    async fn test_list_runs_can_filter_by_owner_user_id() {
+        let store = create_test_store().await;
+        let project_id = store
+            .get_or_create_project("owner-filter-project")
+            .await
+            .unwrap();
+        let owner_a = store
+            .get_or_create_user_identity(
+                "jwt",
+                "owner-a-subject",
+                Some("owner-a@example.com"),
+                Some("Owner A"),
+            )
+            .await
+            .unwrap();
+        let owner_b = store
+            .get_or_create_user_identity(
+                "jwt",
+                "owner-b-subject",
+                Some("owner-b@example.com"),
+                Some("Owner B"),
+            )
+            .await
+            .unwrap();
+
+        store
+            .create_run(
+                "run-owner-a",
+                &project_id,
+                Some("Owner A Run"),
+                None,
+                Some(&owner_a),
+            )
+            .await
+            .unwrap();
+        store
+            .create_run(
+                "run-owner-b",
+                &project_id,
+                Some("Owner B Run"),
+                None,
+                Some(&owner_b),
+            )
+            .await
+            .unwrap();
+
+        let (runs, total) = store
+            .list_runs(Some(&project_id), Some(&owner_a), None, None, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, "run-owner-a");
     }
 
     #[tokio::test]
@@ -1515,7 +1640,13 @@ mod tests {
                 .await
                 .unwrap();
             store
-                .create_run("run-persist-123", &project_id, Some("Persisted Run"))
+                .create_run(
+                    "run-persist-123",
+                    &project_id,
+                    Some("Persisted Run"),
+                    None,
+                    None,
+                )
                 .await
                 .unwrap();
             store
@@ -1554,7 +1685,7 @@ mod tests {
 
         let project_id = store.get_or_create_project("test-project").await.unwrap();
         store
-            .create_run("run-123", &project_id, None)
+            .create_run("run-123", &project_id, None, None, None)
             .await
             .unwrap();
 
@@ -1590,7 +1721,7 @@ mod tests {
 
         let project_id = store.get_or_create_project("test-project").await.unwrap();
         store
-            .create_run("run-123", &project_id, None)
+            .create_run("run-123", &project_id, None, None, None)
             .await
             .unwrap();
 
@@ -1617,7 +1748,7 @@ mod tests {
 
         let project_id = store.get_or_create_project("auth-project").await.unwrap();
         store
-            .create_run("run-auth-123", &project_id, Some("Auth Run"))
+            .create_run("run-auth-123", &project_id, Some("Auth Run"), None, None)
             .await
             .unwrap();
 
@@ -1680,7 +1811,7 @@ mod tests {
         let store = create_test_store().await;
         let project_id = store.get_or_create_project("audit-project").await.unwrap();
         store
-            .create_run("run-audit-123", &project_id, Some("Audit Run"))
+            .create_run("run-audit-123", &project_id, Some("Audit Run"), None, None)
             .await
             .unwrap();
 
