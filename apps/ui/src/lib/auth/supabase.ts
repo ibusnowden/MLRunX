@@ -90,6 +90,23 @@ export async function signInWithOAuth(
   throwIfSupabaseError(error);
 }
 
+export async function sendPasswordResetEmail(
+  email: string,
+  redirectTo: string
+): Promise<void> {
+  const { error } = await requireSupabaseClient().auth.resetPasswordForEmail(email, {
+    redirectTo,
+  });
+  throwIfSupabaseError(error);
+}
+
+export async function updatePassword(newPassword: string): Promise<void> {
+  const { error } = await requireSupabaseClient().auth.updateUser({
+    password: newPassword,
+  });
+  throwIfSupabaseError(error);
+}
+
 export async function exchangeOAuthCodeForSessionIfPresent(searchParams: URLSearchParams): Promise<void> {
   const code = searchParams.get('code');
   if (!code) return;
