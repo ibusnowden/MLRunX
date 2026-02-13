@@ -534,6 +534,130 @@ impl SqliteStore {
         Ok(user_id)
     }
 
+    /// List users for platform admin control-plane views.
+    pub async fn list_users(&self) -> Result<Vec<UserRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                u.id,
+                u.email,
+                u.display_name,
+                u.auth_provider,
+                u.external_subject,
+                u.is_service_account,
+                u.created_at,
+                u.updated_at,
+                u.disabled_at,
+                (
+                    SELECT COUNT(*)
+                    FROM project_memberships pm
+                    WHERE pm.user_id = u.id AND pm.revoked_at IS NULL
+                ) AS active_project_count,
+                (
+                    SELECT COUNT(*)
+                    FROM auth_sessions s
+                    WHERE s.user_id = u.id
+                      AND s.revoked_at IS NULL
+                      AND s.expires_at > datetime('now')
+                ) AS active_session_count
+            FROM users u
+            ORDER BY u.created_at DESC
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(UserRow {
+                id: row.get(0)?,
+                email: row.get(1)?,
+                display_name: row.get(2)?,
+                auth_provider: row.get(3)?,
+                external_subject: row.get(4)?,
+                is_service_account: row.get::<_, i64>(5)? != 0,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+                disabled_at: row.get(8)?,
+                active_project_count: row.get(9)?,
+                active_session_count: row.get(10)?,
+            })
+        })?;
+
+        let users: Result<Vec<_>, _> = rows.collect();
+        Ok(users?)
+    }
+
+    /// Fetch a user by ID for control-plane operations.
+    pub async fn get_user_by_id(&self, user_id: &str) -> Result<Option<UserRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            r#"
+            SELECT
+                u.id,
+                u.email,
+                u.display_name,
+                u.auth_provider,
+                u.external_subject,
+                u.is_service_account,
+                u.created_at,
+                u.updated_at,
+                u.disabled_at,
+                (
+                    SELECT COUNT(*)
+                    FROM project_memberships pm
+                    WHERE pm.user_id = u.id AND pm.revoked_at IS NULL
+                ) AS active_project_count,
+                (
+                    SELECT COUNT(*)
+                    FROM auth_sessions s
+                    WHERE s.user_id = u.id
+                      AND s.revoked_at IS NULL
+                      AND s.expires_at > datetime('now')
+                ) AS active_session_count
+            FROM users u
+            WHERE u.id = ?1
+            LIMIT 1
+            "#,
+            params![user_id],
+            |row| {
+                Ok(UserRow {
+                    id: row.get(0)?,
+                    email: row.get(1)?,
+                    display_name: row.get(2)?,
+                    auth_provider: row.get(3)?,
+                    external_subject: row.get(4)?,
+                    is_service_account: row.get::<_, i64>(5)? != 0,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                    disabled_at: row.get(8)?,
+                    active_project_count: row.get(9)?,
+                    active_session_count: row.get(10)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(SqliteError::from)
+    }
+
+    /// Update user disabled status.
+    pub async fn set_user_disabled(
+        &self,
+        user_id: &str,
+        disabled: bool,
+    ) -> Result<bool, SqliteError> {
+        let conn = self.conn.lock().await;
+        let changed = if disabled {
+            conn.execute(
+                "UPDATE users SET disabled_at = datetime('now'), updated_at = datetime('now') WHERE id = ?1 AND disabled_at IS NULL",
+                params![user_id],
+            )?
+        } else {
+            conn.execute(
+                "UPDATE users SET disabled_at = NULL, updated_at = datetime('now') WHERE id = ?1 AND disabled_at IS NOT NULL",
+                params![user_id],
+            )?
+        };
+        Ok(changed > 0)
+    }
+
     /// Grant a project membership role to a user.
     pub async fn grant_project_membership(
         &self,
@@ -574,6 +698,47 @@ impl SqliteStore {
             Ok(ProjectMembershipRow {
                 project_id: row.get(0)?,
                 role: row.get(1)?,
+            })
+        })?;
+
+        let memberships: Result<Vec<_>, _> = rows.collect();
+        Ok(memberships?)
+    }
+
+    /// List project memberships for a user.
+    pub async fn list_user_project_memberships(
+        &self,
+        user_id: &str,
+        include_revoked: bool,
+    ) -> Result<Vec<UserProjectMembershipRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+        let sql = if include_revoked {
+            r#"
+            SELECT pm.project_id, p.name, pm.role, pm.granted_by_user_id, pm.created_at, pm.revoked_at
+            FROM project_memberships pm
+            JOIN projects p ON p.id = pm.project_id
+            WHERE pm.user_id = ?1
+            ORDER BY pm.created_at DESC
+            "#
+        } else {
+            r#"
+            SELECT pm.project_id, p.name, pm.role, pm.granted_by_user_id, pm.created_at, pm.revoked_at
+            FROM project_memberships pm
+            JOIN projects p ON p.id = pm.project_id
+            WHERE pm.user_id = ?1 AND pm.revoked_at IS NULL
+            ORDER BY pm.created_at DESC
+            "#
+        };
+
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![user_id], |row| {
+            Ok(UserProjectMembershipRow {
+                project_id: row.get(0)?,
+                project_name: row.get(1)?,
+                role: row.get(2)?,
+                granted_by_user_id: row.get(3)?,
+                created_at: row.get(4)?,
+                revoked_at: row.get(5)?,
             })
         })?;
 
@@ -674,6 +839,61 @@ impl SqliteStore {
         let changed = conn.execute(
             "UPDATE auth_sessions SET revoked_at = datetime('now'), updated_at = datetime('now') WHERE token_hash = ?1 AND revoked_at IS NULL",
             params![token_hash],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// List auth sessions for control-plane visibility.
+    pub async fn list_auth_sessions_for_admin(
+        &self,
+        user_id: Option<&str>,
+        include_revoked: bool,
+    ) -> Result<Vec<AuthSessionAdminRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let mut sql = String::from(
+            r#"
+            SELECT id, user_id, created_at, last_seen_at, expires_at, revoked_at, client_ip, user_agent
+            FROM auth_sessions
+            WHERE 1=1
+            "#,
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+
+        if let Some(uid) = user_id {
+            sql.push_str(" AND user_id = ?");
+            params_vec.push(Box::new(uid.to_string()));
+        }
+        if !include_revoked {
+            sql.push_str(" AND revoked_at IS NULL");
+        }
+        sql.push_str(" ORDER BY created_at DESC");
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            Ok(AuthSessionAdminRow {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                created_at: row.get(2)?,
+                last_seen_at: row.get(3)?,
+                expires_at: row.get(4)?,
+                revoked_at: row.get(5)?,
+                client_ip: row.get(6)?,
+                user_agent: row.get(7)?,
+            })
+        })?;
+        let sessions: Result<Vec<_>, _> = rows.collect();
+        Ok(sessions?)
+    }
+
+    /// Revoke an auth session by session ID.
+    pub async fn revoke_auth_session_by_id(&self, session_id: &str) -> Result<bool, SqliteError> {
+        let conn = self.conn.lock().await;
+        let changed = conn.execute(
+            "UPDATE auth_sessions SET revoked_at = datetime('now'), updated_at = datetime('now') WHERE id = ?1 AND revoked_at IS NULL",
+            params![session_id],
         )?;
         Ok(changed > 0)
     }
@@ -1480,6 +1700,33 @@ pub struct ProjectMembershipRow {
     pub role: String,
 }
 
+/// A user row with aggregate metadata for control-plane views.
+#[derive(Debug, Clone)]
+pub struct UserRow {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub auth_provider: String,
+    pub external_subject: Option<String>,
+    pub is_service_account: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    pub disabled_at: Option<String>,
+    pub active_project_count: i64,
+    pub active_session_count: i64,
+}
+
+/// A detailed project membership row for a specific user.
+#[derive(Debug, Clone)]
+pub struct UserProjectMembershipRow {
+    pub project_id: String,
+    pub project_name: String,
+    pub role: String,
+    pub granted_by_user_id: Option<String>,
+    pub created_at: String,
+    pub revoked_at: Option<String>,
+}
+
 /// A UI auth session row.
 #[derive(Debug, Clone)]
 pub struct AuthSessionRow {
@@ -1489,6 +1736,19 @@ pub struct AuthSessionRow {
     pub csrf_hash: String,
     pub expires_at: String,
     pub revoked_at: Option<String>,
+}
+
+/// A session row for platform admin management.
+#[derive(Debug, Clone)]
+pub struct AuthSessionAdminRow {
+    pub id: String,
+    pub user_id: String,
+    pub created_at: String,
+    pub last_seen_at: Option<String>,
+    pub expires_at: String,
+    pub revoked_at: Option<String>,
+    pub client_ip: Option<String>,
+    pub user_agent: Option<String>,
 }
 
 /// A share token row.
@@ -1935,5 +2195,110 @@ mod tests {
         assert_eq!(memberships.len(), 1);
         assert_eq!(memberships[0].project_id, project_id);
         assert_eq!(memberships[0].role, "viewer");
+    }
+
+    #[tokio::test]
+    async fn test_list_users_and_toggle_disabled() {
+        let store = create_test_store().await;
+        let user_id = store
+            .get_or_create_user_identity(
+                "jwt",
+                "subject-admin-list",
+                Some("admin-list@example.com"),
+                Some("Admin List User"),
+            )
+            .await
+            .unwrap();
+
+        let users = store.list_users().await.unwrap();
+        let user = users
+            .iter()
+            .find(|u| u.id == user_id)
+            .expect("Expected user in list");
+        assert!(!user.is_service_account);
+        assert!(user.disabled_at.is_none());
+
+        let disabled = store.set_user_disabled(&user_id, true).await.unwrap();
+        assert!(disabled);
+        let disabled_user = store
+            .get_user_by_id(&user_id)
+            .await
+            .unwrap()
+            .expect("user should exist");
+        assert!(disabled_user.disabled_at.is_some());
+
+        let enabled = store.set_user_disabled(&user_id, false).await.unwrap();
+        assert!(enabled);
+        let enabled_user = store
+            .get_user_by_id(&user_id)
+            .await
+            .unwrap()
+            .expect("user should exist");
+        assert!(enabled_user.disabled_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_user_memberships_and_admin_sessions() {
+        let store = create_test_store().await;
+        let project_id = store
+            .get_or_create_project("admin-membership-project")
+            .await
+            .unwrap();
+        let user_id = store
+            .get_or_create_user_identity(
+                "jwt",
+                "subject-admin-membership",
+                Some("membership@example.com"),
+                Some("Membership User"),
+            )
+            .await
+            .unwrap();
+
+        store
+            .grant_project_membership(&project_id, &user_id, "owner", None)
+            .await
+            .unwrap();
+
+        let memberships = store
+            .list_user_project_memberships(&user_id, false)
+            .await
+            .unwrap();
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].project_id, project_id);
+        assert_eq!(memberships[0].role, "owner");
+
+        store
+            .insert_auth_session(
+                "session-admin-1",
+                &user_id,
+                "token-hash-1",
+                "csrf-hash-1",
+                "2099-01-01 00:00:00",
+                Some("test-agent"),
+                Some("127.0.0.1"),
+            )
+            .await
+            .unwrap();
+
+        let sessions = store
+            .list_auth_sessions_for_admin(Some(&user_id), false)
+            .await
+            .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "session-admin-1");
+        assert!(sessions[0].revoked_at.is_none());
+
+        let revoked = store
+            .revoke_auth_session_by_id("session-admin-1")
+            .await
+            .unwrap();
+        assert!(revoked);
+
+        let with_revoked = store
+            .list_auth_sessions_for_admin(Some(&user_id), true)
+            .await
+            .unwrap();
+        assert_eq!(with_revoked.len(), 1);
+        assert!(with_revoked[0].revoked_at.is_some());
     }
 }
