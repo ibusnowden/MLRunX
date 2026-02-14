@@ -47,12 +47,22 @@ pub struct ApiKey {
     pub last_used_at: Option<std::time::SystemTime>,
     /// When the key was revoked (None = active)
     pub revoked_at: Option<std::time::SystemTime>,
+    /// When the key expires (None = never expires)
+    pub expires_at: Option<std::time::SystemTime>,
 }
 
 impl ApiKey {
-    /// Check if the key is valid (not revoked).
+    /// Check if the key is valid (not revoked and not expired).
     pub fn is_valid(&self) -> bool {
-        self.revoked_at.is_none()
+        if self.revoked_at.is_some() {
+            return false;
+        }
+        if let Some(expires_at) = self.expires_at {
+            if SystemTime::now() >= expires_at {
+                return false;
+            }
+        }
+        true
     }
 
     /// Check if the key has a specific scope.
@@ -707,6 +717,9 @@ impl ApiKeyStore {
                 "auth",
                 None,
                 "denied",
+                None,
+                None,
+                None,
                 metadata_json.as_deref(),
             )
             .await
@@ -774,6 +787,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
                     None, // Global admin key
                     Some("bootstrap".to_string()),
                     vec!["admin".to_string()],
+                    None, // Bootstrap keys don't expire
                 );
                 let mut key = key;
                 key.id = "bootstrap".to_string();
@@ -812,6 +826,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
         project_id: Option<String>,
         name: Option<String>,
         scopes: Vec<String>,
+        expires_at: Option<SystemTime>,
     ) -> ApiKey {
         let key_hash = hash_api_key_argon2(raw_key).unwrap_or_else(|err| {
             warn!("Failed to hash API key with argon2id, falling back to legacy hash: {err}");
@@ -829,6 +844,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
             created_at: std::time::SystemTime::now(),
             last_used_at: None,
             revoked_at: None,
+            expires_at,
         }
     }
 
@@ -853,6 +869,12 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
                     }
 
                     let mut key = Self::api_key_from_row(row);
+
+                    // Reject expired keys.
+                    if !key.is_valid() {
+                        return None;
+                    }
+
                     if let Err(err) = sqlite_store.touch_api_key_last_used(&key.key_hash).await {
                         warn!("Failed to update API key last_used_at: {err}");
                     } else {
@@ -883,6 +905,12 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
                     }
 
                     let mut key = Self::api_key_from_row(row);
+
+                    // Reject expired keys.
+                    if !key.is_valid() {
+                        return None;
+                    }
+
                     if let Err(err) = sqlite_store.touch_api_key_last_used(&key.key_hash).await {
                         warn!("Failed to update API key last_used_at: {err}");
                     } else {
@@ -921,14 +949,20 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
         project_id: Option<String>,
         name: Option<String>,
         scopes: Vec<String>,
+        expires_in_seconds: Option<u64>,
     ) -> (String, ApiKey) {
         // Generate a random key
         let raw_key = generate_api_key();
-        let key = self.create_key_from_raw(&raw_key, project_id, name, scopes);
+        let expires_at = expires_in_seconds.map(|secs| SystemTime::now() + Duration::from_secs(secs));
+        let key = self.create_key_from_raw(&raw_key, project_id, name, scopes, expires_at);
 
         if let Some(sqlite_store) = &self.sqlite_store {
             let scopes_json =
                 serde_json::to_string(&key.scopes).unwrap_or_else(|_| "[]".to_string());
+            let expires_at_str = key.expires_at.map(|t| {
+                let dt = chrono::DateTime::<chrono::Utc>::from(t);
+                dt.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string()
+            });
             if let Err(err) = sqlite_store
                 .insert_api_key(
                     &key.id,
@@ -938,6 +972,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
                     key.project_id.as_deref(),
                     key.name.as_deref(),
                     &scopes_json,
+                    expires_at_str.as_deref(),
                 )
                 .await
             {
@@ -949,6 +984,74 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
         keys.insert(key.key_hash.clone(), key.clone());
 
         (raw_key, key)
+    }
+
+    /// Rotate the bootstrap API key: revoke the old one and create a new one.
+    /// Returns the new raw key on success.
+    pub async fn rotate_bootstrap_key(&self) -> Result<String, String> {
+        // Revoke the old bootstrap key if it exists.
+        let mut keys = self.keys.write().await;
+        if let Some(old_key) = keys.get_mut("bootstrap") {
+            old_key.revoked_at = Some(SystemTime::now());
+        }
+        // Also try to revoke by ID in the in-memory map.
+        for key in keys.values_mut() {
+            if key.id == "bootstrap" && key.revoked_at.is_none() {
+                key.revoked_at = Some(SystemTime::now());
+            }
+        }
+        drop(keys);
+
+        // Revoke in sqlite too.
+        if let Some(sqlite_store) = &self.sqlite_store {
+            let _ = sqlite_store.revoke_api_key_by_id("bootstrap").await;
+        }
+
+        // Generate a new bootstrap key.
+        let raw_key = generate_api_key();
+        let mut new_key = self.create_key_from_raw(
+            &raw_key,
+            None,
+            Some("bootstrap".to_string()),
+            vec!["admin".to_string()],
+            None,
+        );
+        new_key.id = "bootstrap".to_string();
+        let key_fingerprint = self.hash_with_hmac(&raw_key);
+
+        if let Some(sqlite_store) = &self.sqlite_store {
+            let scopes_json = serde_json::to_string(&new_key.scopes)
+                .unwrap_or_else(|_| r#"["admin"]"#.to_string());
+            sqlite_store
+                .upsert_bootstrap_api_key(
+                    &new_key.id,
+                    &new_key.key_hash,
+                    Some(&key_fingerprint),
+                    &new_key.key_prefix,
+                )
+                .await
+                .map_err(|e| format!("Failed to persist rotated bootstrap key: {e}"))?;
+
+            // Also update scopes in case upsert doesn't handle them.
+            let _ = sqlite_store
+                .insert_api_key(
+                    &new_key.id,
+                    &new_key.key_hash,
+                    Some(&key_fingerprint),
+                    &new_key.key_prefix,
+                    None,
+                    Some("bootstrap"),
+                    &scopes_json,
+                    None,
+                )
+                .await;
+        }
+
+        let mut keys = self.keys.write().await;
+        keys.insert(new_key.key_hash.clone(), new_key);
+
+        info!("Bootstrap API key rotated successfully");
+        Ok(raw_key)
     }
 
     /// Revoke an API key.
@@ -1354,11 +1457,14 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
             created_at: now,
             last_used_at: Some(now),
             revoked_at: None,
+            expires_at: None,
         }
     }
 
     fn decode_ui_jwt_claims(&self, raw_token: &str) -> Result<UiJwtClaims, String> {
         let mut validation = Validation::new(self.ui_jwt.algorithm.jsonwebtoken_algorithm());
+        // Require exp claim — reject tokens that never expire.
+        validation.validate_exp = true;
         let issuer = self.ui_jwt.issuer.as_ref().ok_or_else(|| {
             "MLRUNX_JWT_ISSUER is required when UI JWT auth is enabled.".to_string()
         })?;
@@ -1446,6 +1552,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
             created_at: parse_sqlite_datetime(&row.created_at).unwrap_or_else(SystemTime::now),
             last_used_at: row.last_used_at.as_deref().and_then(parse_sqlite_datetime),
             revoked_at: row.revoked_at.as_deref().and_then(parse_sqlite_datetime),
+            expires_at: row.expires_at.as_deref().and_then(parse_sqlite_datetime),
         }
     }
 }
@@ -1572,6 +1679,12 @@ pub struct AuthContext {
     allowed_project_ids: Option<HashSet<String>>,
     /// Source auth mode.
     pub auth_mode: AuthMode,
+    /// Unique request identifier for audit trail correlation.
+    pub request_id: String,
+    /// Client IP address extracted from the request.
+    pub client_ip: Option<String>,
+    /// User-Agent header value from the request.
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1594,10 +1707,14 @@ impl AuthContext {
                 created_at: std::time::SystemTime::now(),
                 last_used_at: None,
                 revoked_at: None,
+                expires_at: None,
             },
             is_dev_mode: true,
             allowed_project_ids: None,
             auth_mode: AuthMode::ApiKey,
+            request_id: uuid::Uuid::now_v7().to_string(),
+            client_ip: None,
+            user_agent: None,
         }
     }
 
@@ -2014,6 +2131,9 @@ pub async fn auth_middleware(
         is_dev_mode: false,
         allowed_project_ids,
         auth_mode,
+        request_id: uuid::Uuid::now_v7().to_string(),
+        client_ip,
+        user_agent,
     });
 
     Ok(next.run(request).await)
@@ -2155,6 +2275,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
                 Some("project-123".to_string()),
                 Some("test-key".to_string()),
                 vec!["ingest".to_string()],
+                None,
             )
             .await;
 
@@ -2180,6 +2301,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
                 None,
                 Some("to-revoke".to_string()),
                 vec!["admin".to_string()],
+                None,
             )
             .await;
 
@@ -2209,6 +2331,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
                 Some(project_id.clone()),
                 Some("persistent-key".to_string()),
                 vec!["read".to_string()],
+                None,
             )
             .await;
 
@@ -2415,10 +2538,14 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
                 created_at: SystemTime::now(),
                 last_used_at: None,
                 revoked_at: None,
+                expires_at: None,
             },
             is_dev_mode: false,
             allowed_project_ids: Some(allowed),
             auth_mode: AuthMode::UiJwt,
+            request_id: uuid::Uuid::now_v7().to_string(),
+            client_ip: None,
+            user_agent: None,
         };
 
         assert!(ctx.require_project_access("project-a").is_ok());
@@ -2438,6 +2565,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
             created_at: std::time::SystemTime::now(),
             last_used_at: None,
             revoked_at: None,
+            expires_at: None,
         };
 
         assert!(key.has_scope("ingest"));
@@ -2455,6 +2583,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
             created_at: std::time::SystemTime::now(),
             last_used_at: None,
             revoked_at: None,
+            expires_at: None,
         };
 
         assert!(admin_key.has_scope("anything"));
@@ -2474,6 +2603,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
             created_at: std::time::SystemTime::now(),
             last_used_at: None,
             revoked_at: None,
+            expires_at: None,
         };
 
         assert!(project_key.can_access_project("project-123"));
@@ -2490,6 +2620,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
             created_at: std::time::SystemTime::now(),
             last_used_at: None,
             revoked_at: None,
+            expires_at: None,
         };
 
         assert!(admin_key.can_access_project("project-123"));

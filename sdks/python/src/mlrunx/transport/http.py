@@ -51,7 +51,7 @@ class HttpTransport(Transport):
         if self._client is None:
             headers = {"Content-Type": "application/json"}
             if self._api_key:
-                headers["Authorization"] = f"Bearer {self._api_key}"
+                headers["X-API-Key"] = self._api_key
 
             self._client = httpx.Client(
                 base_url=self._base_url,

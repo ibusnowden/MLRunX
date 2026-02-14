@@ -69,8 +69,11 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create data directory for SQLite
-RUN mkdir -p /data
+# Run as non-root user for defense-in-depth
+RUN useradd -r -s /bin/false -d /data mlrunx
+
+# Create data directory with restricted permissions
+RUN mkdir -p /data && chown mlrunx:mlrunx /data && chmod 700 /data
 
 COPY --from=builder /app/target/release/mlrunx-api /usr/local/bin/
 
@@ -84,6 +87,8 @@ ENV MLRUNX_SQLITE_PATH=/data/mlrunx.db
 EXPOSE 3001 50051
 
 VOLUME /data
+
+USER mlrunx
 
 HEALTHCHECK --interval=10s --timeout=5s --retries=5 \
     CMD curl -f http://localhost:3001/health || exit 1

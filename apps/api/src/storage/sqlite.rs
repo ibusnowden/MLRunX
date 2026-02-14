@@ -852,12 +852,15 @@ impl SqliteStore {
         resource_type: &str,
         resource_id: Option<&str>,
         outcome: &str,
+        request_id: Option<&str>,
+        client_ip: Option<&str>,
+        user_agent: Option<&str>,
         metadata_json: Option<&str>,
     ) -> Result<(), SqliteError> {
         let conn = self.conn.lock().await;
         conn.execute(
-            "INSERT INTO audit_events (actor_user_id, actor_key_id, project_id, run_id, action, resource_type, resource_id, outcome, metadata) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, '{}'))",
-            params![actor_user_id, actor_key_id, project_id, run_id, action, resource_type, resource_id, outcome, metadata_json],
+            "INSERT INTO audit_events (actor_user_id, actor_key_id, project_id, run_id, action, resource_type, resource_id, outcome, request_id, client_ip, user_agent, metadata) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, COALESCE(?12, '{}'))",
+            params![actor_user_id, actor_key_id, project_id, run_id, action, resource_type, resource_id, outcome, request_id, client_ip, user_agent, metadata_json],
         )?;
         Ok(())
     }
@@ -1064,6 +1067,20 @@ impl SqliteStore {
             params![session_id],
         )?;
         Ok(changed > 0)
+    }
+
+    /// Revoke all active sessions for a user.
+    /// Called when a user account is disabled to prevent continued access.
+    pub async fn revoke_all_sessions_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<usize, SqliteError> {
+        let conn = self.conn.lock().await;
+        let changed = conn.execute(
+            "UPDATE auth_sessions SET revoked_at = datetime('now'), updated_at = datetime('now') WHERE user_id = ?1 AND revoked_at IS NULL",
+            params![user_id],
+        )?;
+        Ok(changed)
     }
 
     // =========================================================================
@@ -1647,12 +1664,13 @@ impl SqliteStore {
         project_id: Option<&str>,
         name: Option<&str>,
         scopes_json: &str,
+        expires_at: Option<&str>,
     ) -> Result<(), SqliteError> {
         let conn = self.conn.lock().await;
 
         conn.execute(
-            r#"INSERT INTO api_keys (id, key_hash, key_fingerprint, key_prefix, project_id, name, scopes)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+            r#"INSERT INTO api_keys (id, key_hash, key_fingerprint, key_prefix, project_id, name, scopes, expires_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
             params![
                 id,
                 key_hash,
@@ -1660,7 +1678,8 @@ impl SqliteStore {
                 key_prefix,
                 project_id,
                 name,
-                scopes_json
+                scopes_json,
+                expires_at
             ],
         )?;
 
@@ -1703,7 +1722,7 @@ impl SqliteStore {
 
         let row = conn
             .query_row(
-                r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at
+                r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at, expires_at
                    FROM api_keys
                    WHERE key_fingerprint = ?1"#,
                 params![key_fingerprint],
@@ -1719,6 +1738,7 @@ impl SqliteStore {
                         created_at: row.get(7)?,
                         last_used_at: row.get(8)?,
                         revoked_at: row.get(9)?,
+                        expires_at: row.get(10)?,
                     })
                 },
             )
@@ -1736,7 +1756,7 @@ impl SqliteStore {
 
         let row = conn
             .query_row(
-                r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at
+                r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at, expires_at
                    FROM api_keys
                    WHERE key_hash = ?1"#,
                 params![key_hash],
@@ -1752,6 +1772,7 @@ impl SqliteStore {
                         created_at: row.get(7)?,
                         last_used_at: row.get(8)?,
                         revoked_at: row.get(9)?,
+                        expires_at: row.get(10)?,
                     })
                 },
             )
@@ -1770,6 +1791,18 @@ impl SqliteStore {
         )?;
 
         Ok(())
+    }
+
+    /// Revoke an API key by its ID.
+    pub async fn revoke_api_key_by_id(&self, key_id: &str) -> Result<bool, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let changes = conn.execute(
+            "UPDATE api_keys SET revoked_at = datetime('now'), updated_at = datetime('now') WHERE id = ?1 AND revoked_at IS NULL",
+            params![key_id],
+        )?;
+
+        Ok(changes > 0)
     }
 
     /// Revoke an API key by hash.
@@ -1796,7 +1829,7 @@ impl SqliteStore {
         match project_id {
             Some(project_id) => {
                 let mut stmt = conn.prepare(
-                    r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at
+                    r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at, expires_at
                        FROM api_keys
                        WHERE project_id = ?1
                        ORDER BY created_at DESC"#,
@@ -1813,6 +1846,7 @@ impl SqliteStore {
                         created_at: row.get(7)?,
                         last_used_at: row.get(8)?,
                         revoked_at: row.get(9)?,
+                        expires_at: row.get(10)?,
                     })
                 })?;
                 for row in rows {
@@ -1821,7 +1855,7 @@ impl SqliteStore {
             }
             None => {
                 let mut stmt = conn.prepare(
-                    r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at
+                    r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at, expires_at
                        FROM api_keys
                        ORDER BY created_at DESC"#,
                 )?;
@@ -1837,6 +1871,7 @@ impl SqliteStore {
                         created_at: row.get(7)?,
                         last_used_at: row.get(8)?,
                         revoked_at: row.get(9)?,
+                        expires_at: row.get(10)?,
                     })
                 })?;
                 for row in rows {
@@ -2000,6 +2035,7 @@ pub struct ApiKeyRow {
     pub created_at: String,
     pub last_used_at: Option<String>,
     pub revoked_at: Option<String>,
+    pub expires_at: Option<String>,
 }
 
 /// A project membership row.
@@ -2192,6 +2228,7 @@ mod tests {
                 Some(&project_id),
                 Some("delete-project-key"),
                 r#"["read","write"]"#,
+                None,
             )
             .await
             .unwrap();
@@ -2217,6 +2254,9 @@ mod tests {
                 "run",
                 Some("run-delete-project"),
                 "success",
+                None,
+                None,
+                None,
                 None,
             )
             .await
@@ -2557,6 +2597,9 @@ mod tests {
                 "run",
                 Some("run-audit-123"),
                 "denied",
+                None,
+                None,
+                None,
                 Some(r#"{"reason":"rbac_denied"}"#),
             )
             .await
@@ -2592,6 +2635,9 @@ mod tests {
                 "project",
                 Some(&project_id),
                 "success",
+                None,
+                None,
+                None,
                 Some(r#"{"source":"unit-test"}"#),
             )
             .await
@@ -2635,6 +2681,7 @@ mod tests {
                 Some(&project_id),
                 Some("key-one"),
                 scopes_json,
+                None,
             )
             .await
             .unwrap();

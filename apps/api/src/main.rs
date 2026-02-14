@@ -15,12 +15,17 @@
 //!   and horizontal scaling.
 
 #![allow(
-    clippy::all,
-    clippy::pedantic,
-    clippy::nursery,
+    clippy::module_name_repetitions,
+    clippy::must_use_candidate,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::redundant_pub_crate,
+    clippy::future_not_send,
+    clippy::significant_drop_tightening,
+    clippy::option_if_let_else,
     dead_code,
     unused_imports
-)] // Scaffolding crate; tighten lints as API wiring stabilizes.
+)] // Targeted lint exceptions — keep this list minimal.
 
 mod auth;
 mod config;
@@ -153,6 +158,37 @@ fn env_flag_default(name: &str, default_value: bool) -> bool {
     })
 }
 
+/// Convert a storage error into a safe HTTP 500 response.
+/// Logs the full error server-side but returns a generic message to the client.
+fn internal_error(e: impl std::fmt::Display) -> (StatusCode, String) {
+    warn!("Internal error: {e}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Internal server error".to_string(),
+    )
+}
+
+/// Validate that a path parameter looks like a safe identifier.
+/// Accepts UUIDs, ULIDs, and short alphanumeric IDs up to 128 chars.
+fn validate_path_id(id: &str, name: &str) -> Result<(), (StatusCode, String)> {
+    if id.is_empty() || id.len() > 128 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Invalid {name}: must be 1-128 characters"),
+        ));
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Invalid {name}: only alphanumeric, dash, and underscore allowed"),
+        ));
+    }
+    Ok(())
+}
+
 fn auth_mode_label(auth: &AuthContext) -> &'static str {
     match auth.auth_mode {
         AuthMode::ApiKey => "api_key",
@@ -199,9 +235,6 @@ fn should_enforce_scope(auth: &AuthContext, tier: EndpointRbacTier) -> bool {
         return true;
     }
 
-    if !env_flag_default("MLRUNX_RBAC_ENDPOINT_ENFORCEMENT_ENABLED", true) {
-        return false;
-    }
     env_flag_default(tier.env_flag_name(), true)
 }
 
@@ -224,6 +257,12 @@ async fn emit_audit_event(
         (None, None)
     };
 
+    let (request_id, client_ip, user_agent) = if let Some(auth) = auth {
+        (Some(auth.request_id.clone()), auth.client_ip.clone(), auth.user_agent.clone())
+    } else {
+        (None, None, None)
+    };
+
     if let Err(err) = state
         .sqlite_store
         .insert_audit_event(
@@ -235,6 +274,9 @@ async fn emit_audit_event(
             resource_type,
             resource_id,
             outcome,
+            request_id.as_deref(),
+            client_ip.as_deref(),
+            user_agent.as_deref(),
             metadata_json.as_deref(),
         )
         .await
@@ -394,7 +436,7 @@ async fn require_ui_project_owner(
         .sqlite_store
         .list_active_project_memberships(&user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_error(e))?;
 
     let owns_project = memberships
         .iter()
@@ -934,20 +976,20 @@ async fn http_list_projects(
             .sqlite_store
             .list_projects()
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|e| internal_error(e))?
     } else if let Some(allowed_projects) = auth.allowed_project_ids() {
         let project_ids: Vec<String> = allowed_projects.iter().cloned().collect();
         state
             .sqlite_store
             .list_projects_by_ids(&project_ids)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|e| internal_error(e))?
     } else if let Some(project_id) = auth.project_id() {
         state
             .sqlite_store
             .list_projects_by_ids(&[project_id.to_string()])
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|e| internal_error(e))?
     } else {
         Vec::new()
     };
@@ -987,7 +1029,7 @@ async fn http_create_project(
                         format!("Project '{}' already exists.", name),
                     )
                 } else {
-                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                    internal_error(e)
                 }
             })?;
 
@@ -995,7 +1037,7 @@ async fn http_create_project(
             .sqlite_store
             .grant_project_membership(&row.id, &user_id, "owner", Some(&user_id))
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| internal_error(e))?;
         maybe_shadow_write_project_to_postgres(&row).await;
 
         emit_audit_event(
@@ -1047,7 +1089,7 @@ async fn http_create_project(
                     format!("Project '{}' already exists.", name),
                 )
             } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                internal_error(e)
             }
         })?;
     maybe_shadow_write_project_to_postgres(&row).await;
@@ -1076,11 +1118,12 @@ async fn http_delete_project(
     Extension(auth): Extension<AuthContext>,
     axum::extract::Path(project_id): axum::extract::Path<String>,
 ) -> Result<Json<AdminMutationResponse>, (StatusCode, String)> {
+    validate_path_id(&project_id, "project_id")?;
     let project = state
         .sqlite_store
         .get_project_by_id(&project_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| internal_error(e))?
         .ok_or((
             StatusCode::NOT_FOUND,
             format!("Project not found: '{project_id}'"),
@@ -1113,7 +1156,7 @@ async fn http_delete_project(
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            _ => internal_error(e),
         })?;
 
     emit_audit_event(
@@ -1315,7 +1358,7 @@ async fn http_admin_list_users(
         .sqlite_store
         .list_users()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| internal_error(e))?
         .into_iter()
         .map(admin_user_response_from_row)
         .collect();
@@ -1342,6 +1385,7 @@ async fn http_admin_list_user_memberships(
     axum::extract::Path(user_id): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<AdminMembershipsQuery>,
 ) -> Result<Json<AdminListUserMembershipsResponse>, (StatusCode, String)> {
+    validate_path_id(&user_id, "user_id")?;
     require_platform_admin_access(
         &state,
         &auth,
@@ -1355,7 +1399,7 @@ async fn http_admin_list_user_memberships(
         .sqlite_store
         .get_user_by_id(&user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| internal_error(e))?
         .is_some();
     if !user_exists {
         return Err((
@@ -1368,7 +1412,7 @@ async fn http_admin_list_user_memberships(
         .sqlite_store
         .list_user_project_memberships(&user_id, query.include_revoked)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| internal_error(e))?
         .into_iter()
         .map(admin_membership_response_from_row)
         .collect();
@@ -1399,6 +1443,7 @@ async fn http_admin_disable_user(
     Extension(auth): Extension<AuthContext>,
     axum::extract::Path(user_id): axum::extract::Path<String>,
 ) -> Result<Json<AdminUserResponse>, (StatusCode, String)> {
+    validate_path_id(&user_id, "user_id")?;
     require_platform_admin_access(&state, &auth, "admin.user.disable", "user", Some(&user_id))
         .await?;
 
@@ -1406,7 +1451,7 @@ async fn http_admin_disable_user(
         .sqlite_store
         .get_user_by_id(&user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| internal_error(e))?
         .is_some();
     if !user_exists {
         return Err((
@@ -1419,13 +1464,21 @@ async fn http_admin_disable_user(
         .sqlite_store
         .set_user_disabled(&user_id, true)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_error(e))?;
+
+    // Invalidate all active sessions for the disabled user so existing tokens
+    // cannot be used after the account is disabled.
+    state
+        .sqlite_store
+        .revoke_all_sessions_for_user(&user_id)
+        .await
+        .map_err(|e| internal_error(e))?;
 
     let user = state
         .sqlite_store
         .get_user_by_id(&user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| internal_error(e))?
         .ok_or((
             StatusCode::NOT_FOUND,
             format!("User not found: '{user_id}'"),
@@ -1452,6 +1505,7 @@ async fn http_admin_enable_user(
     Extension(auth): Extension<AuthContext>,
     axum::extract::Path(user_id): axum::extract::Path<String>,
 ) -> Result<Json<AdminUserResponse>, (StatusCode, String)> {
+    validate_path_id(&user_id, "user_id")?;
     require_platform_admin_access(&state, &auth, "admin.user.enable", "user", Some(&user_id))
         .await?;
 
@@ -1459,7 +1513,7 @@ async fn http_admin_enable_user(
         .sqlite_store
         .get_user_by_id(&user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| internal_error(e))?
         .is_some();
     if !user_exists {
         return Err((
@@ -1472,13 +1526,13 @@ async fn http_admin_enable_user(
         .sqlite_store
         .set_user_disabled(&user_id, false)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_error(e))?;
 
     let user = state
         .sqlite_store
         .get_user_by_id(&user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| internal_error(e))?
         .ok_or((
             StatusCode::NOT_FOUND,
             format!("User not found: '{user_id}'"),
@@ -1513,7 +1567,7 @@ async fn http_admin_list_sessions(
             .sqlite_store
             .get_user_by_id(user_id)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|e| internal_error(e))?
             .is_some();
         if !user_exists {
             return Err((
@@ -1527,7 +1581,7 @@ async fn http_admin_list_sessions(
         .sqlite_store
         .list_auth_sessions_for_admin(query.user_id.as_deref(), query.include_revoked)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| internal_error(e))?
         .into_iter()
         .map(admin_session_response_from_row)
         .collect();
@@ -1556,6 +1610,7 @@ async fn http_admin_revoke_session(
     Extension(auth): Extension<AuthContext>,
     axum::extract::Path(session_id): axum::extract::Path<String>,
 ) -> Result<Json<AdminMutationResponse>, (StatusCode, String)> {
+    validate_path_id(&session_id, "session_id")?;
     require_platform_admin_access(
         &state,
         &auth,
@@ -1569,7 +1624,7 @@ async fn http_admin_revoke_session(
         .sqlite_store
         .revoke_auth_session_by_id(&session_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_error(e))?;
     if !revoked {
         return Err((
             StatusCode::NOT_FOUND,
@@ -1614,7 +1669,7 @@ async fn http_admin_list_audit_events(
             limit,
         )
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| internal_error(e))?
         .into_iter()
         .map(admin_audit_event_response_from_row)
         .collect();
@@ -1640,6 +1695,48 @@ async fn http_admin_list_audit_events(
     .await;
 
     Ok(Json(AdminListAuditEventsResponse { events }))
+}
+
+/// Rotate the bootstrap API key without a server restart.
+async fn http_admin_rotate_bootstrap_key(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_platform_admin_access(
+        &state,
+        &auth,
+        "admin.bootstrap_key.rotate",
+        "bootstrap_key",
+        None,
+    )
+    .await?;
+
+    let new_raw_key = state.key_store.rotate_bootstrap_key().await.map_err(|e| {
+        warn!("Failed to rotate bootstrap key: {e}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to rotate bootstrap key".to_string(),
+        )
+    })?;
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        None,
+        None,
+        "admin.bootstrap_key.rotate",
+        "bootstrap_key",
+        Some("bootstrap"),
+        "success",
+        serde_json::json!({}),
+    )
+    .await;
+
+    Ok(Json(serde_json::json!({
+        "status": "rotated",
+        "new_api_key": new_raw_key,
+        "message": "Bootstrap key rotated. Update MLRUNX_API_KEY in your environment and restart SDK clients."
+    })))
 }
 
 /// Initialize a run via HTTP (for SDK HTTP transport).
@@ -1691,7 +1788,7 @@ async fn http_init_run(
         .sqlite_store
         .get_project_name_by_id(project_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| internal_error(e))?
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
@@ -1756,7 +1853,7 @@ async fn http_init_run(
             created_by_user_id.as_deref(),
         )
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_error(e))?;
 
     // Set initial tags if provided
     if let Some(tags) = &req.tags {
@@ -1766,7 +1863,7 @@ async fn http_init_run(
             .sqlite_store
             .set_tags(&run_id, &tag_pairs)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| internal_error(e))?;
     }
 
     if let Err(e) = state
@@ -1943,7 +2040,7 @@ async fn http_ingest_batch(
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            _ => internal_error(e),
         })?;
 
     // Verify the caller can access the run's project and has write scope.
@@ -2111,7 +2208,7 @@ async fn http_ingest_batch(
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            _ => internal_error(e),
         })?;
 
     if !run.status.eq_ignore_ascii_case("running") {
@@ -2324,6 +2421,7 @@ async fn http_finish_run(
     axum::extract::Path(run_id): axum::extract::Path<String>,
     Json(req): Json<FinishRunHttpRequest>,
 ) -> Result<Json<FinishRunHttpResponse>, (StatusCode, String)> {
+    validate_path_id(&run_id, "run_id")?;
     // Verify the caller can access the run's project and has write scope
     let run = state
         .sqlite_store
@@ -2331,7 +2429,7 @@ async fn http_finish_run(
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            _ => internal_error(e),
         })?;
     require_endpoint_access(
         &state,
@@ -2352,7 +2450,7 @@ async fn http_finish_run(
         .sqlite_store
         .finish_run(&run_id, &req.status)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_error(e))?;
     if let Err(e) = state
         .sqlite_store
         .insert_run_events(
@@ -2409,6 +2507,7 @@ async fn http_delete_run(
     Extension(auth): Extension<AuthContext>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
 ) -> Result<Json<DeleteRunHttpResponse>, (StatusCode, String)> {
+    validate_path_id(&run_id, "run_id")?;
     // Verify the caller can access the run's project and has write scope.
     // Ownership checks below prevent cross-user run deletion.
     let run = state
@@ -2417,7 +2516,7 @@ async fn http_delete_run(
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            _ => internal_error(e),
         })?;
     require_endpoint_access(
         &state,
@@ -2440,7 +2539,7 @@ async fn http_delete_run(
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            _ => internal_error(e),
         })?;
 
     info!(run_id = %run_id, "HTTP: Deleted run");
@@ -2476,6 +2575,8 @@ struct CreateKeyRequest {
     name: Option<String>,
     /// Scopes: "admin", "write", "read"
     scopes: Vec<String>,
+    /// Optional TTL in seconds (None = never expires)
+    expires_in_seconds: Option<u64>,
 }
 
 /// Response from creating a key (raw key shown ONCE).
@@ -2493,6 +2594,8 @@ struct CreateKeyResponse {
     name: Option<String>,
     /// Granted scopes
     scopes: Vec<String>,
+    /// When the key expires (null = never)
+    expires_at: Option<String>,
 }
 
 /// A key in the list response (no raw key exposed).
@@ -2730,6 +2833,7 @@ async fn http_create_key(
             target_project_id.clone(),
             req.name.clone(),
             normalized_scopes.clone(),
+            req.expires_in_seconds,
         )
         .await;
 
@@ -2755,6 +2859,12 @@ async fn http_create_key(
     )
     .await;
 
+    let expires_at_str = key.expires_at.map(|t| {
+        chrono::DateTime::<chrono::Utc>::from(t)
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    });
+
     Ok(Json(CreateKeyResponse {
         api_key: raw_key,
         key_id: key.id,
@@ -2762,6 +2872,7 @@ async fn http_create_key(
         project_id: key.project_id,
         name: key.name,
         scopes: key.scopes,
+        expires_at: expires_at_str,
     }))
 }
 
@@ -2847,6 +2958,7 @@ async fn http_revoke_key(
     Extension(auth): Extension<AuthContext>,
     axum::extract::Path(key_id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    validate_path_id(&key_id, "key_id")?;
     let keys = if auth.is_ui_jwt() {
         if let Err((status, message)) = auth.require_scope("write") {
             emit_audit_event(
@@ -2955,6 +3067,7 @@ async fn http_create_share_token(
     axum::extract::Path(run_id): axum::extract::Path<String>,
     Json(req): Json<CreateShareRequest>,
 ) -> Result<Json<CreateShareResponse>, (StatusCode, String)> {
+    validate_path_id(&run_id, "run_id")?;
     // Verify the caller can access the run
     let run = state
         .sqlite_store
@@ -2962,7 +3075,7 @@ async fn http_create_share_token(
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            _ => internal_error(e),
         })?;
     require_endpoint_access(
         &state,
@@ -2996,7 +3109,7 @@ async fn http_create_share_token(
             expires_at.as_deref(),
         )
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_error(e))?;
 
     info!(run_id = %run_id, "Created share token");
 
@@ -3035,7 +3148,7 @@ async fn http_get_shared_run(
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            _ => internal_error(e),
         })?;
 
     // Fetch the run
@@ -3043,7 +3156,7 @@ async fn http_get_shared_run(
         .sqlite_store
         .get_run(&share.run_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_error(e))?;
 
     let tags = state
         .sqlite_store
@@ -3087,7 +3200,7 @@ async fn http_get_shared_metrics(
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            _ => internal_error(e),
         })?;
 
     // Parse metric names
@@ -3106,7 +3219,7 @@ async fn http_get_shared_metrics(
         .sqlite_store
         .get_metrics(&share.run_id, &names, query.max_points)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_error(e))?;
 
     let available_metrics = state
         .sqlite_store
@@ -3154,7 +3267,7 @@ async fn http_revoke_share_token(
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            _ => internal_error(e),
         })?;
     require_endpoint_access(
         &state,
@@ -3176,7 +3289,7 @@ async fn http_revoke_share_token(
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            _ => internal_error(e),
         })?;
 
     info!(run_id = %run_id, "Revoked share token");
@@ -3374,7 +3487,7 @@ async fn http_list_runs(
             offset,
         )
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_error(e))?;
 
     // Convert to response format
     let mut runs_response = Vec::new();
@@ -3440,6 +3553,7 @@ async fn http_get_run(
     Extension(auth): Extension<AuthContext>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
 ) -> Result<Json<RunDetailResponse>, (StatusCode, String)> {
+    validate_path_id(&run_id, "run_id")?;
     // Run list is sourced from SQLite; run detail must use the same source.
     let run = state
         .sqlite_store
@@ -3447,7 +3561,7 @@ async fn http_get_run(
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            _ => internal_error(e),
         })?;
 
     // Verify the caller can access this run's project and has read scope
@@ -3551,6 +3665,7 @@ async fn http_get_metrics(
     axum::extract::Path(run_id): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<MetricsQuery>,
 ) -> Result<Json<services::MetricsQueryResponse>, (StatusCode, String)> {
+    validate_path_id(&run_id, "run_id")?;
     // Verify run exists, check project access, and require read scope
     let run = state
         .sqlite_store
@@ -3586,7 +3701,7 @@ async fn http_get_metrics(
         .sqlite_store
         .get_metrics(&run_id, &names, query.max_points)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_error(e))?;
 
     // Get available metric names
     let available_metrics = state
@@ -3630,6 +3745,7 @@ async fn http_get_run_events(
     axum::extract::Path(run_id): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<RunEventsQuery>,
 ) -> Result<Json<ListRunEventsResponse>, (StatusCode, String)> {
+    validate_path_id(&run_id, "run_id")?;
     let run = state
         .sqlite_store
         .get_run(&run_id)
@@ -3655,7 +3771,7 @@ async fn http_get_run_events(
         .sqlite_store
         .list_run_events(&run_id, query.after_id, fetch_limit)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_error(e))?;
 
     let has_more = rows.len() > limit;
     if has_more {
@@ -3761,7 +3877,7 @@ async fn http_compare_runs(
             .await
             .map_err(|e| match e {
                 storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+                _ => internal_error(e),
             })?;
 
         // Verify the caller can access this run's project and has read scope
@@ -3788,7 +3904,7 @@ async fn http_compare_runs(
             .sqlite_store
             .get_metrics(run_id, &names, req.max_points)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| internal_error(e))?;
 
         let series: Vec<services::MetricSeries> = sqlite_series
             .into_iter()
@@ -3849,49 +3965,137 @@ async fn http_compare_runs(
 }
 
 // =============================================================================
+// Per-IP HTTP Rate Limiter
+// =============================================================================
+
+/// Simple in-memory token-bucket rate limiter keyed by client IP.
+struct HttpRateLimiter {
+    /// Max tokens (burst capacity).
+    capacity: u32,
+    /// Tokens added per second.
+    refill_rate: f64,
+    /// Per-IP state: (tokens_remaining, last_refill_instant).
+    buckets: tokio::sync::Mutex<std::collections::HashMap<String, (f64, std::time::Instant)>>,
+}
+
+impl HttpRateLimiter {
+    fn new(capacity: u32, refill_rate: f64) -> Self {
+        Self {
+            capacity,
+            refill_rate,
+            buckets: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn from_env() -> Self {
+        let capacity = std::env::var("MLRUNX_RATE_LIMIT_BURST")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(100);
+        let refill_rate = std::env::var("MLRUNX_RATE_LIMIT_PER_SECOND")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(50.0);
+        Self::new(capacity, refill_rate)
+    }
+
+    /// Try to consume one token. Returns Ok(()) if allowed, Err(retry_after_secs) if denied.
+    async fn check(&self, client_ip: &str) -> Result<(), u64> {
+        let now = std::time::Instant::now();
+        let mut buckets = self.buckets.lock().await;
+
+        let (tokens, last_refill) = buckets
+            .entry(client_ip.to_string())
+            .or_insert((self.capacity as f64, now));
+
+        // Refill tokens based on elapsed time.
+        let elapsed = now.duration_since(*last_refill).as_secs_f64();
+        *tokens = (*tokens + elapsed * self.refill_rate).min(self.capacity as f64);
+        *last_refill = now;
+
+        if *tokens >= 1.0 {
+            *tokens -= 1.0;
+            Ok(())
+        } else {
+            let wait = (1.0 - *tokens) / self.refill_rate;
+            Err(wait.ceil() as u64)
+        }
+    }
+
+    /// Periodically prune stale entries to prevent memory growth.
+    async fn prune_stale(&self) {
+        let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(300);
+        let mut buckets = self.buckets.lock().await;
+        buckets.retain(|_, (_, last_seen)| *last_seen > cutoff);
+    }
+}
+
+fn extract_client_ip(headers: &HeaderMap) -> String {
+    // Check X-Forwarded-For first (behind reverse proxy)
+    if let Some(xff) = headers.get("x-forwarded-for") {
+        if let Ok(xff_str) = xff.to_str() {
+            if let Some(first_ip) = xff_str.split(',').next() {
+                let ip = first_ip.trim();
+                if !ip.is_empty() {
+                    return ip.to_string();
+                }
+            }
+        }
+    }
+    // Fallback to X-Real-IP
+    if let Some(xri) = headers.get("x-real-ip") {
+        if let Ok(ip) = xri.to_str() {
+            let ip = ip.trim();
+            if !ip.is_empty() {
+                return ip.to_string();
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
+// =============================================================================
 // Server Setup
 // =============================================================================
 
 fn build_http_router(state: AppState) -> Router {
     let ui_jwt_enabled = state.key_store.is_ui_jwt_enabled();
 
-    let cors = if ui_jwt_enabled {
-        let mut allowed_origins: Vec<HeaderValue> = std::env::var("MLRUNX_UI_ALLOWED_ORIGINS")
-            .ok()
-            .map(|raw| {
-                raw.split(',')
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .filter_map(|origin| HeaderValue::from_str(origin).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
+    // Always apply restrictive CORS — never fall back to permissive(), even when
+    // auth is disabled, to prevent cross-origin attacks from arbitrary websites.
+    let mut allowed_origins: Vec<HeaderValue> = std::env::var("MLRUNX_UI_ALLOWED_ORIGINS")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .filter_map(|origin| HeaderValue::from_str(origin).ok())
+                .collect()
+        })
+        .unwrap_or_default();
 
-        if allowed_origins.is_empty() {
-            allowed_origins.push(HeaderValue::from_static("http://localhost:3000"));
-            allowed_origins.push(HeaderValue::from_static("http://127.0.0.1:3000"));
-        }
+    if allowed_origins.is_empty() {
+        allowed_origins.push(HeaderValue::from_static("http://localhost:3000"));
+        allowed_origins.push(HeaderValue::from_static("http://127.0.0.1:3000"));
+    }
 
-        CorsLayer::new()
-            .allow_credentials(true)
-            .allow_origin(allowed_origins)
-            .allow_methods([
-                Method::GET,
-                Method::POST,
-                Method::PUT,
-                Method::PATCH,
-                Method::DELETE,
-                Method::OPTIONS,
-            ])
-            .allow_headers([
-                header::CONTENT_TYPE,
-                header::AUTHORIZATION,
-                HeaderName::from_static("x-api-key"),
-                HeaderName::from_static("x-csrf-token"),
-            ])
-    } else {
-        CorsLayer::permissive()
-    };
+    let cors = CorsLayer::new()
+        .allow_credentials(ui_jwt_enabled)
+        .allow_origin(allowed_origins)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            HeaderName::from_static("x-api-key"),
+            HeaderName::from_static("x-csrf-token"),
+        ]);
     let decompression = RequestDecompressionLayer::new();
 
     // Routes that require authentication
@@ -3928,6 +4132,10 @@ fn build_http_router(state: AppState) -> Router {
         .route(
             "/api/v1/admin/audit-events",
             get(http_admin_list_audit_events),
+        )
+        .route(
+            "/api/v1/admin/bootstrap-key/rotate",
+            post(http_admin_rotate_bootstrap_key),
         )
         // Query API endpoints
         .route("/api/v1/runs", get(http_list_runs))
@@ -3974,10 +4182,63 @@ fn build_http_router(state: AppState) -> Router {
         public_routes = public_routes.route("/api/v1/ui-auth/login", post(http_ui_auth_login));
     }
 
+    // Per-IP HTTP rate limiter (token bucket).
+    let rate_limiter = Arc::new(HttpRateLimiter::from_env());
+
+    // Spawn background task to prune stale rate-limit entries every 60s.
+    {
+        let rl = rate_limiter.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                rl.prune_stale().await;
+            }
+        });
+    }
+
+    // Security response headers + rate limiting applied to every response.
+    use axum::middleware::from_fn;
+    let rate_limiter_clone = rate_limiter.clone();
+    let security_and_rate_limit = from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
+        let rl = rate_limiter_clone.clone();
+        async move {
+            let client_ip = extract_client_ip(req.headers());
+            if let Err(retry_after) = rl.check(&client_ip).await {
+                let mut response = axum::response::Response::new(axum::body::Body::from(
+                    "Too many requests".to_string(),
+                ));
+                *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+                response.headers_mut().insert(
+                    "retry-after",
+                    HeaderValue::from_str(&retry_after.to_string())
+                        .unwrap_or_else(|_| HeaderValue::from_static("1")),
+                );
+                return response;
+            }
+
+            let req_id = uuid::Uuid::now_v7().to_string();
+            let mut response = next.run(req).await;
+            let headers = response.headers_mut();
+            headers.insert("x-request-id", HeaderValue::from_str(&req_id).unwrap_or_else(|_| HeaderValue::from_static("unknown")));
+            headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+            headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+            headers.insert(
+                "referrer-policy",
+                HeaderValue::from_static("strict-origin-when-cross-origin"),
+            );
+            headers.insert(
+                "x-permitted-cross-domain-policies",
+                HeaderValue::from_static("none"),
+            );
+            response
+        }
+    });
+
     // Combine routes
     Router::new()
         .merge(public_routes)
         .merge(protected_routes)
+        .layer(security_and_rate_limit)
         .layer(decompression)
         .layer(cors)
         .with_state(state)
@@ -4742,6 +5003,7 @@ mod tests {
                 Some(harness.secondary_project_id.clone()),
                 Some("foreign-key".to_string()),
                 vec!["read".to_string()],
+                None,
             )
             .await;
 
@@ -5211,6 +5473,7 @@ mod tests {
                 None,
                 Some("platform-admin".to_string()),
                 vec!["admin".to_string()],
+                None,
             )
             .await;
 
@@ -5249,6 +5512,7 @@ mod tests {
                 Some(harness.primary_project_id.clone()),
                 Some("project-admin".to_string()),
                 vec!["admin".to_string()],
+                None,
             )
             .await;
         let (global_admin_key, _) = harness
@@ -5257,6 +5521,7 @@ mod tests {
                 None,
                 Some("platform-admin".to_string()),
                 vec!["admin".to_string()],
+                None,
             )
             .await;
 
@@ -5300,6 +5565,7 @@ mod tests {
                 None,
                 Some("platform-admin".to_string()),
                 vec!["admin".to_string()],
+                None,
             )
             .await;
 
@@ -5356,6 +5622,7 @@ mod tests {
                 None,
                 Some("platform-admin".to_string()),
                 vec!["admin".to_string()],
+                None,
             )
             .await;
 
@@ -5438,6 +5705,7 @@ mod tests {
                 None,
                 Some("platform-admin".to_string()),
                 vec!["admin".to_string()],
+                None,
             )
             .await;
 
@@ -5527,6 +5795,7 @@ mod tests {
                 Some(project_id.clone()),
                 Some("owner-key".to_string()),
                 vec!["read".to_string(), "write".to_string()],
+                None,
             )
             .await;
         let (other_raw_key, _) = key_store
@@ -5534,6 +5803,7 @@ mod tests {
                 Some(project_id.clone()),
                 Some("other-key".to_string()),
                 vec!["read".to_string(), "write".to_string()],
+                None,
             )
             .await;
 

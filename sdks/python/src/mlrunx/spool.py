@@ -180,7 +180,7 @@ class DiskSpool:
             config: Spool configuration
         """
         self._config = config or SpoolConfig()
-        self._config.spool_dir.mkdir(parents=True, exist_ok=True)
+        self._config.spool_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._lock = threading.Lock()
         self._active_files: dict[str, SpoolFile] = {}  # run_id -> SpoolFile
         self._stats = SpoolStats()
@@ -450,5 +450,5 @@ def get_spool_dir() -> Path:
         Path to spool directory
     """
     spool_dir = Path.home() / ".mlrunx" / "spool"
-    spool_dir.mkdir(parents=True, exist_ok=True)
+    spool_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     return spool_dir
