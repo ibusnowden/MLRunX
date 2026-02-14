@@ -659,6 +659,34 @@ async fn http_ui_auth_login(
     headers: HeaderMap,
     Json(req): Json<UiAuthLoginRequest>,
 ) -> Result<(HeaderMap, Json<UiAuthLoginResponse>), (StatusCode, String)> {
+    let user_agent = header_string(&headers, "user-agent");
+    let client_ip = infer_client_ip(&headers);
+
+    if let Some(retry_after) = state
+        .key_store
+        .auth_rate_limit_retry_after_seconds(client_ip.as_deref())
+        .await
+    {
+        state
+            .key_store
+            .record_auth_failure(
+                client_ip.as_deref(),
+                user_agent.as_deref(),
+                "/api/v1/ui-auth/login",
+                "POST",
+                "rate_limited",
+                "ui_auth_login",
+            )
+            .await;
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "Too many failed authentication attempts. Retry in {}s.",
+                retry_after
+            ),
+        ));
+    }
+
     let jwt = req
         .jwt
         .as_deref()
@@ -673,14 +701,37 @@ async fn http_ui_auth_login(
             )
         })?;
 
-    let user_agent = header_string(&headers, "user-agent");
-    let client_ip = infer_client_ip(&headers);
-
-    let issue = state
+    let issue = match state
         .key_store
         .create_ui_session_from_jwt(&jwt, user_agent.as_deref(), client_ip.as_deref())
         .await
-        .map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
+    {
+        Ok(issue) => issue,
+        Err(e) => {
+            let reason = if e.to_ascii_lowercase().contains("expired") {
+                "expired_ui_jwt"
+            } else {
+                "invalid_ui_jwt"
+            };
+            state
+                .key_store
+                .record_auth_failure(
+                    client_ip.as_deref(),
+                    user_agent.as_deref(),
+                    "/api/v1/ui-auth/login",
+                    "POST",
+                    reason,
+                    "ui_auth_login",
+                )
+                .await;
+            return Err((StatusCode::UNAUTHORIZED, e));
+        }
+    };
+
+    state
+        .key_store
+        .record_auth_success(client_ip.as_deref())
+        .await;
 
     let secure_cookie = state.key_store.ui_cookie_secure();
     let same_site = state.key_store.ui_cookie_same_site();
@@ -3984,6 +4035,17 @@ async fn main() {
     };
     key_store.init_from_env().await;
 
+    if let Err(err) = key_store.validate_startup_configuration() {
+        panic!("Refusing to start: {err}");
+    }
+
+    if key_store.using_insecure_default_hmac_secret() && is_production_environment() {
+        panic!(
+            "Refusing to start: MLRUNX_AUTH_HMAC_SECRET is not configured in production. \
+Set MLRUNX_AUTH_HMAC_SECRET (or MLRUNX_JWT_SECRET) and restart."
+        );
+    }
+
     if key_store.is_auth_disabled() && is_production_environment() {
         panic!(
             "Refusing to start: authentication is disabled in production. \
@@ -4094,6 +4156,8 @@ mod tests {
         exp: usize,
         email: String,
         name: String,
+        iss: String,
+        aud: String,
     }
 
     #[derive(Debug)]
@@ -4172,6 +4236,8 @@ mod tests {
             exp: (now + 3600) as usize,
             email: "user@example.com".to_string(),
             name: "User".to_string(),
+            iss: "https://test-auth.local".to_string(),
+            aud: "authenticated".to_string(),
         };
         encode(
             &JwtHeader::default(),

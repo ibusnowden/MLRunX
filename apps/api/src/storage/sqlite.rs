@@ -11,8 +11,9 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-const SQLITE_SCHEMA_VERSION: &str = "2026-02-13.2";
-const SQLITE_SCHEMA_DESCRIPTION: &str = "adds run events for backend log timelines";
+const SQLITE_SCHEMA_VERSION: &str = "2026-02-13.3";
+const SQLITE_SCHEMA_DESCRIPTION: &str =
+    "adds API key fingerprints for argon2id migration and run events";
 
 /// Errors that can occur in SQLite operations.
 #[derive(Error, Debug)]
@@ -249,6 +250,7 @@ impl SqliteStore {
             CREATE TABLE IF NOT EXISTS api_keys (
                 id TEXT PRIMARY KEY,
                 key_hash TEXT NOT NULL UNIQUE,
+                key_fingerprint TEXT UNIQUE,
                 key_prefix TEXT NOT NULL,
                 project_id TEXT,
                 created_by_user_id TEXT,
@@ -266,6 +268,7 @@ impl SqliteStore {
             );
             CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id);
             CREATE INDEX IF NOT EXISTS idx_api_keys_created_by_user ON api_keys(created_by_user_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_key_fingerprint ON api_keys(key_fingerprint);
 
             -- Audit events table
             CREATE TABLE IF NOT EXISTS audit_events (
@@ -344,12 +347,22 @@ impl SqliteStore {
             "created_by_user_id",
             "ALTER TABLE runs ADD COLUMN created_by_user_id TEXT",
         )?;
+        Self::ensure_table_column(
+            &conn,
+            "api_keys",
+            "key_fingerprint",
+            "ALTER TABLE api_keys ADD COLUMN key_fingerprint TEXT",
+        )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_runs_created_by_key ON runs(created_by_key_id)",
             [],
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_runs_created_by_user ON runs(created_by_user_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_key_fingerprint ON api_keys(key_fingerprint)",
             [],
         )?;
 
@@ -1629,6 +1642,7 @@ impl SqliteStore {
         &self,
         id: &str,
         key_hash: &str,
+        key_fingerprint: Option<&str>,
         key_prefix: &str,
         project_id: Option<&str>,
         name: Option<&str>,
@@ -1637,9 +1651,17 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
 
         conn.execute(
-            r#"INSERT INTO api_keys (id, key_hash, key_prefix, project_id, name, scopes)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
-            params![id, key_hash, key_prefix, project_id, name, scopes_json],
+            r#"INSERT INTO api_keys (id, key_hash, key_fingerprint, key_prefix, project_id, name, scopes)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+            params![
+                id,
+                key_hash,
+                key_fingerprint,
+                key_prefix,
+                project_id,
+                name,
+                scopes_json
+            ],
         )?;
 
         Ok(())
@@ -1650,23 +1672,59 @@ impl SqliteStore {
         &self,
         id: &str,
         key_hash: &str,
+        key_fingerprint: Option<&str>,
         key_prefix: &str,
     ) -> Result<(), SqliteError> {
         let conn = self.conn.lock().await;
 
         conn.execute(
-            r#"INSERT INTO api_keys (id, key_hash, key_prefix, project_id, name, scopes, revoked_at)
-               VALUES (?1, ?2, ?3, NULL, 'bootstrap', '["admin"]', NULL)
-               ON CONFLICT(key_hash) DO UPDATE SET
+            r#"INSERT INTO api_keys (id, key_hash, key_fingerprint, key_prefix, project_id, name, scopes, revoked_at)
+               VALUES (?1, ?2, ?3, ?4, NULL, 'bootstrap', '["admin"]', NULL)
+               ON CONFLICT(key_fingerprint) DO UPDATE SET
+                   id = excluded.id,
+                   key_hash = excluded.key_hash,
                    key_prefix = excluded.key_prefix,
                    project_id = NULL,
                    scopes = '["admin"]',
                    revoked_at = NULL,
                    updated_at = datetime('now')"#,
-            params![id, key_hash, key_prefix],
+            params![id, key_hash, key_fingerprint, key_prefix],
         )?;
 
         Ok(())
+    }
+
+    /// Fetch an API key by deterministic keyed fingerprint.
+    pub async fn get_api_key_by_fingerprint(
+        &self,
+        key_fingerprint: &str,
+    ) -> Result<Option<ApiKeyRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let row = conn
+            .query_row(
+                r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at
+                   FROM api_keys
+                   WHERE key_fingerprint = ?1"#,
+                params![key_fingerprint],
+                |row| {
+                    Ok(ApiKeyRow {
+                        id: row.get(0)?,
+                        key_hash: row.get(1)?,
+                        key_prefix: row.get(2)?,
+                        project_id: row.get(3)?,
+                        created_by_user_id: row.get(4)?,
+                        name: row.get(5)?,
+                        scopes_json: row.get(6)?,
+                        created_at: row.get(7)?,
+                        last_used_at: row.get(8)?,
+                        revoked_at: row.get(9)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        Ok(row)
     }
 
     /// Fetch an API key by its hash.
@@ -2129,6 +2187,7 @@ mod tests {
             .insert_api_key(
                 "key-delete-project",
                 "hash-delete-project",
+                None,
                 "mlrunx_d",
                 Some(&project_id),
                 Some("delete-project-key"),
@@ -2571,6 +2630,7 @@ mod tests {
             .insert_api_key(
                 &key_id,
                 key_hash,
+                None,
                 key_prefix,
                 Some(&project_id),
                 Some("key-one"),
