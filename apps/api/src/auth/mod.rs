@@ -4,18 +4,24 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
+use argon2::{
+    Argon2,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+};
 use axum::{
     extract::{Request, State},
     http::{Method, StatusCode, request::Parts},
     middleware::Next,
     response::Response,
 };
+use hmac::{Hmac, Mac};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+use rand::Rng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 use crate::storage::{ApiKeyRow, ProjectMembershipRow, SqliteStore};
@@ -25,7 +31,7 @@ use crate::storage::{ApiKeyRow, ProjectMembershipRow, SqliteStore};
 pub struct ApiKey {
     /// Unique identifier for the key
     pub id: String,
-    /// SHA-256 hash of the key
+    /// Stored API key hash (argon2id for new keys, legacy SHA-256 for old keys)
     pub key_hash: String,
     /// First 8 chars of the key for identification
     pub key_prefix: String,
@@ -228,6 +234,157 @@ fn env_flag_value(value: &str) -> bool {
     value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
 }
 
+type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Debug, Clone)]
+struct AuthRateLimitConfig {
+    enabled: bool,
+    max_failures_per_window: u32,
+    window: Duration,
+    base_backoff: Duration,
+    max_backoff: Duration,
+}
+
+impl AuthRateLimitConfig {
+    fn from_env() -> Self {
+        let enabled = std::env::var("MLRUNX_AUTH_RATE_LIMIT_ENABLED")
+            .ok()
+            .map_or(true, |v| env_flag_value(&v));
+        let max_failures_per_window = std::env::var("MLRUNX_AUTH_RATE_LIMIT_MAX_FAILURES")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(10);
+        let window_seconds = std::env::var("MLRUNX_AUTH_RATE_LIMIT_WINDOW_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(60);
+        let base_backoff_seconds = std::env::var("MLRUNX_AUTH_RATE_LIMIT_BASE_BACKOFF_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(5);
+        let max_backoff_seconds = std::env::var("MLRUNX_AUTH_RATE_LIMIT_MAX_BACKOFF_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(300);
+
+        Self {
+            enabled,
+            max_failures_per_window,
+            window: Duration::from_secs(window_seconds),
+            base_backoff: Duration::from_secs(base_backoff_seconds),
+            max_backoff: Duration::from_secs(max_backoff_seconds),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AuthRateLimitEntry {
+    window_started_at: Instant,
+    failures_in_window: u32,
+    blocked_until: Option<Instant>,
+}
+
+impl AuthRateLimitEntry {
+    fn new(now: Instant) -> Self {
+        Self {
+            window_started_at: now,
+            failures_in_window: 0,
+            blocked_until: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AuthRateLimiter {
+    config: AuthRateLimitConfig,
+    entries: Mutex<HashMap<String, AuthRateLimitEntry>>,
+}
+
+impl AuthRateLimiter {
+    fn new(config: AuthRateLimitConfig) -> Self {
+        Self {
+            config,
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn retry_after_seconds(&self, client_key: &str) -> Option<u64> {
+        if !self.config.enabled || client_key.is_empty() {
+            return None;
+        }
+
+        let now = Instant::now();
+        let mut entries = self.entries.lock().await;
+        if let Some(entry) = entries.get_mut(client_key) {
+            if now.duration_since(entry.window_started_at) > self.config.window {
+                *entry = AuthRateLimitEntry::new(now);
+                return None;
+            }
+
+            if let Some(until) = entry.blocked_until {
+                if now < until {
+                    return Some((until - now).as_secs().max(1));
+                }
+                entry.blocked_until = None;
+                entry.failures_in_window = 0;
+                entry.window_started_at = now;
+            }
+        }
+
+        None
+    }
+
+    async fn record_failure(&self, client_key: &str) {
+        if !self.config.enabled || client_key.is_empty() {
+            return;
+        }
+
+        let now = Instant::now();
+        let mut entries = self.entries.lock().await;
+        let entry = entries
+            .entry(client_key.to_string())
+            .or_insert_with(|| AuthRateLimitEntry::new(now));
+
+        if now.duration_since(entry.window_started_at) > self.config.window {
+            *entry = AuthRateLimitEntry::new(now);
+        }
+
+        entry.failures_in_window = entry.failures_in_window.saturating_add(1);
+        if entry.failures_in_window >= self.config.max_failures_per_window {
+            let over_limit = entry.failures_in_window - self.config.max_failures_per_window;
+            let exponent = over_limit.min(16);
+            let backoff_multiplier = 1u64 << exponent;
+            let candidate_backoff = self
+                .config
+                .base_backoff
+                .as_secs()
+                .saturating_mul(backoff_multiplier);
+            let backoff_secs = candidate_backoff.min(self.config.max_backoff.as_secs());
+            entry.blocked_until = Some(now + Duration::from_secs(backoff_secs));
+        }
+    }
+
+    async fn record_success(&self, client_key: &str) {
+        if !self.config.enabled || client_key.is_empty() {
+            return;
+        }
+
+        let mut entries = self.entries.lock().await;
+        entries.remove(client_key);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HmacSecretSource {
+    ExplicitEnv,
+    JwtSecretFallback,
+    InsecureDefault,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeAuthMode {
     Disabled,
@@ -302,6 +459,10 @@ pub struct ApiKeyStore {
     ui_jwt: UiJwtConfig,
     /// Resolved runtime auth mode from environment.
     runtime_auth_mode: RuntimeAuthMode,
+    /// Shared HMAC secret for deterministic API key fingerprints + UI session token hashes.
+    auth_hmac_secret: Vec<u8>,
+    auth_hmac_secret_source: HmacSecretSource,
+    auth_rate_limiter: AuthRateLimiter,
     /// Whether auth is disabled (for dev/testing)
     pub auth_disabled: std::sync::atomic::AtomicBool,
 }
@@ -310,11 +471,16 @@ impl ApiKeyStore {
     /// Create a new API key store.
     pub fn new() -> Self {
         let runtime_auth_mode = RuntimeAuthMode::from_env();
+        let (auth_hmac_secret, auth_hmac_secret_source) = load_auth_hmac_secret();
+        let auth_rate_limiter = AuthRateLimiter::new(AuthRateLimitConfig::from_env());
         Self {
             keys: RwLock::new(HashMap::new()),
             sqlite_store: None,
             ui_jwt: UiJwtConfig::from_env(runtime_auth_mode.ui_jwt_enabled()),
             runtime_auth_mode,
+            auth_hmac_secret,
+            auth_hmac_secret_source,
+            auth_rate_limiter,
             auth_disabled: std::sync::atomic::AtomicBool::new(runtime_auth_mode.auth_disabled()),
         }
     }
@@ -322,28 +488,40 @@ impl ApiKeyStore {
     /// Create a key store backed by SQLite for durable key storage.
     pub fn new_with_sqlite(sqlite_store: Arc<SqliteStore>) -> Self {
         let runtime_auth_mode = RuntimeAuthMode::from_env();
+        let (auth_hmac_secret, auth_hmac_secret_source) = load_auth_hmac_secret();
+        let auth_rate_limiter = AuthRateLimiter::new(AuthRateLimitConfig::from_env());
         Self {
             keys: RwLock::new(HashMap::new()),
             sqlite_store: Some(sqlite_store),
             ui_jwt: UiJwtConfig::from_env(runtime_auth_mode.ui_jwt_enabled()),
             runtime_auth_mode,
+            auth_hmac_secret,
+            auth_hmac_secret_source,
+            auth_rate_limiter,
             auth_disabled: std::sync::atomic::AtomicBool::new(runtime_auth_mode.auth_disabled()),
         }
     }
 
     /// Create a new API key store with auth disabled (for testing).
     pub fn new_dev_mode() -> Self {
+        let (auth_hmac_secret, auth_hmac_secret_source) = load_auth_hmac_secret();
+        let auth_rate_limiter = AuthRateLimiter::new(AuthRateLimitConfig::from_env());
         Self {
             keys: RwLock::new(HashMap::new()),
             sqlite_store: None,
             ui_jwt: UiJwtConfig::from_env(false),
             runtime_auth_mode: RuntimeAuthMode::Disabled,
+            auth_hmac_secret,
+            auth_hmac_secret_source,
+            auth_rate_limiter,
             auth_disabled: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
     #[cfg(test)]
     pub fn new_with_sqlite_and_ui_jwt(sqlite_store: Arc<SqliteStore>, jwt_secret: &str) -> Self {
+        let (auth_hmac_secret, auth_hmac_secret_source) = load_auth_hmac_secret();
+        let auth_rate_limiter = AuthRateLimiter::new(AuthRateLimitConfig::from_env());
         Self {
             keys: RwLock::new(HashMap::new()),
             sqlite_store: Some(sqlite_store),
@@ -354,8 +532,8 @@ impl ApiKeyStore {
                 algorithm: UiJwtAlgorithm::Hs256,
                 auto_provision_project: true,
                 personal_project_prefix: "personal".to_string(),
-                issuer: None,
-                audience: None,
+                issuer: Some("https://test-auth.local".to_string()),
+                audience: Some("authenticated".to_string()),
                 provider: "jwt".to_string(),
                 session_cookie_name: "mlrunx_ui_session".to_string(),
                 csrf_cookie_name: "mlrunx_ui_csrf".to_string(),
@@ -364,6 +542,9 @@ impl ApiKeyStore {
                 cookie_same_site: "Lax".to_string(),
             },
             runtime_auth_mode: RuntimeAuthMode::Hybrid,
+            auth_hmac_secret,
+            auth_hmac_secret_source,
+            auth_rate_limiter,
             auth_disabled: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -374,6 +555,8 @@ impl ApiKeyStore {
         public_key_pem: &str,
         algorithm: UiJwtAlgorithm,
     ) -> Self {
+        let (auth_hmac_secret, auth_hmac_secret_source) = load_auth_hmac_secret();
+        let auth_rate_limiter = AuthRateLimiter::new(AuthRateLimitConfig::from_env());
         Self {
             keys: RwLock::new(HashMap::new()),
             sqlite_store: Some(sqlite_store),
@@ -384,8 +567,8 @@ impl ApiKeyStore {
                 algorithm,
                 auto_provision_project: true,
                 personal_project_prefix: "personal".to_string(),
-                issuer: None,
-                audience: None,
+                issuer: Some("https://test-auth.local".to_string()),
+                audience: Some("authenticated".to_string()),
                 provider: "jwt".to_string(),
                 session_cookie_name: "mlrunx_ui_session".to_string(),
                 csrf_cookie_name: "mlrunx_ui_csrf".to_string(),
@@ -394,6 +577,9 @@ impl ApiKeyStore {
                 cookie_same_site: "Lax".to_string(),
             },
             runtime_auth_mode: RuntimeAuthMode::Hybrid,
+            auth_hmac_secret,
+            auth_hmac_secret_source,
+            auth_rate_limiter,
             auth_disabled: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -422,10 +608,111 @@ impl ApiKeyStore {
         &self.ui_jwt.cookie_same_site
     }
 
+    pub fn validate_startup_configuration(&self) -> Result<(), String> {
+        if self.ui_jwt.enabled {
+            if self
+                .ui_jwt
+                .issuer
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(str::is_empty)
+            {
+                return Err(
+                    "MLRUNX_JWT_ISSUER is required when UI JWT auth is enabled.".to_string()
+                );
+            }
+            if self
+                .ui_jwt
+                .audience
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(str::is_empty)
+            {
+                return Err(
+                    "MLRUNX_JWT_AUDIENCE is required when UI JWT auth is enabled.".to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn using_insecure_default_hmac_secret(&self) -> bool {
+        matches!(
+            self.auth_hmac_secret_source,
+            HmacSecretSource::InsecureDefault
+        )
+    }
+
     /// Check if auth is disabled.
     pub fn is_auth_disabled(&self) -> bool {
         self.auth_disabled
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn auth_client_key(client_ip: Option<&str>) -> String {
+        client_ip
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("unknown")
+            .to_string()
+    }
+
+    pub async fn auth_rate_limit_retry_after_seconds(
+        &self,
+        client_ip: Option<&str>,
+    ) -> Option<u64> {
+        let client_key = Self::auth_client_key(client_ip);
+        self.auth_rate_limiter
+            .retry_after_seconds(&client_key)
+            .await
+    }
+
+    pub async fn record_auth_success(&self, client_ip: Option<&str>) {
+        let client_key = Self::auth_client_key(client_ip);
+        self.auth_rate_limiter.record_success(&client_key).await;
+    }
+
+    pub async fn record_auth_failure(
+        &self,
+        client_ip: Option<&str>,
+        user_agent: Option<&str>,
+        path: &str,
+        method: &str,
+        reason: &str,
+        auth_channel: &str,
+    ) {
+        let client_key = Self::auth_client_key(client_ip);
+        self.auth_rate_limiter.record_failure(&client_key).await;
+
+        let Some(sqlite_store) = &self.sqlite_store else {
+            return;
+        };
+
+        let metadata = serde_json::json!({
+            "reason": reason,
+            "auth_channel": auth_channel,
+            "path": path,
+            "method": method,
+            "client_ip": client_ip,
+            "user_agent": user_agent,
+        });
+        let metadata_json = serde_json::to_string(&metadata).ok();
+        if let Err(err) = sqlite_store
+            .insert_audit_event(
+                None,
+                None,
+                None,
+                None,
+                "auth.failure",
+                "auth",
+                None,
+                "denied",
+                metadata_json.as_deref(),
+            )
+            .await
+        {
+            warn!(error = %err, "Failed to persist failed-auth audit event");
+        }
     }
 
     /// Initialize the store with bootstrap keys from environment.
@@ -434,6 +721,23 @@ impl ApiKeyStore {
             mode = self.runtime_auth_mode.as_str(),
             "Resolved authentication mode"
         );
+
+        match self.auth_hmac_secret_source {
+            HmacSecretSource::ExplicitEnv => {
+                info!("Using explicit MLRUNX_AUTH_HMAC_SECRET for auth token hashing");
+            }
+            HmacSecretSource::JwtSecretFallback => {
+                info!(
+                    "MLRUNX_AUTH_HMAC_SECRET not set; reusing MLRUNX_JWT_SECRET for auth token hashing"
+                );
+            }
+            HmacSecretSource::InsecureDefault => {
+                warn!(
+                    "MLRUNX_AUTH_HMAC_SECRET is not configured; using insecure built-in fallback. \
+Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
+                );
+            }
+        }
 
         if self.ui_jwt.enabled {
             let configured = match self.ui_jwt.algorithm {
@@ -452,9 +756,7 @@ impl ApiKeyStore {
             } else {
                 let missing = match self.ui_jwt.algorithm {
                     UiJwtAlgorithm::Hs256 => "MLRUNX_JWT_SECRET",
-                    UiJwtAlgorithm::Rs256 | UiJwtAlgorithm::Es256 => {
-                        "MLRUNX_JWT_PUBLIC_KEY_PEM"
-                    }
+                    UiJwtAlgorithm::Rs256 | UiJwtAlgorithm::Es256 => "MLRUNX_JWT_PUBLIC_KEY_PEM",
                 };
                 warn!(
                     algorithm = self.ui_jwt.algorithm.env_value(),
@@ -473,10 +775,18 @@ impl ApiKeyStore {
                     Some("bootstrap".to_string()),
                     vec!["admin".to_string()],
                 );
+                let mut key = key;
+                key.id = "bootstrap".to_string();
+                let key_fingerprint = self.hash_with_hmac(&bootstrap_key);
 
                 if let Some(sqlite_store) = &self.sqlite_store {
                     if let Err(err) = sqlite_store
-                        .upsert_bootstrap_api_key(&key.id, &key.key_hash, &key.key_prefix)
+                        .upsert_bootstrap_api_key(
+                            &key.id,
+                            &key.key_hash,
+                            Some(&key_fingerprint),
+                            &key.key_prefix,
+                        )
                         .await
                     {
                         warn!("Failed to persist bootstrap API key: {err}");
@@ -491,6 +801,11 @@ impl ApiKeyStore {
     }
 
     /// Create an API key from a raw key string.
+    fn hash_with_hmac(&self, value: &str) -> String {
+        hmac_sha256_hex(&self.auth_hmac_secret, value.as_bytes())
+    }
+
+    /// Create an API key from a raw key string.
     fn create_key_from_raw(
         &self,
         raw_key: &str,
@@ -498,7 +813,10 @@ impl ApiKeyStore {
         name: Option<String>,
         scopes: Vec<String>,
     ) -> ApiKey {
-        let key_hash = hash_api_key(raw_key);
+        let key_hash = hash_api_key_argon2(raw_key).unwrap_or_else(|err| {
+            warn!("Failed to hash API key with argon2id, falling back to legacy hash: {err}");
+            hash_api_key(raw_key)
+        });
         let key_prefix = raw_key.chars().take(8).collect();
 
         ApiKey {
@@ -516,30 +834,70 @@ impl ApiKeyStore {
 
     /// Validate an API key and return the key info if valid.
     pub async fn validate_key(&self, raw_key: &str) -> Option<ApiKey> {
-        let key_hash = hash_api_key(raw_key);
+        let key_fingerprint = self.hash_with_hmac(raw_key);
+        let legacy_hash = hash_api_key(raw_key);
 
         // Primary path: durable sqlite store.
         if let Some(sqlite_store) = &self.sqlite_store {
-            match sqlite_store.get_api_key_by_hash(&key_hash).await {
+            match sqlite_store
+                .get_api_key_by_fingerprint(&key_fingerprint)
+                .await
+            {
                 Ok(Some(row)) => {
                     if row.revoked_at.is_some() {
                         return None;
                     }
 
+                    if !verify_api_key_hash(raw_key, &row.key_hash) {
+                        return None;
+                    }
+
                     let mut key = Self::api_key_from_row(row);
-                    if let Err(err) = sqlite_store.touch_api_key_last_used(&key_hash).await {
+                    if let Err(err) = sqlite_store.touch_api_key_last_used(&key.key_hash).await {
                         warn!("Failed to update API key last_used_at: {err}");
                     } else {
                         key.last_used_at = Some(SystemTime::now());
                     }
 
                     let mut keys = self.keys.write().await;
-                    keys.insert(key_hash, key.clone());
+                    keys.insert(key.key_hash.clone(), key.clone());
                     return Some(key);
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    warn!("Failed to validate API key from sqlite, falling back to memory: {err}");
+                    warn!(
+                        "Failed to validate API key by fingerprint from sqlite, falling back to legacy lookup: {err}"
+                    );
+                }
+            }
+
+            // Backward compatibility for legacy rows (pre-fingerprint or pre-argon2 migration).
+            match sqlite_store.get_api_key_by_hash(&legacy_hash).await {
+                Ok(Some(row)) => {
+                    if row.revoked_at.is_some() {
+                        return None;
+                    }
+
+                    if !verify_api_key_hash(raw_key, &row.key_hash) {
+                        return None;
+                    }
+
+                    let mut key = Self::api_key_from_row(row);
+                    if let Err(err) = sqlite_store.touch_api_key_last_used(&key.key_hash).await {
+                        warn!("Failed to update API key last_used_at: {err}");
+                    } else {
+                        key.last_used_at = Some(SystemTime::now());
+                    }
+
+                    let mut keys = self.keys.write().await;
+                    keys.insert(key.key_hash.clone(), key.clone());
+                    return Some(key);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    warn!(
+                        "Failed to validate API key by legacy hash from sqlite, falling back to memory: {err}"
+                    );
                 }
             }
         }
@@ -547,9 +905,8 @@ impl ApiKeyStore {
         // Fallback path: in-memory store.
         let mut keys = self.keys.write().await;
 
-        if let Some(key) = keys.get_mut(&key_hash) {
-            if key.is_valid() {
-                // Update last used time
+        for key in keys.values_mut() {
+            if key.is_valid() && verify_api_key_hash(raw_key, &key.key_hash) {
                 key.last_used_at = Some(SystemTime::now());
                 return Some(key.clone());
             }
@@ -576,6 +933,7 @@ impl ApiKeyStore {
                 .insert_api_key(
                     &key.id,
                     &key.key_hash,
+                    Some(&self.hash_with_hmac(&raw_key)),
                     &key.key_prefix,
                     key.project_id.as_deref(),
                     key.name.as_deref(),
@@ -665,8 +1023,8 @@ impl ApiKeyStore {
 
         let session_token = generate_session_token();
         let csrf_token = generate_session_token();
-        let token_hash = hash_api_key(&session_token);
-        let csrf_hash = hash_api_key(&csrf_token);
+        let token_hash = self.hash_with_hmac(&session_token);
+        let csrf_hash = self.hash_with_hmac(&csrf_token);
         let expires_at = (chrono::Utc::now()
             + chrono::Duration::seconds(self.ui_jwt.session_ttl_seconds as i64))
         .naive_utc()
@@ -723,19 +1081,30 @@ impl ApiKeyStore {
             "SQLite-backed auth store is required for UI session auth.".to_string()
         })?;
 
-        let token_hash = hash_api_key(raw_session_token);
-        let session = sqlite_store
+        let token_hash = self.hash_with_hmac(raw_session_token);
+        let session = if let Some(session) = sqlite_store
             .get_active_auth_session_by_token_hash(&token_hash)
             .await
             .map_err(|e| format!("Failed to resolve UI session: {e}"))?
-            .ok_or_else(|| "Invalid or expired UI session.".to_string())?;
+        {
+            session
+        } else {
+            let legacy_token_hash = hash_api_key(raw_session_token);
+            sqlite_store
+                .get_active_auth_session_by_token_hash(&legacy_token_hash)
+                .await
+                .map_err(|e| format!("Failed to resolve legacy UI session: {e}"))?
+                .ok_or_else(|| "Invalid or expired UI session.".to_string())?
+        };
 
         if require_csrf {
             let provided = csrf_token
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .ok_or_else(|| "Missing CSRF token for mutating request.".to_string())?;
-            if hash_api_key(provided) != session.csrf_hash {
+            let provided_hash = self.hash_with_hmac(provided);
+            let provided_legacy_hash = hash_api_key(provided);
+            if provided_hash != session.csrf_hash && provided_legacy_hash != session.csrf_hash {
                 return Err("Invalid CSRF token.".to_string());
             }
         }
@@ -772,23 +1141,39 @@ impl ApiKeyStore {
             "SQLite-backed auth store is required for UI session auth.".to_string()
         })?;
 
-        let token_hash = hash_api_key(raw_session_token);
-        if let Some(session) = sqlite_store
+        let token_hash = self.hash_with_hmac(raw_session_token);
+        let session = if let Some(session) = sqlite_store
             .get_active_auth_session_by_token_hash(&token_hash)
             .await
             .map_err(|e| format!("Failed to resolve UI session: {e}"))?
         {
+            Some((session, token_hash.clone()))
+        } else {
+            let legacy_token_hash = hash_api_key(raw_session_token);
+            sqlite_store
+                .get_active_auth_session_by_token_hash(&legacy_token_hash)
+                .await
+                .map_err(|e| format!("Failed to resolve legacy UI session: {e}"))?
+                .map(|session| (session, legacy_token_hash))
+        };
+
+        let token_hash_to_revoke = if let Some((session, resolved_hash)) = session {
             let provided = csrf_token
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .ok_or_else(|| "Missing CSRF token.".to_string())?;
-            if hash_api_key(provided) != session.csrf_hash {
+            let provided_hash = self.hash_with_hmac(provided);
+            let provided_legacy_hash = hash_api_key(provided);
+            if provided_hash != session.csrf_hash && provided_legacy_hash != session.csrf_hash {
                 return Err("Invalid CSRF token.".to_string());
             }
-        }
+            resolved_hash
+        } else {
+            token_hash
+        };
 
         sqlite_store
-            .revoke_auth_session_by_token_hash(&token_hash)
+            .revoke_auth_session_by_token_hash(&token_hash_to_revoke)
             .await
             .map_err(|e| format!("Failed to revoke UI session: {e}"))?;
 
@@ -974,41 +1359,40 @@ impl ApiKeyStore {
 
     fn decode_ui_jwt_claims(&self, raw_token: &str) -> Result<UiJwtClaims, String> {
         let mut validation = Validation::new(self.ui_jwt.algorithm.jsonwebtoken_algorithm());
-        if let Some(ref issuer) = self.ui_jwt.issuer {
-            validation.set_issuer(&[issuer.clone()]);
-        }
-        if let Some(ref audience) = self.ui_jwt.audience {
-            validation.set_audience(&[audience.clone()]);
-        } else {
-            validation.validate_aud = false;
-        }
+        let issuer = self.ui_jwt.issuer.as_ref().ok_or_else(|| {
+            "MLRUNX_JWT_ISSUER is required when UI JWT auth is enabled.".to_string()
+        })?;
+        let audience = self.ui_jwt.audience.as_ref().ok_or_else(|| {
+            "MLRUNX_JWT_AUDIENCE is required when UI JWT auth is enabled.".to_string()
+        })?;
+        validation.set_issuer(&[issuer.clone()]);
+        validation.set_audience(&[audience.clone()]);
 
-        let decoding_key = match self.ui_jwt.algorithm {
-            UiJwtAlgorithm::Hs256 => {
-                let secret = self
-                    .ui_jwt
-                    .secret
-                    .as_ref()
-                    .ok_or_else(|| "MLRUNX_JWT_SECRET is not configured.".to_string())?;
-                DecodingKey::from_secret(secret.as_bytes())
-            }
-            UiJwtAlgorithm::Rs256 => {
-                let pem =
-                    self.ui_jwt.public_key_pem.as_ref().ok_or_else(|| {
+        let decoding_key =
+            match self.ui_jwt.algorithm {
+                UiJwtAlgorithm::Hs256 => {
+                    let secret = self
+                        .ui_jwt
+                        .secret
+                        .as_ref()
+                        .ok_or_else(|| "MLRUNX_JWT_SECRET is not configured.".to_string())?;
+                    DecodingKey::from_secret(secret.as_bytes())
+                }
+                UiJwtAlgorithm::Rs256 => {
+                    let pem = self.ui_jwt.public_key_pem.as_ref().ok_or_else(|| {
                         "MLRUNX_JWT_PUBLIC_KEY_PEM is not configured.".to_string()
                     })?;
-                DecodingKey::from_rsa_pem(pem.as_bytes())
-                    .map_err(|e| format!("Invalid RSA public key PEM: {e}"))?
-            }
-            UiJwtAlgorithm::Es256 => {
-                let pem =
-                    self.ui_jwt.public_key_pem.as_ref().ok_or_else(|| {
+                    DecodingKey::from_rsa_pem(pem.as_bytes())
+                        .map_err(|e| format!("Invalid RSA public key PEM: {e}"))?
+                }
+                UiJwtAlgorithm::Es256 => {
+                    let pem = self.ui_jwt.public_key_pem.as_ref().ok_or_else(|| {
                         "MLRUNX_JWT_PUBLIC_KEY_PEM is not configured.".to_string()
                     })?;
-                DecodingKey::from_ec_pem(pem.as_bytes())
-                    .map_err(|e| format!("Invalid EC public key PEM: {e}"))?
-            }
-        };
+                    DecodingKey::from_ec_pem(pem.as_bytes())
+                        .map_err(|e| format!("Invalid EC public key PEM: {e}"))?
+                }
+            };
 
         let token_data = decode::<UiJwtClaims>(raw_token, &decoding_key, &validation)
             .map_err(|e| format!("Invalid JWT token: {e}"))?;
@@ -1100,11 +1484,64 @@ impl UiJwtClaims {
     }
 }
 
-/// Hash an API key using SHA-256.
+/// Legacy API key hashing (SHA-256) retained for backward-compatible verification.
 pub fn hash_api_key(key: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn hash_api_key_argon2(key: &str) -> Result<String, String> {
+    let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
+    let argon2 = Argon2::default();
+    argon2
+        .hash_password(key.as_bytes(), &salt)
+        .map(|value| value.to_string())
+        .map_err(|e| format!("argon2id hashing failed: {e}"))
+}
+
+fn verify_api_key_hash(raw_key: &str, stored_hash: &str) -> bool {
+    if stored_hash.starts_with("$argon2") {
+        let parsed = match PasswordHash::new(stored_hash) {
+            Ok(parsed) => parsed,
+            Err(_) => return false,
+        };
+        return Argon2::default()
+            .verify_password(raw_key.as_bytes(), &parsed)
+            .is_ok();
+    }
+    hash_api_key(raw_key) == stored_hash
+}
+
+fn hmac_sha256_hex(secret: &[u8], message: &[u8]) -> String {
+    let mut mac =
+        HmacSha256::new_from_slice(secret).expect("HMAC-SHA256 accepts keys of any length");
+    mac.update(message);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn load_auth_hmac_secret() -> (Vec<u8>, HmacSecretSource) {
+    if let Ok(secret) = std::env::var("MLRUNX_AUTH_HMAC_SECRET") {
+        let trimmed = secret.trim();
+        if !trimmed.is_empty() {
+            return (trimmed.as_bytes().to_vec(), HmacSecretSource::ExplicitEnv);
+        }
+    }
+
+    if let Ok(secret) = std::env::var("MLRUNX_JWT_SECRET") {
+        let trimmed = secret.trim();
+        if !trimmed.is_empty() {
+            return (
+                trimmed.as_bytes().to_vec(),
+                HmacSecretSource::JwtSecretFallback,
+            );
+        }
+    }
+
+    (
+        b"mlrunx-insecure-default-hmac-secret-change-me".to_vec(),
+        HmacSecretSource::InsecureDefault,
+    )
 }
 
 /// Generate a random API key.
@@ -1358,6 +1795,42 @@ fn extract_cookie(parts: &Parts, cookie_name: &str) -> Option<String> {
     })
 }
 
+fn extract_client_ip(parts: &Parts) -> Option<String> {
+    let forwarded = parts
+        .headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    if let Some(forwarded) = forwarded {
+        let first = forwarded
+            .split(',')
+            .next()
+            .map(str::trim)
+            .unwrap_or_default();
+        if !first.is_empty() {
+            return Some(first.to_string());
+        }
+    }
+    parts
+        .headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn extract_user_agent(parts: &Parts) -> Option<String> {
+    parts
+        .headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn requires_csrf(method: &Method) -> bool {
     matches!(
         *method,
@@ -1378,13 +1851,42 @@ pub async fn auth_middleware(
         return Ok(next.run(request).await);
     }
 
-    // Extract API key from headers
+    let request_method = request.method().as_str().to_string();
+    let request_path = request.uri().path().to_string();
+
+    // Extract API key from headers.
     let raw_key = {
         let (parts, body) = request.into_parts();
+        let client_ip = extract_client_ip(&parts);
+        let user_agent = extract_user_agent(&parts);
         let key = extract_request_credential(&parts, key_store.as_ref(), &parts.method);
         request = Request::from_parts(parts, body);
-        key
+        (key, client_ip, user_agent)
     };
+    let (raw_key, client_ip, user_agent) = raw_key;
+
+    if let Some(retry_after) = key_store
+        .auth_rate_limit_retry_after_seconds(client_ip.as_deref())
+        .await
+    {
+        key_store
+            .record_auth_failure(
+                client_ip.as_deref(),
+                user_agent.as_deref(),
+                &request_path,
+                &request_method,
+                "rate_limited",
+                "middleware",
+            )
+            .await;
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "Too many failed authentication attempts. Retry in {}s.",
+                retry_after
+            ),
+        ));
+    }
 
     let (api_key, auth_mode, allowed_project_ids) = match raw_key {
         RequestCredential::Missing => {
@@ -1394,13 +1896,26 @@ pub async fn auth_middleware(
             ));
         }
         RequestCredential::ApiKey(raw_key) => {
-            let api_key = key_store.validate_key(&raw_key).await.ok_or_else(|| {
-                warn!(key_prefix = %raw_key.chars().take(8).collect::<String>(), "Invalid API key");
-                (
-                    AuthError::InvalidKey.status_code(),
-                    AuthError::InvalidKey.message().to_string(),
-                )
-            })?;
+            let api_key = match key_store.validate_key(&raw_key).await {
+                Some(api_key) => api_key,
+                None => {
+                    warn!(key_prefix = %raw_key.chars().take(8).collect::<String>(), "Invalid API key");
+                    key_store
+                        .record_auth_failure(
+                            client_ip.as_deref(),
+                            user_agent.as_deref(),
+                            &request_path,
+                            &request_method,
+                            "invalid_api_key",
+                            "x-api-key",
+                        )
+                        .await;
+                    return Err((
+                        AuthError::InvalidKey.status_code(),
+                        AuthError::InvalidKey.message().to_string(),
+                    ));
+                }
+            };
             (api_key, AuthMode::ApiKey, None)
         }
         RequestCredential::Bearer(raw_token) => {
@@ -1414,6 +1929,16 @@ pub async fn auth_middleware(
                     }
                     Err(err) => {
                         warn!("Invalid UI JWT token: {err}");
+                        key_store
+                            .record_auth_failure(
+                                client_ip.as_deref(),
+                                user_agent.as_deref(),
+                                &request_path,
+                                &request_method,
+                                "invalid_ui_jwt",
+                                "bearer_jwt",
+                            )
+                            .await;
                         return Err((
                             AuthError::InvalidKey.status_code(),
                             AuthError::InvalidKey.message().to_string(),
@@ -1422,6 +1947,16 @@ pub async fn auth_middleware(
                 }
             } else {
                 warn!(key_prefix = %raw_token.chars().take(8).collect::<String>(), "Invalid API key");
+                key_store
+                    .record_auth_failure(
+                        client_ip.as_deref(),
+                        user_agent.as_deref(),
+                        &request_path,
+                        &request_method,
+                        "invalid_bearer_token",
+                        "bearer",
+                    )
+                    .await;
                 return Err((
                     AuthError::InvalidKey.status_code(),
                     AuthError::InvalidKey.message().to_string(),
@@ -1439,6 +1974,20 @@ pub async fn auth_middleware(
             Ok((api_key, allowed_projects)) => (api_key, AuthMode::UiJwt, Some(allowed_projects)),
             Err(err) => {
                 warn!("Invalid UI session: {err}");
+                key_store
+                    .record_auth_failure(
+                        client_ip.as_deref(),
+                        user_agent.as_deref(),
+                        &request_path,
+                        &request_method,
+                        if err.contains("CSRF") {
+                            "invalid_csrf_token"
+                        } else {
+                            "invalid_ui_session"
+                        },
+                        "ui_session",
+                    )
+                    .await;
                 if err.contains("CSRF") {
                     return Err((StatusCode::FORBIDDEN, "Invalid CSRF token.".to_string()));
                 }
@@ -1449,6 +1998,8 @@ pub async fn auth_middleware(
             }
         },
     };
+
+    key_store.record_auth_success(client_ip.as_deref()).await;
 
     debug!(
         key_prefix = %api_key.key_prefix,
@@ -1486,6 +2037,8 @@ mod tests {
         sub: String,
         email: Option<String>,
         name: Option<String>,
+        iss: String,
+        aud: String,
         exp: usize,
     }
 
@@ -1706,6 +2259,8 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
             sub: "user-subject".to_string(),
             email: Some("jwt@example.com".to_string()),
             name: Some("JWT User".to_string()),
+            iss: "https://test-auth.local".to_string(),
+            aud: "authenticated".to_string(),
             exp: (chrono::Utc::now().timestamp() + 3600) as usize,
         };
         let token = encode(
@@ -1733,6 +2288,8 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
             sub: "new-user-subject".to_string(),
             email: Some("new.user@example.com".to_string()),
             name: Some("New User".to_string()),
+            iss: "https://test-auth.local".to_string(),
+            aud: "authenticated".to_string(),
             exp: (chrono::Utc::now().timestamp() + 3600) as usize,
         };
         let token = encode(
@@ -1771,6 +2328,8 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
             sub: "es256-user-subject".to_string(),
             email: Some("es256.user@example.com".to_string()),
             name: Some("ES256 User".to_string()),
+            iss: "https://test-auth.local".to_string(),
+            aud: "authenticated".to_string(),
             exp: (chrono::Utc::now().timestamp() + 3600) as usize,
         };
         let token = encode(
@@ -1811,6 +2370,8 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
             sub: "user-subject".to_string(),
             email: Some("jwt@example.com".to_string()),
             name: Some("JWT User".to_string()),
+            iss: "https://test-auth.local".to_string(),
+            aud: "authenticated".to_string(),
             exp: (chrono::Utc::now().timestamp() + 3600) as usize,
         };
         let token = encode(
