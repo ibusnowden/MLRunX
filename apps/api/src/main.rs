@@ -145,6 +145,7 @@ struct UiAuthSessionResponse {
     project_ids: Vec<String>,
     key_prefix: String,
     is_dev_mode: bool,
+    is_platform_admin: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -846,6 +847,7 @@ async fn http_ui_auth_session(
         project_ids,
         key_prefix: auth.api_key.key_prefix.clone(),
         is_dev_mode: auth.is_dev_mode,
+        is_platform_admin: auth.is_platform_admin,
     }))
 }
 

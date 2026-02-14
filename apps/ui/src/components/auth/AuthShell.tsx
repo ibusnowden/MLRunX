@@ -116,7 +116,7 @@ export function AuthShell({ mode, children }: AuthShellProps) {
         <div className={styles.authContainer}>
           <div className={styles.tabs}>
             <Link href="/login" className={tabClass(mode === 'login')}>
-              Sign In
+              Log In
             </Link>
             <Link href="/signup" className={tabClass(mode === 'signup')}>
               Create Account

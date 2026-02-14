@@ -234,6 +234,7 @@ struct ResolvedUiIdentity {
     user_name: Option<String>,
     allowed_project_ids: HashSet<String>,
     scopes: Vec<String>,
+    is_platform_admin: bool,
 }
 
 fn env_flag(name: &str) -> bool {
@@ -473,6 +474,8 @@ pub struct ApiKeyStore {
     auth_hmac_secret: Vec<u8>,
     auth_hmac_secret_source: HmacSecretSource,
     auth_rate_limiter: AuthRateLimiter,
+    /// Email of the designated platform admin (from MLRUNX_ADMIN_EMAIL env var).
+    admin_email: Option<String>,
     /// Whether auth is disabled (for dev/testing)
     pub auth_disabled: std::sync::atomic::AtomicBool,
 }
@@ -491,6 +494,7 @@ impl ApiKeyStore {
             auth_hmac_secret,
             auth_hmac_secret_source,
             auth_rate_limiter,
+            admin_email: load_admin_email(),
             auth_disabled: std::sync::atomic::AtomicBool::new(runtime_auth_mode.auth_disabled()),
         }
     }
@@ -508,6 +512,7 @@ impl ApiKeyStore {
             auth_hmac_secret,
             auth_hmac_secret_source,
             auth_rate_limiter,
+            admin_email: load_admin_email(),
             auth_disabled: std::sync::atomic::AtomicBool::new(runtime_auth_mode.auth_disabled()),
         }
     }
@@ -524,6 +529,7 @@ impl ApiKeyStore {
             auth_hmac_secret,
             auth_hmac_secret_source,
             auth_rate_limiter,
+            admin_email: load_admin_email(),
             auth_disabled: std::sync::atomic::AtomicBool::new(true),
         }
     }
@@ -555,6 +561,7 @@ impl ApiKeyStore {
             auth_hmac_secret,
             auth_hmac_secret_source,
             auth_rate_limiter,
+            admin_email: load_admin_email(),
             auth_disabled: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -590,12 +597,17 @@ impl ApiKeyStore {
             auth_hmac_secret,
             auth_hmac_secret_source,
             auth_rate_limiter,
+            admin_email: load_admin_email(),
             auth_disabled: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     pub fn is_ui_jwt_enabled(&self) -> bool {
         self.ui_jwt.enabled
+    }
+
+    pub fn admin_email(&self) -> Option<&str> {
+        self.admin_email.as_deref()
     }
 
     pub fn ui_session_cookie_name(&self) -> &str {
@@ -1164,10 +1176,10 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
     async fn authenticate_ui_jwt(
         &self,
         raw_token: &str,
-    ) -> Result<(ApiKey, HashSet<String>), String> {
+    ) -> Result<(ApiKey, HashSet<String>, bool), String> {
         let identity = self.resolve_ui_identity_from_jwt(raw_token).await?;
         let api_key = Self::build_ui_auth_api_key(&identity, "jwt");
-        Ok((api_key, identity.allowed_project_ids))
+        Ok((api_key, identity.allowed_project_ids, identity.is_platform_admin))
     }
 
     async fn authenticate_ui_session(
@@ -1175,7 +1187,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
         raw_session_token: &str,
         csrf_token: Option<&str>,
         require_csrf: bool,
-    ) -> Result<(ApiKey, HashSet<String>), String> {
+    ) -> Result<(ApiKey, HashSet<String>, bool), String> {
         if !self.ui_jwt.enabled {
             return Err("UI JWT auth is disabled.".to_string());
         }
@@ -1221,14 +1233,20 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
             warn!("Failed to update UI session last_seen_at: {err}");
         }
 
+        let is_platform_admin = sqlite_store
+            .is_user_platform_admin(&session.user_id)
+            .await
+            .unwrap_or(false);
+
         let identity = ResolvedUiIdentity {
             user_id: session.user_id,
             user_name: None,
             allowed_project_ids,
             scopes,
+            is_platform_admin,
         };
         let api_key = Self::build_ui_auth_api_key(&identity, "session");
-        Ok((api_key, identity.allowed_project_ids))
+        Ok((api_key, identity.allowed_project_ids, identity.is_platform_admin))
     }
 
     pub async fn revoke_ui_session(
@@ -1311,11 +1329,17 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
             .resolve_memberships_for_user(&user_id, claims.email.as_deref(), claims.name.as_deref())
             .await?;
 
+        let is_platform_admin = sqlite_store
+            .sync_platform_admin_flag(&user_id, self.admin_email.as_deref())
+            .await
+            .unwrap_or(false);
+
         Ok(ResolvedUiIdentity {
             user_id,
             user_name: claims.email.or(claims.name),
             allowed_project_ids,
             scopes,
+            is_platform_admin,
         })
     }
 
@@ -1651,6 +1675,13 @@ fn load_auth_hmac_secret() -> (Vec<u8>, HmacSecretSource) {
     )
 }
 
+fn load_admin_email() -> Option<String> {
+    std::env::var("MLRUNX_ADMIN_EMAIL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 /// Generate a random API key.
 pub fn generate_api_key() -> String {
     use rand::Rng;
@@ -1675,6 +1706,8 @@ pub struct AuthContext {
     pub api_key: ApiKey,
     /// Whether authentication is bypassed (dev mode)
     pub is_dev_mode: bool,
+    /// Whether this user is a designated platform admin.
+    pub is_platform_admin: bool,
     /// Optional set of project memberships (used by JWT user auth path).
     allowed_project_ids: Option<HashSet<String>>,
     /// Source auth mode.
@@ -1710,6 +1743,7 @@ impl AuthContext {
                 expires_at: None,
             },
             is_dev_mode: true,
+            is_platform_admin: true,
             allowed_project_ids: None,
             auth_mode: AuthMode::ApiKey,
             request_id: uuid::Uuid::now_v7().to_string(),
@@ -1732,6 +1766,7 @@ impl AuthContext {
     /// Returns true if this context has global access (dev mode or admin with no project scope).
     pub fn is_global(&self) -> bool {
         self.is_dev_mode
+            || self.is_platform_admin
             || (self.allowed_project_ids.is_none() && self.api_key.project_id.is_none())
     }
 
@@ -2005,7 +2040,7 @@ pub async fn auth_middleware(
         ));
     }
 
-    let (api_key, auth_mode, allowed_project_ids) = match raw_key {
+    let (api_key, auth_mode, allowed_project_ids, is_platform_admin) = match raw_key {
         RequestCredential::Missing => {
             return Err((
                 AuthError::MissingKey.status_code(),
@@ -2033,16 +2068,16 @@ pub async fn auth_middleware(
                     ));
                 }
             };
-            (api_key, AuthMode::ApiKey, None)
+            (api_key, AuthMode::ApiKey, None, false)
         }
         RequestCredential::Bearer(raw_token) => {
             // Preserve existing SDK compatibility: first treat Bearer as API key.
             if let Some(api_key) = key_store.validate_key(&raw_token).await {
-                (api_key, AuthMode::ApiKey, None)
+                (api_key, AuthMode::ApiKey, None, false)
             } else if key_store.is_ui_jwt_enabled() {
                 match key_store.authenticate_ui_jwt(&raw_token).await {
-                    Ok((api_key, allowed_projects)) => {
-                        (api_key, AuthMode::UiJwt, Some(allowed_projects))
+                    Ok((api_key, allowed_projects, platform_admin)) => {
+                        (api_key, AuthMode::UiJwt, Some(allowed_projects), platform_admin)
                     }
                     Err(err) => {
                         warn!("Invalid UI JWT token: {err}");
@@ -2088,7 +2123,7 @@ pub async fn auth_middleware(
             .authenticate_ui_session(&session_token, csrf_token.as_deref(), require_csrf)
             .await
         {
-            Ok((api_key, allowed_projects)) => (api_key, AuthMode::UiJwt, Some(allowed_projects)),
+            Ok((api_key, allowed_projects, platform_admin)) => (api_key, AuthMode::UiJwt, Some(allowed_projects), platform_admin),
             Err(err) => {
                 warn!("Invalid UI session: {err}");
                 key_store
@@ -2129,6 +2164,7 @@ pub async fn auth_middleware(
     request.extensions_mut().insert(AuthContext {
         api_key,
         is_dev_mode: false,
+        is_platform_admin,
         allowed_project_ids,
         auth_mode,
         request_id: uuid::Uuid::now_v7().to_string(),
@@ -2393,7 +2429,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
         )
         .unwrap();
 
-        let (api_key, allowed_projects) = store.authenticate_ui_jwt(&token).await.unwrap();
+        let (api_key, allowed_projects, _is_admin) = store.authenticate_ui_jwt(&token).await.unwrap();
 
         assert!(allowed_projects.contains(&project_a));
         assert!(allowed_projects.contains(&project_b));
@@ -2422,7 +2458,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
         )
         .unwrap();
 
-        let (api_key, allowed_projects) = store.authenticate_ui_jwt(&token).await.unwrap();
+        let (api_key, allowed_projects, _is_admin) = store.authenticate_ui_jwt(&token).await.unwrap();
         assert_eq!(allowed_projects.len(), 1);
         assert!(api_key.scopes.contains(&"read".to_string()));
         assert!(api_key.scopes.contains(&"write".to_string()));
@@ -2462,7 +2498,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
         )
         .unwrap();
 
-        let (api_key, allowed_projects) = store.authenticate_ui_jwt(&token).await.unwrap();
+        let (api_key, allowed_projects, _is_admin) = store.authenticate_ui_jwt(&token).await.unwrap();
         assert_eq!(allowed_projects.len(), 1);
         assert!(api_key.scopes.contains(&"read".to_string()));
         assert!(api_key.scopes.contains(&"write".to_string()));
@@ -2541,6 +2577,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
                 expires_at: None,
             },
             is_dev_mode: false,
+            is_platform_admin: false,
             allowed_project_ids: Some(allowed),
             auth_mode: AuthMode::UiJwt,
             request_id: uuid::Uuid::now_v7().to_string(),
