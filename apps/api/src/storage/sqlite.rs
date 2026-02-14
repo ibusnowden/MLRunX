@@ -146,8 +146,6 @@ impl SqliteStore {
             CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
             CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
             CREATE INDEX IF NOT EXISTS idx_runs_created ON runs(created_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_runs_created_by_key ON runs(created_by_key_id);
-            CREATE INDEX IF NOT EXISTS idx_runs_created_by_user ON runs(created_by_user_id);
 
             -- Tags table (key-value pairs for runs)
             CREATE TABLE IF NOT EXISTS tags (
@@ -268,7 +266,6 @@ impl SqliteStore {
             );
             CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id);
             CREATE INDEX IF NOT EXISTS idx_api_keys_created_by_user ON api_keys(created_by_user_id);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_key_fingerprint ON api_keys(key_fingerprint);
 
             -- Audit events table
             CREATE TABLE IF NOT EXISTS audit_events (
@@ -2338,6 +2335,77 @@ mod tests {
         let store = create_test_store().await;
         let versions = store.list_schema_migrations().await.unwrap();
         assert!(versions.contains(&SQLITE_SCHEMA_VERSION.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_legacy_runs_schema_migrates_before_owner_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("mlrunx-legacy-schema.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS runs (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    name TEXT,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    finished_at TEXT,
+                    metrics_count INTEGER NOT NULL DEFAULT 0,
+                    params_count INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    id TEXT PRIMARY KEY,
+                    key_hash TEXT NOT NULL UNIQUE,
+                    key_prefix TEXT NOT NULL,
+                    project_id TEXT,
+                    created_by_user_id TEXT,
+                    name TEXT,
+                    description TEXT,
+                    scopes TEXT NOT NULL DEFAULT '[]',
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    last_used_at TEXT,
+                    revoked_at TEXT,
+                    expires_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version TEXT PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                "#,
+            )
+            .unwrap();
+        }
+
+        let _store = SqliteStore::new(&db_path).await.unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        let run_columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(runs)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(run_columns.contains(&"created_by_key_id".to_string()));
+        assert!(run_columns.contains(&"created_by_user_id".to_string()));
+
+        let api_key_columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(api_keys)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(api_key_columns.contains(&"key_fingerprint".to_string()));
     }
 
     #[tokio::test]
