@@ -117,6 +117,7 @@ export interface UiAuthSessionResult {
   project_ids: string[];
   key_prefix: string;
   is_dev_mode: boolean;
+  is_platform_admin: boolean;
 }
 
 export interface CreateApiKeyRequest {

@@ -11,9 +11,9 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-const SQLITE_SCHEMA_VERSION: &str = "2026-02-13.3";
+const SQLITE_SCHEMA_VERSION: &str = "2026-02-14.1";
 const SQLITE_SCHEMA_DESCRIPTION: &str =
-    "adds API key fingerprints for argon2id migration and run events";
+    "adds is_platform_admin column to users table";
 
 /// Errors that can occur in SQLite operations.
 #[derive(Error, Debug)]
@@ -362,6 +362,12 @@ impl SqliteStore {
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_key_fingerprint ON api_keys(key_fingerprint)",
             [],
         )?;
+        Self::ensure_table_column(
+            &conn,
+            "users",
+            "is_platform_admin",
+            "ALTER TABLE users ADD COLUMN is_platform_admin INTEGER NOT NULL DEFAULT 0",
+        )?;
 
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?1, ?2)",
@@ -641,6 +647,7 @@ impl SqliteStore {
                 u.created_at,
                 u.updated_at,
                 u.disabled_at,
+                u.is_platform_admin,
                 (
                     SELECT COUNT(*)
                     FROM project_memberships pm
@@ -668,8 +675,9 @@ impl SqliteStore {
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,
                 disabled_at: row.get(8)?,
-                active_project_count: row.get(9)?,
-                active_session_count: row.get(10)?,
+                is_platform_admin: row.get::<_, i64>(9)? != 0,
+                active_project_count: row.get(10)?,
+                active_session_count: row.get(11)?,
             })
         })?;
 
@@ -692,6 +700,7 @@ impl SqliteStore {
                 u.created_at,
                 u.updated_at,
                 u.disabled_at,
+                u.is_platform_admin,
                 (
                     SELECT COUNT(*)
                     FROM project_memberships pm
@@ -720,8 +729,9 @@ impl SqliteStore {
                     created_at: row.get(6)?,
                     updated_at: row.get(7)?,
                     disabled_at: row.get(8)?,
-                    active_project_count: row.get(9)?,
-                    active_session_count: row.get(10)?,
+                    is_platform_admin: row.get::<_, i64>(9)? != 0,
+                    active_project_count: row.get(10)?,
+                    active_session_count: row.get(11)?,
                 })
             },
         )
@@ -748,6 +758,49 @@ impl SqliteStore {
             )?
         };
         Ok(changed > 0)
+    }
+
+    /// Sync the is_platform_admin flag for a user based on the configured admin email.
+    /// Returns true if the user is (now) a platform admin.
+    pub async fn sync_platform_admin_flag(
+        &self,
+        user_id: &str,
+        admin_email: Option<&str>,
+    ) -> Result<bool, SqliteError> {
+        let conn = self.conn.lock().await;
+        let user_email: Option<String> = conn
+            .query_row(
+                "SELECT email FROM users WHERE id = ?1",
+                params![user_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        let is_admin = match (user_email.as_deref(), admin_email) {
+            (Some(ue), Some(ae)) => ue.eq_ignore_ascii_case(ae.trim()),
+            _ => false,
+        };
+
+        conn.execute(
+            "UPDATE users SET is_platform_admin = ?1 WHERE id = ?2",
+            params![is_admin as i64, user_id],
+        )?;
+
+        Ok(is_admin)
+    }
+
+    /// Check if a user is a platform admin (read-only).
+    pub async fn is_user_platform_admin(&self, user_id: &str) -> Result<bool, SqliteError> {
+        let conn = self.conn.lock().await;
+        let result: Option<i64> = conn
+            .query_row(
+                "SELECT is_platform_admin FROM users WHERE id = ?1",
+                params![user_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(result.unwrap_or(0) != 0)
     }
 
     /// Grant a project membership role to a user.
@@ -2054,6 +2107,7 @@ pub struct UserRow {
     pub created_at: String,
     pub updated_at: String,
     pub disabled_at: Option<String>,
+    pub is_platform_admin: bool,
     pub active_project_count: i64,
     pub active_session_count: i64,
 }

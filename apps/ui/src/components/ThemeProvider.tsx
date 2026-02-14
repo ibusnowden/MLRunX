@@ -20,28 +20,42 @@ export function useTheme() {
   return useContext(ThemeContext);
 }
 
-export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setTheme] = useState<Theme>(() => {
-    if (typeof window === 'undefined') {
-      return 'dark';
-    }
-    const stored = localStorage.getItem('mlrunx-theme') as Theme | null;
-    if (stored === 'light' || stored === 'dark') {
-      return stored;
-    }
-    return 'dark';
-  });
+function getInitialTheme(): Theme {
+  if (typeof window === 'undefined') return 'dark';
+  // Read from DOM class set by the inline script in layout.tsx
+  if (document.documentElement.classList.contains('light')) return 'light';
+  if (document.documentElement.classList.contains('dark')) return 'dark';
+  // Fallback to localStorage
+  const stored = localStorage.getItem('mlrunx-theme') as Theme | null;
+  if (stored === 'light' || stored === 'dark') return stored;
+  return 'dark';
+}
 
-  // Sync theme to <html> class and localStorage
+export function ThemeProvider({ children }: { children: React.ReactNode }) {
+  const [theme, setTheme] = useState<Theme>(getInitialTheme);
+  const [mounted, setMounted] = useState(false);
+
   useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  // Sync theme to <html> class and localStorage after mount
+  useEffect(() => {
+    if (!mounted) return;
     const root = document.documentElement;
     root.classList.remove('light', 'dark');
     root.classList.add(theme);
     localStorage.setItem('mlrunx-theme', theme);
-  }, [theme]);
+  }, [theme, mounted]);
 
   const toggleTheme = useCallback(() => {
+    const root = document.documentElement;
+    root.classList.add('theme-transition');
     setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+    // Remove transition class after animation completes
+    setTimeout(() => {
+      root.classList.remove('theme-transition');
+    }, 300);
   }, []);
 
   const value: ThemeContextValue = {

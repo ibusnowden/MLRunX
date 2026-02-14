@@ -112,8 +112,9 @@ const ACCOUNT_ITEMS: NavItem[] = [
   { href: '/settings#api-keys', label: 'API Keys', icon: ApiKeyIcon },
   { href: '/settings#projects', label: 'Projects', icon: ProjectsIcon },
   { href: '/settings#settings', label: 'Settings', icon: SettingsIcon },
-  { href: '/admin', label: 'Admin', icon: AdminIcon },
 ];
+
+const ADMIN_ITEM: NavItem = { href: '/admin', label: 'Admin', icon: AdminIcon };
 
 function isActivePath(pathname: string, href: string): boolean {
   if (href.startsWith('/settings#')) return pathname === '/settings';
@@ -179,6 +180,7 @@ export function Sidebar() {
   const { isDark, toggleTheme } = useTheme();
   const [loggingOut, setLoggingOut] = useState(false);
   const [identity, setIdentity] = useState<SupabaseUserIdentity | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -191,6 +193,17 @@ export function Sidebar() {
       .catch(() => {
         if (active) {
           setIdentity(null);
+        }
+      });
+    void api.getUiSession()
+      .then((session) => {
+        if (active) {
+          setIsAdmin(session.is_platform_admin || session.is_dev_mode);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setIsAdmin(false);
         }
       });
     return () => {
@@ -285,6 +298,15 @@ export function Sidebar() {
                   onClick={closeMobile}
                 />
               ))}
+              {isAdmin && (
+                <SidebarLink
+                  href={ADMIN_ITEM.href}
+                  label={ADMIN_ITEM.label}
+                  icon={ADMIN_ITEM.icon}
+                  active={isActivePath(pathname, ADMIN_ITEM.href)}
+                  onClick={closeMobile}
+                />
+              )}
             </div>
           </div>
         </nav>
