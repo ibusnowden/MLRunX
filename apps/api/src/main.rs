@@ -398,7 +398,7 @@ async fn require_platform_admin_access(
 }
 
 fn require_ui_run_owner(auth: &AuthContext, run: &RunRow) -> Result<(), (StatusCode, String)> {
-    if auth.is_dev_mode || !auth.is_ui_jwt() {
+    if auth.is_dev_mode || auth.is_platform_admin || !auth.is_ui_jwt() {
         return Ok(());
     }
 
@@ -973,7 +973,7 @@ async fn http_list_projects(
     )
     .await?;
 
-    let rows = if auth.is_global() && !auth.is_ui_jwt() {
+    let rows = if auth.is_global() && (!auth.is_ui_jwt() || auth.is_platform_admin) {
         state
             .sqlite_store
             .list_projects()
@@ -3398,7 +3398,9 @@ async fn http_list_runs(
     // Enforce project scope:
     // - API key scoped callers: existing behavior.
     // - UI JWT callers: project must be one of the user's active memberships.
-    let effective_project = if let Some(allowed_projects) = auth.allowed_project_ids() {
+    let effective_project = if auth.is_platform_admin {
+        query.project.clone()
+    } else if let Some(allowed_projects) = auth.allowed_project_ids() {
         if let Some(ref requested) = query.project {
             if !allowed_projects.contains(requested) {
                 emit_audit_event(
@@ -3468,7 +3470,7 @@ async fn http_list_runs(
         }
     };
 
-    let owner_user_filter = if auth.is_ui_jwt() {
+    let owner_user_filter = if auth.is_ui_jwt() && !auth.is_platform_admin {
         Some(auth_user_id(&auth).ok_or((
             StatusCode::FORBIDDEN,
             "Unable to resolve user identity for run listing.".to_string(),
@@ -4603,6 +4605,14 @@ mod tests {
         }
     }
 
+    async fn promote_ui_user_to_platform_admin(harness: &UiSessionHarness) {
+        harness
+            .sqlite_store
+            .sync_platform_admin_flag(&harness.user_id, Some("user@example.com"))
+            .await
+            .expect("Failed to mark test user as platform admin");
+    }
+
     async fn response_text(response: axum::response::Response) -> String {
         let body = response
             .into_body()
@@ -5343,6 +5353,127 @@ mod tests {
             .expect("Get run request failed");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_platform_admin_ui_session_lists_all_runs_across_users_and_projects() {
+        let harness = ui_session_harness_with_role("owner").await;
+
+        let foreign_user_id = harness
+            .sqlite_store
+            .get_or_create_user_identity(
+                "jwt",
+                "foreign-admin-list-subject",
+                Some("foreign-admin-list@example.com"),
+                Some("Foreign Admin List User"),
+            )
+            .await
+            .expect("Failed to create foreign user");
+
+        harness
+            .sqlite_store
+            .create_run(
+                "run-foreign-primary-admin-list",
+                &harness.primary_project_id,
+                Some("foreign-primary"),
+                None,
+                Some(&foreign_user_id),
+            )
+            .await
+            .expect("Failed to create primary run");
+        harness
+            .sqlite_store
+            .create_run(
+                "run-foreign-secondary-admin-list",
+                &harness.secondary_project_id,
+                Some("foreign-secondary"),
+                None,
+                Some(&foreign_user_id),
+            )
+            .await
+            .expect("Failed to create secondary run");
+
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+        promote_ui_user_to_platform_admin(&harness).await;
+
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/runs")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .body(Body::empty())
+                    .expect("Failed to build list runs request"),
+            )
+            .await
+            .expect("List runs request failed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: serde_json::Value = serde_json::from_str(&response_text(response).await)
+            .expect("List runs response should be JSON");
+        let runs = payload["runs"].as_array().expect("runs should be an array");
+
+        assert!(runs.iter().any(|run| {
+            run["run_id"]
+                .as_str()
+                .map_or(false, |id| id == "run-foreign-primary-admin-list")
+        }));
+        assert!(runs.iter().any(|run| {
+            run["run_id"]
+                .as_str()
+                .map_or(false, |id| id == "run-foreign-secondary-admin-list")
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_platform_admin_ui_session_can_read_foreign_run() {
+        let harness = ui_session_harness_with_role("owner").await;
+
+        let foreign_user_id = harness
+            .sqlite_store
+            .get_or_create_user_identity(
+                "jwt",
+                "foreign-admin-read-subject",
+                Some("foreign-admin-read@example.com"),
+                Some("Foreign Admin Read User"),
+            )
+            .await
+            .expect("Failed to create foreign user");
+
+        harness
+            .sqlite_store
+            .create_run(
+                "run-foreign-admin-read",
+                &harness.secondary_project_id,
+                Some("foreign"),
+                None,
+                Some(&foreign_user_id),
+            )
+            .await
+            .expect("Failed to create foreign run");
+
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+        promote_ui_user_to_platform_admin(&harness).await;
+
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/runs/run-foreign-admin-read")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .body(Body::empty())
+                    .expect("Failed to build get run request"),
+            )
+            .await
+            .expect("Get run request failed");
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
