@@ -1,0 +1,25 @@
+# Gitleaks configuration
+# https://github.com/gitleaks/gitleaks
+
+[extend]
+useDefault = true
+
+# Allowlist false positives: test fixtures and documentation examples
+[allowlist]
+  description = "MLRunX false positives"
+  paths = [
+    '''docs/spec/.*\.md$''',
+  ]
+  regexTarget = "match"
+  regexes = [
+    '''mlrunx_abc123''',
+    '''mlrunx_test123''',
+  ]
+
+# Test-only ES256 private key used in unit tests (not a real credential)
+[[rules]]
+  id = "private-key"
+  description = "Override: allow test private keys in auth test module"
+  regex = '''-----BEGIN PRIVATE KEY-----'''
+  [rules.allowlist]
+    paths = ['''apps/api/src/auth/mod\.rs$''']
