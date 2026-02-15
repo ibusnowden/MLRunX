@@ -2619,6 +2619,86 @@ struct ListKeysResponse {
     keys: Vec<KeyInfoResponse>,
 }
 
+const DEFAULT_UI_KEY_MAX_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
+const UI_KEY_NAME_MIN_LEN: usize = 3;
+const UI_KEY_NAME_MAX_LEN: usize = 64;
+
+fn ui_key_max_ttl_seconds() -> u64 {
+    std::env::var("MLRUNX_UI_KEY_MAX_TTL_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_UI_KEY_MAX_TTL_SECONDS)
+}
+
+fn validate_ui_key_name(name: Option<&str>) -> Result<String, (StatusCode, String)> {
+    let Some(trimmed) = name.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "name is required for UI key creation.".to_string(),
+        ));
+    };
+
+    if trimmed.len() < UI_KEY_NAME_MIN_LEN || trimmed.len() > UI_KEY_NAME_MAX_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "name must be between {} and {} characters.",
+                UI_KEY_NAME_MIN_LEN, UI_KEY_NAME_MAX_LEN
+            ),
+        ));
+    }
+
+    for segment in trimmed.split('/') {
+        if segment.is_empty() || segment.starts_with('-') || segment.ends_with('-') {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "name must use slash-delimited segments with lowercase letters, digits, and hyphens.".to_string(),
+            ));
+        }
+        if !segment
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "name may only contain lowercase letters, digits, '/', and '-'.".to_string(),
+            ));
+        }
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn resolve_ui_key_ttl_seconds(expires_in_seconds: Option<u64>) -> Result<u64, (StatusCode, String)> {
+    let Some(ttl) = expires_in_seconds else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "expires_in_seconds is required for UI key creation.".to_string(),
+        ));
+    };
+
+    if ttl == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "expires_in_seconds must be greater than zero.".to_string(),
+        ));
+    }
+
+    let max_ttl = ui_key_max_ttl_seconds();
+    if ttl > max_ttl {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "expires_in_seconds exceeds policy maximum of {} seconds.",
+                max_ttl
+            ),
+        ));
+    }
+
+    Ok(ttl)
+}
+
 fn normalize_requested_scopes(scopes: &[String]) -> Result<Vec<String>, (StatusCode, String)> {
     if scopes.is_empty() {
         return Err((
@@ -2658,28 +2738,23 @@ fn resolve_ui_key_project_id(
         "UI session is missing project memberships.".to_string(),
     ))?;
 
-    if let Some(project_id) = requested_project_id {
-        if allowed_projects.contains(project_id) {
-            return Ok(project_id.to_string());
-        }
+    let Some(project_id) = requested_project_id else {
         return Err((
-            StatusCode::FORBIDDEN,
-            format!(
-                "Access denied: cannot manage API keys for project '{}'.",
-                project_id
-            ),
+            StatusCode::BAD_REQUEST,
+            "project_id is required for UI key creation.".to_string(),
         ));
-    }
+    };
 
-    if allowed_projects.len() == 1 {
-        if let Some(project_id) = allowed_projects.iter().next() {
-            return Ok(project_id.clone());
-        }
+    if allowed_projects.contains(project_id) {
+        return Ok(project_id.to_string());
     }
 
     Err((
-        StatusCode::BAD_REQUEST,
-        "project_id is required when your account has multiple project memberships.".to_string(),
+        StatusCode::FORBIDDEN,
+        format!(
+            "Access denied: cannot manage API keys for project '{}'.",
+            project_id
+        ),
     ))
 }
 
@@ -2723,6 +2798,13 @@ async fn http_create_key(
 ) -> Result<Json<CreateKeyResponse>, (StatusCode, String)> {
     let normalized_scopes = normalize_requested_scopes(&req.scopes)?;
     let mut target_project_id = req.project_id.clone();
+    let mut target_name = req
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mut target_expires_in_seconds = req.expires_in_seconds;
 
     if auth.is_ui_jwt() {
         if let Err((status, message)) = auth.require_scope("write") {
@@ -2791,6 +2873,55 @@ async fn http_create_key(
             return Err((status, message));
         }
 
+        let validated_name = match validate_ui_key_name(req.name.as_deref()) {
+            Ok(name) => name,
+            Err((status, message)) => {
+                emit_audit_event(
+                    &state,
+                    Some(&auth),
+                    req.project_id.as_deref(),
+                    None,
+                    "api_key.create",
+                    "api_key",
+                    None,
+                    "denied",
+                    serde_json::json!({
+                        "reason": "invalid_key_name",
+                        "provided_name": req.name.clone(),
+                        "auth_mode": auth_mode_label(&auth),
+                    }),
+                )
+                .await;
+                return Err((status, message));
+            }
+        };
+        target_name = Some(validated_name);
+
+        let validated_ttl_seconds = match resolve_ui_key_ttl_seconds(req.expires_in_seconds) {
+            Ok(ttl) => ttl,
+            Err((status, message)) => {
+                emit_audit_event(
+                    &state,
+                    Some(&auth),
+                    req.project_id.as_deref(),
+                    None,
+                    "api_key.create",
+                    "api_key",
+                    None,
+                    "denied",
+                    serde_json::json!({
+                        "reason": "invalid_ttl",
+                        "requested_ttl_seconds": req.expires_in_seconds,
+                        "max_ttl_seconds": ui_key_max_ttl_seconds(),
+                        "auth_mode": auth_mode_label(&auth),
+                    }),
+                )
+                .await;
+                return Err((status, message));
+            }
+        };
+        target_expires_in_seconds = Some(validated_ttl_seconds);
+
         let resolved_project_id = match resolve_ui_key_project_id(&auth, req.project_id.as_deref())
         {
             Ok(project_id) => project_id,
@@ -2833,9 +2964,9 @@ async fn http_create_key(
         .key_store
         .create_key(
             target_project_id.clone(),
-            req.name.clone(),
+            target_name.clone(),
             normalized_scopes.clone(),
-            req.expires_in_seconds,
+            target_expires_in_seconds,
         )
         .await;
 
@@ -2843,6 +2974,7 @@ async fn http_create_key(
         key_prefix = %key.key_prefix,
         project_id = ?target_project_id,
         scopes = ?normalized_scopes,
+        expires_in_seconds = ?target_expires_in_seconds,
         "Created new API key"
     );
 
@@ -2857,6 +2989,7 @@ async fn http_create_key(
         "success",
         serde_json::json!({
             "scopes": normalized_scopes,
+            "expires_in_seconds": target_expires_in_seconds,
         }),
     )
     .await;
@@ -5036,7 +5169,8 @@ mod tests {
                         serde_json::json!({
                             "project_id": harness.primary_project_id.clone(),
                             "name": "sdk-write",
-                            "scopes": ["read", "write"]
+                            "scopes": ["read", "write"],
+                            "expires_in_seconds": 3600
                         })
                         .to_string(),
                     ))
@@ -5160,7 +5294,8 @@ mod tests {
                         serde_json::json!({
                             "project_id": harness.secondary_project_id.clone(),
                             "name": "not-allowed",
-                            "scopes": ["read"]
+                            "scopes": ["read"],
+                            "expires_in_seconds": 3600
                         })
                         .to_string(),
                     ))
@@ -5192,7 +5327,8 @@ mod tests {
                         serde_json::json!({
                             "project_id": harness.primary_project_id.clone(),
                             "name": "viewer-write",
-                            "scopes": ["write"]
+                            "scopes": ["write"],
+                            "expires_in_seconds": 3600
                         })
                         .to_string(),
                     ))
@@ -5224,7 +5360,8 @@ mod tests {
                         serde_json::json!({
                             "project_id": harness.primary_project_id.clone(),
                             "name": "owner-admin",
-                            "scopes": ["admin"]
+                            "scopes": ["admin"],
+                            "expires_in_seconds": 3600
                         })
                         .to_string(),
                     ))
@@ -5234,6 +5371,127 @@ mod tests {
             .expect("Create key request failed");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_ui_session_key_creation_requires_project_id() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/keys")
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "proj-a/train-prod",
+                            "scopes": ["read", "write"],
+                            "expires_in_seconds": 3600
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create key request"),
+            )
+            .await
+            .expect("Create key request failed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_ui_session_key_creation_rejects_invalid_name() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/keys")
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": harness.primary_project_id.clone(),
+                            "name": "Invalid_Name",
+                            "scopes": ["read", "write"],
+                            "expires_in_seconds": 3600
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create key request"),
+            )
+            .await
+            .expect("Create key request failed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_ui_session_key_creation_requires_ttl_within_policy_max() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let missing_ttl = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/keys")
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": harness.primary_project_id.clone(),
+                            "name": "proj-a/train-prod",
+                            "scopes": ["read", "write"]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create key request"),
+            )
+            .await
+            .expect("Create key request failed");
+        assert_eq!(missing_ttl.status(), StatusCode::BAD_REQUEST);
+
+        let too_long_ttl = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/keys")
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": harness.primary_project_id.clone(),
+                            "name": "proj-a/train-prod",
+                            "scopes": ["read", "write"],
+                            "expires_in_seconds": DEFAULT_UI_KEY_MAX_TTL_SECONDS + 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create key request"),
+            )
+            .await
+            .expect("Create key request failed");
+        assert_eq!(too_long_ttl.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
