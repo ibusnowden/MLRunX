@@ -77,6 +77,9 @@ jobs:
       - name: Lint proto definitions
         run: buf lint
 
+      - name: Ensure main branch exists locally for Buf baseline
+        run: git show-ref --verify --quiet refs/heads/main || git branch --track main origin/main
+
       - name: Check breaking proto changes
         run: buf breaking --against '.git#branch=main'
 
