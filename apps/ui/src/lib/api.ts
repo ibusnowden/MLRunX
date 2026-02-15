@@ -124,6 +124,7 @@ export interface CreateApiKeyRequest {
   project_id?: string;
   name?: string;
   scopes: string[];
+  expires_in_seconds?: number;
 }
 
 export interface CreateApiKeyResponse {
@@ -324,6 +325,7 @@ function isMutatingMethod(method: string | undefined): boolean {
 
 interface FetchApiOptions {
   skipApiKey?: boolean;
+  preferUiSession?: boolean;
 }
 
 async function fetchApi<T>(
@@ -338,7 +340,10 @@ async function fetchApi<T>(
   };
 
   const apiKey = getApiKey();
-  if (!fetchOptions.skipApiKey && apiKey) {
+  const useSessionAuth =
+    Boolean(fetchOptions.preferUiSession) && Boolean(readCookie(UI_CSRF_COOKIE_NAME));
+
+  if (!fetchOptions.skipApiKey && !useSessionAuth && apiKey) {
     (headers as Record<string, string>)['X-API-Key'] = apiKey;
   }
 
@@ -349,7 +354,7 @@ async function fetchApi<T>(
     }
   }
 
-  const includeCredentials = fetchOptions.skipApiKey || !apiKey;
+  const includeCredentials = fetchOptions.skipApiKey || !apiKey || useSessionAuth;
 
   const response = await fetch(url, {
     ...options,
@@ -453,7 +458,7 @@ export const api = {
   },
 
   async listAdminUsers(): Promise<AdminListUsersResponse> {
-    return fetchApi<AdminListUsersResponse>('/api/v1/admin/users');
+    return fetchApi<AdminListUsersResponse>('/api/v1/admin/users', {}, { preferUiSession: true });
   },
 
   async listAdminUserMemberships(
@@ -464,20 +469,30 @@ export const api = {
     if (params.includeRevoked) searchParams.set('include_revoked', 'true');
     const query = searchParams.toString();
     return fetchApi<AdminListUserMembershipsResponse>(
-      `/api/v1/admin/users/${encodeURIComponent(userId)}/memberships${query ? `?${query}` : ''}`
+      `/api/v1/admin/users/${encodeURIComponent(userId)}/memberships${query ? `?${query}` : ''}`,
+      {},
+      { preferUiSession: true }
     );
   },
 
   async disableAdminUser(userId: string): Promise<AdminUser> {
-    return fetchApi<AdminUser>(`/api/v1/admin/users/${encodeURIComponent(userId)}/disable`, {
-      method: 'POST',
-    });
+    return fetchApi<AdminUser>(
+      `/api/v1/admin/users/${encodeURIComponent(userId)}/disable`,
+      {
+        method: 'POST',
+      },
+      { preferUiSession: true }
+    );
   },
 
   async enableAdminUser(userId: string): Promise<AdminUser> {
-    return fetchApi<AdminUser>(`/api/v1/admin/users/${encodeURIComponent(userId)}/enable`, {
-      method: 'POST',
-    });
+    return fetchApi<AdminUser>(
+      `/api/v1/admin/users/${encodeURIComponent(userId)}/enable`,
+      {
+        method: 'POST',
+      },
+      { preferUiSession: true }
+    );
   },
 
   async listAdminSessions(
@@ -487,13 +502,18 @@ export const api = {
     if (params.userId) searchParams.set('user_id', params.userId);
     if (params.includeRevoked) searchParams.set('include_revoked', 'true');
     const query = searchParams.toString();
-    return fetchApi<AdminListSessionsResponse>(`/api/v1/admin/sessions${query ? `?${query}` : ''}`);
+    return fetchApi<AdminListSessionsResponse>(
+      `/api/v1/admin/sessions${query ? `?${query}` : ''}`,
+      {},
+      { preferUiSession: true }
+    );
   },
 
   async revokeAdminSession(sessionId: string): Promise<{ status: string }> {
     return fetchApi<{ status: string }>(
       `/api/v1/admin/sessions/${encodeURIComponent(sessionId)}/revoke`,
-      { method: 'POST' }
+      { method: 'POST' },
+      { preferUiSession: true }
     );
   },
 
@@ -516,7 +536,9 @@ export const api = {
     if (params.limit) searchParams.set('limit', String(params.limit));
     const query = searchParams.toString();
     return fetchApi<AdminListAuditEventsResponse>(
-      `/api/v1/admin/audit-events${query ? `?${query}` : ''}`
+      `/api/v1/admin/audit-events${query ? `?${query}` : ''}`,
+      {},
+      { preferUiSession: true }
     );
   },
 

@@ -38,6 +38,7 @@ export default function SettingsPage() {
   const [newProjectDescription, setNewProjectDescription] = useState('');
   const [newKeyName, setNewKeyName] = useState('training-agent');
   const [newKeyProjectId, setNewKeyProjectId] = useState('');
+  const [keyTtlDays, setKeyTtlDays] = useState('90');
   const [scopeRead, setScopeRead] = useState(true);
   const [scopeWrite, setScopeWrite] = useState(true);
   const [createdKey, setCreatedKey] = useState<CreateApiKeyResponse | null>(null);
@@ -287,17 +288,25 @@ export default function SettingsPage() {
       return;
     }
 
-    if (!newKeyProjectId && availableProjectIds.length > 1) {
+    if (!newKeyProjectId) {
       setStatus('Choose a project for this key.');
       return;
     }
 
+    const ttlDays = Number(keyTtlDays);
+    if (!Number.isFinite(ttlDays) || ttlDays <= 0) {
+      setStatus('Choose a valid key TTL.');
+      return;
+    }
+    const expiresInSeconds = Math.round(ttlDays * 24 * 60 * 60);
+
     setSubmittingKey(true);
     try {
       const payload = {
-        project_id: newKeyProjectId || undefined,
+        project_id: newKeyProjectId,
         name: newKeyName.trim() || undefined,
         scopes,
+        expires_in_seconds: expiresInSeconds,
       };
       const result = await api.createApiKey(payload);
       setCreatedKey(result);
@@ -548,6 +557,24 @@ export default function SettingsPage() {
               />
               write
             </label>
+          </div>
+
+          <div>
+            <label htmlFor="key-ttl" className="block text-sm font-medium text-text-primary mb-1.5">
+              Key TTL
+            </label>
+            <select
+              id="key-ttl"
+              value={keyTtlDays}
+              onChange={(event) => setKeyTtlDays(event.target.value)}
+              className="w-full rounded-lg border border-border bg-surface-secondary px-3 py-2.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent sm:w-64"
+              disabled={!session}
+            >
+              <option value="30">30 days</option>
+              <option value="60">60 days</option>
+              <option value="90">90 days</option>
+            </select>
+            <p className="mt-1 text-xs text-text-muted">UI-created keys must expire within policy limits.</p>
           </div>
 
           <div className="flex flex-wrap gap-2">

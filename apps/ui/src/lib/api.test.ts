@@ -160,6 +160,28 @@ describe('api key management client', () => {
     expect(options.credentials).toBe('same-origin');
   });
 
+  it('prefers UI-session auth for admin endpoints when csrf cookie exists', async () => {
+    window.localStorage.setItem(API_URL_STORAGE_KEY, 'https://mlrunx.ibra-niang.com');
+    window.localStorage.setItem(API_KEY_STORAGE_KEY, 'mlrunx_platform_admin_key');
+    document.cookie = `${UI_CSRF_COOKIE_NAME}=csrf-admin; Path=/`;
+
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse({ events: [] }));
+
+    await api.listAdminAuditEvents({ action: 'admin.users.list' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = headersToRecord(options.headers);
+
+    expect(url).toBe(
+      'https://mlrunx.ibra-niang.com/api/v1/admin/audit-events?action=admin.users.list'
+    );
+    expect(options.credentials).toBe('include');
+    expect(headers['X-API-Key']).toBeUndefined();
+  });
+
   it('lists projects using UI-session auth', async () => {
     window.localStorage.setItem(API_URL_STORAGE_KEY, 'https://mlrunx.ibra-niang.com');
     window.localStorage.setItem(API_KEY_STORAGE_KEY, 'mlrunx_local_key');
