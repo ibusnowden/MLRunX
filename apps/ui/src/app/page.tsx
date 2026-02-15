@@ -128,7 +128,7 @@ export default function Home() {
   );
 
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(59,125,255,0.08)_0%,_transparent_38%),linear-gradient(180deg,_rgba(10,13,18,1)_0%,_rgba(10,13,18,1)_100%)]">
+    <main className="min-h-screen bg-[var(--page-gradient)]">
       <div className="sticky top-0 z-20 border-b border-border bg-background/95 backdrop-blur-sm">
         <div className="mx-auto flex w-full max-w-[1600px] items-center justify-between gap-4 px-5 py-5 sm:px-8">
           <div className="mlrx-fade-up flex items-center gap-3">

@@ -761,7 +761,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
   }
 
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(59,125,255,0.06)_0%,_transparent_34%),linear-gradient(180deg,_rgba(10,13,18,1)_0%,_rgba(10,13,18,1)_100%)] px-5 py-8 sm:px-8">
+    <main className="min-h-screen bg-[var(--page-gradient)] px-5 py-8 sm:px-8">
       <div className="mx-auto max-w-[1150px]">
         <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
           <Link

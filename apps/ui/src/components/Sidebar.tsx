@@ -246,7 +246,7 @@ export function Sidebar() {
       />
 
       <aside
-        className={`fixed left-0 top-0 z-50 flex h-screen w-56 flex-col border-r border-sidebar-border bg-[linear-gradient(180deg,_rgba(15,18,24,1)_0%,_rgba(12,15,21,1)_100%)] transition-transform duration-200 ${
+        className={`fixed left-0 top-0 z-50 flex h-screen w-56 flex-col border-r border-sidebar-border bg-[var(--sidebar-gradient)] transition-transform duration-200 ${
           mobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'
         }`}
       >

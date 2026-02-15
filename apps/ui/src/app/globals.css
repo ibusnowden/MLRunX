@@ -27,6 +27,9 @@
   --sidebar-text-active: #111827;
   --sidebar-hover: #f3f4f6;
   --sidebar-active: #eff6ff;
+  --sidebar-gradient: linear-gradient(180deg, #ffffff 0%, #f6f8fc 100%);
+  --page-gradient: radial-gradient(circle at top, rgba(59, 125, 255, 0.08) 0%, transparent 38%),
+    linear-gradient(180deg, #f8f9fb 0%, #f8f9fb 100%);
   --chart-bg: #ffffff;
   --chart-grid: rgba(0, 0, 0, 0.06);
   --chart-axis: #9ca3af;
@@ -70,6 +73,9 @@
   --sidebar-text-active: #e4e8f0;
   --sidebar-hover: #151a23;
   --sidebar-active: rgba(59, 125, 255, 0.14);
+  --sidebar-gradient: linear-gradient(180deg, rgba(15, 18, 24, 1) 0%, rgba(12, 15, 21, 1) 100%);
+  --page-gradient: radial-gradient(circle at top, rgba(59, 125, 255, 0.08) 0%, transparent 38%),
+    linear-gradient(180deg, rgba(10, 13, 18, 1) 0%, rgba(10, 13, 18, 1) 100%);
   --chart-bg: #0a0d12;
   --chart-grid: rgba(255, 255, 255, 0.06);
   --chart-axis: #6f7890;
