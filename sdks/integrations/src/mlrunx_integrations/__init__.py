@@ -15,7 +15,7 @@ Example usage:
     study.optimize(objective, callbacks=[MLRunXOptunaCallback()])
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 __all__ = [
     "MLRunXLogger",
     "MLRunXCallback",
