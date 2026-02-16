@@ -109,8 +109,8 @@ const MAIN_ITEMS: NavItem[] = [
 
 const ACCOUNT_ITEMS: NavItem[] = [
   { href: '/settings#profile', label: 'Profile', icon: ProfileIcon },
-  { href: '/settings#api-keys', label: 'API Keys', icon: ApiKeyIcon },
   { href: '/settings#projects', label: 'Projects', icon: ProjectsIcon },
+  { href: '/settings#api-keys', label: 'API Keys', icon: ApiKeyIcon },
   { href: '/settings#settings', label: 'Settings', icon: SettingsIcon },
 ];
 

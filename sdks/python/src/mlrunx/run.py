@@ -13,7 +13,7 @@ from typing import Any
 
 from mlrunx.config import Config, get_config
 from mlrunx.queue import Event, EventQueue, EventType
-from mlrunx.transport.base import Transport
+from mlrunx.transport.base import Transport, TransportError
 from mlrunx.transport.http import HttpTransport
 from mlrunx.worker import FlushWorker
 
@@ -117,7 +117,13 @@ class Run:
             if config:
                 self.log_params(config)
         else:
-            self._init_run_on_server(config or {})
+            try:
+                self._init_run_on_server(config or {})
+            except Exception:
+                # Ensure partially initialized resources do not leak if init fails.
+                self._worker.stop()
+                self._transport.close()
+                raise
 
         logger.info(f"Run started: {self._run_id} ({self._name})")
 
@@ -154,6 +160,19 @@ class Run:
             if "run_id" in response and response["run_id"] != self._run_id:
                 self._run_id = response["run_id"]
 
+        except TransportError as e:
+            # Non-retryable init failures indicate invalid auth/config and should fail fast.
+            if not e.retryable:
+                guidance = (
+                    " Verify MLRUNX_API_KEY and MLRUNX_PROJECT_ID. "
+                    "If your environment reports 'unexpected keyword project_id', "
+                    "upgrade the Python SDK."
+                )
+                raise RuntimeError(f"Failed to initialize run on server: {e}.{guidance}") from e
+
+            logger.warning(f"Failed to initialize run on server: {e}")
+            self._offline = True
+            self._worker.set_offline()
         except Exception as e:
             logger.warning(f"Failed to initialize run on server: {e}")
             self._offline = True

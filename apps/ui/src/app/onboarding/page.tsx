@@ -106,13 +106,13 @@ export default function OnboardingPage() {
             Use your public host URL (root, not <code>/api</code>) and your newly created API key.
           </p>
           <pre className="overflow-x-auto rounded-lg border border-border bg-surface-secondary p-3 text-xs sm:text-sm text-text-primary">
-{`pip install mlrunx
+{`pip install --upgrade mlrunx
 export MLRUNX_SERVER_URL=${apiBaseUrl}
 export MLRUNX_API_KEY=${effectiveApiKey}
 export MLRUNX_PROJECT_ID=${projectHint}`}
           </pre>
           <pre className="overflow-x-auto rounded-lg border border-border bg-surface-secondary p-3 text-xs sm:text-sm text-text-primary">
-{`uv pip install mlrunx
+{`uv pip install --upgrade mlrunx
 MLRUNX_SERVER_URL=${apiBaseUrl} MLRUNX_API_KEY=${effectiveApiKey} MLRUNX_PROJECT_ID=${projectHint} python train.py`}
           </pre>
         </section>
@@ -124,7 +124,15 @@ MLRUNX_SERVER_URL=${apiBaseUrl} MLRUNX_API_KEY=${effectiveApiKey} MLRUNX_PROJECT
           </p>
           <pre className="overflow-x-auto rounded-lg border border-border bg-surface-secondary p-3 text-xs sm:text-sm text-text-primary">
 {`python - <<'PY'
+import inspect
 import mlrunx
+
+if "project_id" not in inspect.signature(mlrunx.init).parameters:
+    raise SystemExit(
+        "Incompatible mlrunx build detected. "
+        "Run: pip install --upgrade "
+        "'mlrunx @ git+https://github.com/ibusnowden/MLRunX.git#subdirectory=sdks/python'"
+    )
 
 run = mlrunx.init(project_id="${projectHint}", name="onboarding-smoke")
 mlrunx.log({"loss": 0.42, "accuracy": 0.91}, step=1)

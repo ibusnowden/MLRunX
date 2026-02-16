@@ -11,6 +11,7 @@ import mlrunx
 from mlrunx.config import Config
 from mlrunx.queue import Event, EventQueue, EventType
 from mlrunx.run import Run
+from mlrunx.transport.base import TransportError
 
 TEST_PROJECT_ID = "019c55f9-084a-7511-9393-6c17ede4a70f"
 
@@ -165,10 +166,64 @@ class TestRun:
         run.finish()
 
     @pytest.mark.unit
+    @patch("mlrunx.run.HttpTransport")
+    def test_run_init_non_retryable_error_raises(self, mock_transport_cls: MagicMock) -> None:
+        """Non-retryable init failures should fail fast, not silently fall back offline."""
+        mock_transport = MagicMock()
+        mock_transport.init_run.side_effect = TransportError(
+            "Client error: 400 - project_id is required",
+            status_code=400,
+            retryable=False,
+        )
+        mock_transport_cls.return_value = mock_transport
+
+        with pytest.raises(RuntimeError, match="Failed to initialize run on server"):
+            Run(project_id=TEST_PROJECT_ID)
+
+        mock_transport.close.assert_called_once()
+
+    @pytest.mark.unit
+    @patch("mlrunx.run.HttpTransport")
+    def test_run_init_retryable_error_falls_back_offline(
+        self, mock_transport_cls: MagicMock
+    ) -> None:
+        """Retryable init failures should continue in offline mode."""
+        mock_transport = MagicMock()
+        mock_transport.init_run.side_effect = TransportError(
+            "Request timed out",
+            status_code=504,
+            retryable=True,
+        )
+        mock_transport_cls.return_value = mock_transport
+
+        run = Run(project_id=TEST_PROJECT_ID)
+        assert run.is_offline
+        run.finish()
+
+    @pytest.mark.unit
     def test_run_init_rejects_project_name_without_id(self) -> None:
         """Project boundaries require explicit project_id values."""
         with pytest.raises(ValueError, match="project_id is required"):
             Run(project="test-project-name")
+
+    @pytest.mark.unit
+    @patch("mlrunx.run.HttpTransport")
+    def test_run_init_accepts_uuid_in_project_for_compatibility(
+        self, mock_transport_cls: MagicMock
+    ) -> None:
+        """Legacy project arg should map UUID values to project_id."""
+        mock_transport = MagicMock()
+        mock_transport.init_run.return_value = {"run_id": "test-123"}
+        mock_transport_cls.return_value = mock_transport
+
+        run = Run(project=TEST_PROJECT_ID)
+        assert run.project_id == TEST_PROJECT_ID
+
+        payload = mock_transport.init_run.call_args.args[0]
+        assert payload["project_id"] == TEST_PROJECT_ID
+        assert "project" not in payload
+
+        run.finish()
 
 
 class TestModuleAPI:
