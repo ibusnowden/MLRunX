@@ -1,6 +1,6 @@
 [project]
 name = "mlrunx-integrations"
-version = "0.1.2"
+version = "0.1.3"
 description = "MLRunX integrations for popular ML frameworks"
 requires-python = ">=3.10"
 readme = "README.md"
