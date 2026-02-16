@@ -13,6 +13,7 @@ import platform
 import random
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import timedelta
 from itertools import batched  # Requires Python 3.12+
@@ -599,8 +600,20 @@ def main(cfg: Config):
         run = None
         if dist_env.is_main_process:
             run_name = cfg.mlrunx_run_name or f"{cfg.loss}_seed{cfg.seed}"
+            project_id = cfg.mlrunx_project_id or os.getenv("MLRUNX_PROJECT_ID")
+            if not project_id:
+                raise ValueError(
+                    "MLRunX project_id is required. Set `mlrunx_project_id` in config "
+                    "or export MLRUNX_PROJECT_ID."
+                )
+            try:
+                uuid.UUID(project_id)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid mlrunx project_id '{project_id}'. Expected a UUID."
+                ) from exc
             run = mlrunx.init(
-                project=cfg.mlrunx_project,
+                project_id=project_id,
                 name=run_name,
                 tags={
                     "loss": cfg.loss,

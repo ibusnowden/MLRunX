@@ -30,5 +30,6 @@ max_norm: 1.0
 seed: 42
 model_device_id: 0
 val_model_device_id: 0  # PPO-specific: value model device
-mlrunx_project: policy-gradients
+# Set MLRUNX_PROJECT_ID env var or provide mlrunx_project_id here.
+# mlrunx_project_id: <project-uuid>
 mlrunx_run_name: ppo

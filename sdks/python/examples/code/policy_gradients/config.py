@@ -7,7 +7,7 @@
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 
 class DatasetSpec(BaseModel):
@@ -64,7 +64,7 @@ class Config(BaseModel):
         model_device_id: GPU for policy model
 
         # Logging (MLRunX)
-        mlrunx_project: MLRunX project name
+        mlrunx_project_id: MLRunX project UUID (preferred)
         mlrunx_run_name: MLRunX run name (auto-generated if None)
     """
 
@@ -106,7 +106,11 @@ class Config(BaseModel):
     model_device_id: int = 0
 
     # Logging (MLRunX)
-    mlrunx_project: str = "policy-gradients"
+    # Accept legacy `mlrunx_project` config key as an alias for backward compatibility.
+    mlrunx_project_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("mlrunx_project_id", "mlrunx_project"),
+    )
     mlrunx_run_name: str | None = None
 
     @model_validator(mode="after")

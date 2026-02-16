@@ -24,5 +24,6 @@ batch_acc: 4
 max_norm: 1.0
 seed: 42
 model_device_id: 0
-mlrunx_project: policy-gradients
+# Set MLRUNX_PROJECT_ID env var or provide mlrunx_project_id here.
+# mlrunx_project_id: <project-uuid>
 mlrunx_run_name: reinforce
