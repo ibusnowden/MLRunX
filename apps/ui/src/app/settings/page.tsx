@@ -175,12 +175,12 @@ export default function SettingsPage() {
   }, [availableProjectIds, newKeyProjectId]);
   const pipCommand = useMemo(
     () =>
-      `pip install mlrunx\nexport MLRUNX_SERVER_URL=${apiBaseUrl || 'https://mlrunx.example.com'}\nexport MLRUNX_API_KEY=${sdkApiKey}\nexport MLRUNX_PROJECT_ID=${sdkProjectId}`,
+      `pip install --upgrade mlrunx\nexport MLRUNX_SERVER_URL=${apiBaseUrl || 'https://mlrunx.example.com'}\nexport MLRUNX_API_KEY=${sdkApiKey}\nexport MLRUNX_PROJECT_ID=${sdkProjectId}`,
     [apiBaseUrl, sdkApiKey, sdkProjectId]
   );
   const uvCommand = useMemo(
     () =>
-      `uv pip install mlrunx\nMLRUNX_SERVER_URL=${apiBaseUrl || 'https://mlrunx.example.com'} MLRUNX_API_KEY=${sdkApiKey} MLRUNX_PROJECT_ID=${sdkProjectId} python train.py`,
+      `uv pip install --upgrade mlrunx\nMLRUNX_SERVER_URL=${apiBaseUrl || 'https://mlrunx.example.com'} MLRUNX_API_KEY=${sdkApiKey} MLRUNX_PROJECT_ID=${sdkProjectId} python train.py`,
     [apiBaseUrl, sdkApiKey, sdkProjectId]
   );
   const copyToClipboard = async (value: string, successMessage: string) => {

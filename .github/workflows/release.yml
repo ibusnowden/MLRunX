@@ -226,6 +226,36 @@ jobs:
           print("Found both mlrunx and mlrunx-integrations distributions.")
           PY
 
+      - name: Smoke-test built mlrunx wheel contract
+        run: |
+          python -m venv .venv-wheel-check
+          source .venv-wheel-check/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install dist/python/mlrunx-*.whl
+          python - <<'PY'
+          import inspect
+          import os
+          import sys
+
+          import mlrunx
+
+          tag = os.environ["GITHUB_REF"].removeprefix("refs/tags/v")
+          init_signature = inspect.signature(mlrunx.init)
+
+          if getattr(mlrunx, "__version__", "") != tag:
+              print(
+                  f"mlrunx.__version__={getattr(mlrunx, '__version__', 'missing')} "
+                  f"does not match tag {tag}"
+              )
+              sys.exit(1)
+
+          if "project_id" not in init_signature.parameters:
+              print(f"mlrunx.init signature missing project_id: {init_signature}")
+              sys.exit(1)
+
+          print(f"Wheel contract OK: version={tag}, init={init_signature}")
+          PY
+
       - name: Upload Python package artifacts
         uses: actions/upload-artifact@v4
         with:
