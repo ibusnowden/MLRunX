@@ -285,7 +285,7 @@ source .venv/bin/activate
 import mlrunx
 
 # Initialize a run
-run = mlrunx.init(project="my-project", name="training-run-1")
+run = mlrunx.init(project_id="my-project", name="training-run-1")
 
 # Log metrics (async, batched automatically)
 for step in range(1000):
