@@ -321,6 +321,24 @@ class FlushWorker:
         Returns:
             True if send succeeded, False otherwise
         """
+        return self._send_batch_with_context(events, stats, replaying_spool=False)
+
+    def _send_batch_with_context(
+        self,
+        events: list[Event],
+        stats: BatchStats,
+        replaying_spool: bool,
+    ) -> bool:
+        """Send a batch with optional spool-replay context.
+
+        Args:
+            events: List of events to send
+            stats: Batch statistics
+            replaying_spool: True when replaying persisted offline spool files
+
+        Returns:
+            True if send succeeded, False otherwise
+        """
         if not events:
             return True
 
@@ -396,6 +414,18 @@ class FlushWorker:
                 return True
 
             except TransportError as e:
+                if replaying_spool and self._is_terminal_spool_error(e):
+                    # Stale spool for deleted/finished runs is not recoverable.
+                    # Mark as success so the syncer can retire this file.
+                    run_id = events[0].run_id if events else "<unknown>"
+                    logger.warning(
+                        "Discarding stale spooled batch for run %s: %s",
+                        run_id,
+                        e,
+                    )
+                    self._connection.record_success()
+                    return True
+
                 self._connection.record_failure()
 
                 if not e.retryable or retries >= self._config.max_retries:
@@ -451,7 +481,15 @@ class FlushWorker:
             tag_count=sum(1 for e in events if e.type == EventType.TAG),
         )
 
-        return self._send_batch(events, stats)
+        return self._send_batch_with_context(events, stats, replaying_spool=True)
+
+    @staticmethod
+    def _is_terminal_spool_error(error: TransportError) -> bool:
+        """Return True if a spool replay error should be dropped permanently."""
+        msg = str(error).lower()
+        return (error.status_code == 404 and "run not found" in msg) or (
+            error.status_code == 412 and "not running" in msg
+        )
 
     @property
     def batch_count(self) -> int:
