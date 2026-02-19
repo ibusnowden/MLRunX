@@ -19,8 +19,48 @@ function headersToRecord(headers: HeadersInit | undefined): Record<string, strin
   return headers;
 }
 
+function ensureLocalStorageMock(): void {
+  const localStorageValue = window.localStorage as Partial<Storage>;
+  if (
+    typeof localStorageValue.getItem === 'function' &&
+    typeof localStorageValue.setItem === 'function' &&
+    typeof localStorageValue.removeItem === 'function' &&
+    typeof localStorageValue.clear === 'function'
+  ) {
+    return;
+  }
+
+  const store = new Map<string, string>();
+  const mockStorage: Storage = {
+    get length() {
+      return store.size;
+    },
+    clear() {
+      store.clear();
+    },
+    getItem(key: string) {
+      return store.get(key) ?? null;
+    },
+    key(index: number) {
+      return Array.from(store.keys())[index] ?? null;
+    },
+    removeItem(key: string) {
+      store.delete(key);
+    },
+    setItem(key: string, value: string) {
+      store.set(key, value);
+    },
+  };
+
+  Object.defineProperty(window, 'localStorage', {
+    value: mockStorage,
+    configurable: true,
+  });
+}
+
 describe('api key management client', () => {
   beforeEach(() => {
+    ensureLocalStorageMock();
     window.localStorage.clear();
     document.cookie = `${UI_CSRF_COOKIE_NAME}=; Max-Age=0; Path=/`;
     vi.restoreAllMocks();
