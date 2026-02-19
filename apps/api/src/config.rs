@@ -1,4 +1,4 @@
-//! Configuration for MLRunX API server.
+//! Configuration for `MLRunX` API server.
 //!
 //! Supports configuration via environment variables.
 
@@ -6,20 +6,15 @@ use std::net::SocketAddr;
 use tracing::info;
 
 /// Ingest mode determines how data flows through the system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IngestMode {
     /// Direct mode: write directly to ClickHouse/Postgres (alpha mode).
     /// No external queue dependencies, simpler setup.
+    #[default]
     Direct,
     /// Queued mode: write through Redis/Kafka queue (future).
     /// Better for high throughput and horizontal scaling.
     Queued,
-}
-
-impl Default for IngestMode {
-    fn default() -> Self {
-        Self::Direct
-    }
 }
 
 impl IngestMode {
@@ -36,7 +31,7 @@ impl IngestMode {
     }
 
     /// Get string representation.
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Direct => "direct",
             Self::Queued => "queued",
@@ -84,8 +79,8 @@ impl ServerConfig {
         let host = std::env::var("API_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
 
         Self {
-            http_addr: format!("{}:{}", host, http_port).parse().unwrap(),
-            grpc_addr: format!("{}:{}", host, grpc_port).parse().unwrap(),
+            http_addr: format!("{host}:{http_port}").parse().unwrap(),
+            grpc_addr: format!("{host}:{grpc_port}").parse().unwrap(),
             ingest_mode: IngestMode::from_env(),
             log_level: std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "info,mlrunx_api=debug".to_string()),

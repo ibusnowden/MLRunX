@@ -1,9 +1,9 @@
 //! Idempotency service for batch deduplication.
 //!
 //! Ensures that SDK retries don't create duplicate data by:
-//! 1. Tracking batch_id per run
+//! 1. Tracking `batch_id` per run
 //! 2. Verifying payload hash matches for duplicates
-//! 3. Rejecting conflicting batches (same batch_id, different payload)
+//! 3. Rejecting conflicting batches (same `batch_id`, different payload)
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,9 +17,9 @@ use tracing::{debug, warn};
 pub enum IdempotencyResult {
     /// Batch is new, should be processed
     New,
-    /// Batch is a duplicate (same batch_id, same payload hash)
+    /// Batch is a duplicate (same `batch_id`, same payload hash)
     Duplicate,
-    /// Batch conflicts (same batch_id, different payload hash)
+    /// Batch conflicts (same `batch_id`, different payload hash)
     Conflict {
         expected_hash: String,
         actual_hash: String,
@@ -30,12 +30,12 @@ pub enum IdempotencyResult {
 
 impl IdempotencyResult {
     /// Returns true if the batch should be processed.
-    pub fn should_process(&self) -> bool {
+    pub const fn should_process(&self) -> bool {
         matches!(self, Self::New | Self::OutOfOrder { .. })
     }
 
     /// Returns true if this is an error condition.
-    pub fn is_error(&self) -> bool {
+    pub const fn is_error(&self) -> bool {
         matches!(self, Self::Conflict { .. })
     }
 }
@@ -66,12 +66,12 @@ pub struct BatchRecord {
 }
 
 /// In-memory idempotency store for alpha development.
-/// In production, this would be backed by PostgreSQL.
+/// In production, this would be backed by `PostgreSQL`.
 #[derive(Debug, Default)]
 pub struct IdempotencyStore {
-    /// Map from (run_id, batch_id) to BatchRecord
+    /// Map from (`run_id`, `batch_id`) to `BatchRecord`
     batches: RwLock<HashMap<(String, String), BatchRecord>>,
-    /// Map from run_id to highest seen sequence number
+    /// Map from `run_id` to highest seen sequence number
     sequences: RwLock<HashMap<String, i64>>,
 }
 
@@ -87,6 +87,7 @@ impl IdempotencyStore {
     /// Check if a batch is idempotent and record it if new.
     ///
     /// Returns the idempotency result indicating whether to process the batch.
+    #[allow(clippy::too_many_arguments)]
     pub async fn check_and_record(
         &self,
         project_id: &str,
@@ -112,19 +113,18 @@ impl IdempotencyStore {
                         "Duplicate batch detected (same hash)"
                     );
                     return IdempotencyResult::Duplicate;
-                } else {
-                    warn!(
-                        run_id = %run_id,
-                        batch_id = %batch_id,
-                        expected_hash = %existing.payload_hash,
-                        actual_hash = %payload_hash,
-                        "Conflicting batch detected (different hash)"
-                    );
-                    return IdempotencyResult::Conflict {
-                        expected_hash: existing.payload_hash.clone(),
-                        actual_hash: payload_hash.to_string(),
-                    };
                 }
+                warn!(
+                    run_id = %run_id,
+                    batch_id = %batch_id,
+                    expected_hash = %existing.payload_hash,
+                    actual_hash = %payload_hash,
+                    "Conflicting batch detected (different hash)"
+                );
+                return IdempotencyResult::Conflict {
+                    expected_hash: existing.payload_hash.clone(),
+                    actual_hash: payload_hash.to_string(),
+                };
             }
         }
 

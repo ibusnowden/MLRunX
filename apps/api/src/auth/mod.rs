@@ -1,4 +1,4 @@
-//! Authentication and authorization module for MLRunX API.
+//! Authentication and authorization module for `MLRunX` API.
 //!
 //! Provides API key authentication middleware and key management.
 
@@ -81,7 +81,7 @@ impl ApiKey {
             return true;
         }
         // Otherwise, must match the project
-        self.project_id.as_ref().map_or(false, |p| p == project_id)
+        self.project_id.as_ref().is_some_and(|p| p == project_id)
     }
 }
 
@@ -120,7 +120,7 @@ impl UiJwtAlgorithm {
         }
     }
 
-    fn env_value(self) -> &'static str {
+    const fn env_value(self) -> &'static str {
         match self {
             Self::Hs256 => "HS256",
             Self::Rs256 => "RS256",
@@ -128,7 +128,7 @@ impl UiJwtAlgorithm {
         }
     }
 
-    fn jsonwebtoken_algorithm(self) -> Algorithm {
+    const fn jsonwebtoken_algorithm(self) -> Algorithm {
         match self {
             Self::Hs256 => Algorithm::HS256,
             Self::Rs256 => Algorithm::RS256,
@@ -147,21 +147,23 @@ impl UiJwtConfig {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|v| *v > 0)
-            .unwrap_or(900);
+            .unwrap_or(43_200);
 
         let cookie_same_site = std::env::var("MLRUNX_UI_COOKIE_SAMESITE")
             .ok()
             .filter(|v| !v.trim().is_empty())
-            .map(|v| {
-                if v.eq_ignore_ascii_case("strict") {
-                    "Strict".to_string()
-                } else if v.eq_ignore_ascii_case("none") {
-                    "None".to_string()
-                } else {
-                    "Lax".to_string()
-                }
-            })
-            .unwrap_or_else(|| "Lax".to_string());
+            .map_or_else(
+                || "Lax".to_string(),
+                |v| {
+                    if v.eq_ignore_ascii_case("strict") {
+                        "Strict".to_string()
+                    } else if v.eq_ignore_ascii_case("none") {
+                        "None".to_string()
+                    } else {
+                        "Lax".to_string()
+                    }
+                },
+            );
 
         let secret = std::env::var("MLRUNX_JWT_SECRET")
             .ok()
@@ -189,7 +191,7 @@ impl UiJwtConfig {
             algorithm,
             auto_provision_project: std::env::var("MLRUNX_UI_AUTO_PROVISION_PROJECT")
                 .ok()
-                .map_or(true, |value| env_flag_value(&value)),
+                .is_none_or(|value| env_flag_value(&value)),
             personal_project_prefix: std::env::var("MLRUNX_UI_PERSONAL_PROJECT_PREFIX")
                 .ok()
                 .map(|v| v.trim().to_string())
@@ -238,7 +240,7 @@ struct ResolvedUiIdentity {
 }
 
 fn env_flag(name: &str) -> bool {
-    std::env::var(name).map_or(false, |v| env_flag_value(&v))
+    std::env::var(name).is_ok_and(|v| env_flag_value(&v))
 }
 
 fn env_flag_value(value: &str) -> bool {
@@ -260,7 +262,7 @@ impl AuthRateLimitConfig {
     fn from_env() -> Self {
         let enabled = std::env::var("MLRUNX_AUTH_RATE_LIMIT_ENABLED")
             .ok()
-            .map_or(true, |v| env_flag_value(&v));
+            .is_none_or(|v| env_flag_value(&v));
         let max_failures_per_window = std::env::var("MLRUNX_AUTH_RATE_LIMIT_MAX_FAILURES")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
@@ -300,7 +302,7 @@ struct AuthRateLimitEntry {
 }
 
 impl AuthRateLimitEntry {
-    fn new(now: Instant) -> Self {
+    const fn new(now: Instant) -> Self {
         Self {
             window_started_at: now,
             failures_in_window: 0,
@@ -415,7 +417,7 @@ impl RuntimeAuthMode {
         }
     }
 
-    fn from_flags(auth_disabled: bool, ui_jwt_enabled: bool) -> Self {
+    const fn from_flags(auth_disabled: bool, ui_jwt_enabled: bool) -> Self {
         if auth_disabled {
             Self::Disabled
         } else if ui_jwt_enabled {
@@ -443,15 +445,15 @@ impl RuntimeAuthMode {
         )
     }
 
-    fn auth_disabled(self) -> bool {
+    const fn auth_disabled(self) -> bool {
         matches!(self, Self::Disabled)
     }
 
-    fn ui_jwt_enabled(self) -> bool {
+    const fn ui_jwt_enabled(self) -> bool {
         matches!(self, Self::Hybrid)
     }
 
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
             Self::ApiKey => "api_key",
@@ -460,9 +462,9 @@ impl RuntimeAuthMode {
     }
 }
 
-/// API key store with optional SQLite persistence.
+/// API key store with optional `SQLite` persistence.
 pub struct ApiKeyStore {
-    /// Map from key_hash to ApiKey
+    /// Map from `key_hash` to `ApiKey`
     keys: RwLock<HashMap<String, ApiKey>>,
     /// Optional durable backing store.
     sqlite_store: Option<Arc<SqliteStore>>,
@@ -474,7 +476,7 @@ pub struct ApiKeyStore {
     auth_hmac_secret: Vec<u8>,
     auth_hmac_secret_source: HmacSecretSource,
     auth_rate_limiter: AuthRateLimiter,
-    /// Email of the designated platform admin (from MLRUNX_ADMIN_EMAIL env var).
+    /// Email of the designated platform admin (from `MLRUNX_ADMIN_EMAIL` env var).
     admin_email: Option<String>,
     /// Whether auth is disabled (for dev/testing)
     pub auth_disabled: std::sync::atomic::AtomicBool,
@@ -499,7 +501,7 @@ impl ApiKeyStore {
         }
     }
 
-    /// Create a key store backed by SQLite for durable key storage.
+    /// Create a key store backed by `SQLite` for durable key storage.
     pub fn new_with_sqlite(sqlite_store: Arc<SqliteStore>) -> Self {
         let runtime_auth_mode = RuntimeAuthMode::from_env();
         let (auth_hmac_secret, auth_hmac_secret_source) = load_auth_hmac_secret();
@@ -602,7 +604,7 @@ impl ApiKeyStore {
         }
     }
 
-    pub fn is_ui_jwt_enabled(&self) -> bool {
+    pub const fn is_ui_jwt_enabled(&self) -> bool {
         self.ui_jwt.enabled
     }
 
@@ -618,11 +620,11 @@ impl ApiKeyStore {
         &self.ui_jwt.csrf_cookie_name
     }
 
-    pub fn ui_session_ttl_seconds(&self) -> u64 {
+    pub const fn ui_session_ttl_seconds(&self) -> u64 {
         self.ui_jwt.session_ttl_seconds
     }
 
-    pub fn ui_cookie_secure(&self) -> bool {
+    pub const fn ui_cookie_secure(&self) -> bool {
         self.ui_jwt.cookie_secure
     }
 
@@ -658,7 +660,7 @@ impl ApiKeyStore {
         Ok(())
     }
 
-    pub fn using_insecure_default_hmac_secret(&self) -> bool {
+    pub const fn using_insecure_default_hmac_secret(&self) -> bool {
         matches!(
             self.auth_hmac_secret_source,
             HmacSecretSource::InsecureDefault
@@ -794,7 +796,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
         // Check for bootstrap key
         if let Ok(bootstrap_key) = std::env::var("MLRUNX_API_KEY") {
             if !bootstrap_key.is_empty() {
-                let key = self.create_key_from_raw(
+                let key = Self::create_key_from_raw(
                     &bootstrap_key,
                     None, // Global admin key
                     Some("bootstrap".to_string()),
@@ -833,7 +835,6 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
 
     /// Create an API key from a raw key string.
     fn create_key_from_raw(
-        &self,
         raw_key: &str,
         project_id: Option<String>,
         name: Option<String>,
@@ -963,10 +964,24 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
         scopes: Vec<String>,
         expires_in_seconds: Option<u64>,
     ) -> (String, ApiKey) {
+        self.create_key_with_owner(project_id, name, scopes, expires_in_seconds, None)
+            .await
+    }
+
+    /// Create a new API key associated with an optional owning user.
+    pub async fn create_key_with_owner(
+        &self,
+        project_id: Option<String>,
+        name: Option<String>,
+        scopes: Vec<String>,
+        expires_in_seconds: Option<u64>,
+        created_by_user_id: Option<String>,
+    ) -> (String, ApiKey) {
         // Generate a random key
         let raw_key = generate_api_key();
-        let expires_at = expires_in_seconds.map(|secs| SystemTime::now() + Duration::from_secs(secs));
-        let key = self.create_key_from_raw(&raw_key, project_id, name, scopes, expires_at);
+        let expires_at =
+            expires_in_seconds.map(|secs| SystemTime::now() + Duration::from_secs(secs));
+        let key = Self::create_key_from_raw(&raw_key, project_id, name, scopes, expires_at);
 
         if let Some(sqlite_store) = &self.sqlite_store {
             let scopes_json =
@@ -982,6 +997,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
                     Some(&self.hash_with_hmac(&raw_key)),
                     &key.key_prefix,
                     key.project_id.as_deref(),
+                    created_by_user_id.as_deref(),
                     key.name.as_deref(),
                     &scopes_json,
                     expires_at_str.as_deref(),
@@ -1021,7 +1037,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
 
         // Generate a new bootstrap key.
         let raw_key = generate_api_key();
-        let mut new_key = self.create_key_from_raw(
+        let mut new_key = Self::create_key_from_raw(
             &raw_key,
             None,
             Some("bootstrap".to_string()),
@@ -1051,6 +1067,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
                     &new_key.key_hash,
                     Some(&key_fingerprint),
                     &new_key.key_prefix,
+                    None,
                     None,
                     Some("bootstrap"),
                     &scopes_json,
@@ -1110,7 +1127,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
         keys.values()
             .filter(|k| {
                 if let Some(pid) = project_id {
-                    k.project_id.as_ref().map_or(false, |p| p == pid)
+                    k.project_id.as_ref().is_some_and(|p| p == pid)
                 } else {
                     true
                 }
@@ -1140,11 +1157,12 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
         let csrf_token = generate_session_token();
         let token_hash = self.hash_with_hmac(&session_token);
         let csrf_hash = self.hash_with_hmac(&csrf_token);
-        let expires_at = (chrono::Utc::now()
-            + chrono::Duration::seconds(self.ui_jwt.session_ttl_seconds as i64))
-        .naive_utc()
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
+        let session_ttl_seconds =
+            i64::try_from(self.ui_jwt.session_ttl_seconds).unwrap_or(i64::MAX);
+        let expires_at = (chrono::Utc::now() + chrono::Duration::seconds(session_ttl_seconds))
+            .naive_utc()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
         let session_id = uuid::Uuid::now_v7().to_string();
 
         sqlite_store
@@ -1179,7 +1197,11 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
     ) -> Result<(ApiKey, HashSet<String>, bool), String> {
         let identity = self.resolve_ui_identity_from_jwt(raw_token).await?;
         let api_key = Self::build_ui_auth_api_key(&identity, "jwt");
-        Ok((api_key, identity.allowed_project_ids, identity.is_platform_admin))
+        Ok((
+            api_key,
+            identity.allowed_project_ids,
+            identity.is_platform_admin,
+        ))
     }
 
     async fn authenticate_ui_session(
@@ -1229,7 +1251,10 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
             .await
             .map_err(|e| format!("Failed to resolve UI session memberships: {e}"))?;
 
-        if let Err(err) = sqlite_store.touch_auth_session(&session.id).await {
+        if let Err(err) = sqlite_store
+            .touch_auth_session(&session.id, self.ui_jwt.session_ttl_seconds)
+            .await
+        {
             warn!("Failed to update UI session last_seen_at: {err}");
         }
 
@@ -1246,7 +1271,11 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
             is_platform_admin,
         };
         let api_key = Self::build_ui_auth_api_key(&identity, "session");
-        Ok((api_key, identity.allowed_project_ids, identity.is_platform_admin))
+        Ok((
+            api_key,
+            identity.allowed_project_ids,
+            identity.is_platform_admin,
+        ))
     }
 
     pub async fn revoke_ui_session(
@@ -1436,7 +1465,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
 
         let user_suffix: String = user_id
             .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
+            .filter(char::is_ascii_alphanumeric)
             .take(8)
             .collect();
         let suffix = if user_suffix.is_empty() {
@@ -1495,8 +1524,8 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
         let audience = self.ui_jwt.audience.as_ref().ok_or_else(|| {
             "MLRUNX_JWT_AUDIENCE is required when UI JWT auth is enabled.".to_string()
         })?;
-        validation.set_issuer(&[issuer.clone()]);
-        validation.set_audience(&[audience.clone()]);
+        validation.set_issuer(std::slice::from_ref(issuer));
+        validation.set_audience(std::slice::from_ref(audience));
 
         let decoding_key =
             match self.ui_jwt.algorithm {
@@ -1587,9 +1616,10 @@ fn parse_sqlite_datetime(value: &str) -> Option<SystemTime> {
         chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc).timestamp();
 
     if timestamp >= 0 {
-        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp as u64))
+        let secs = u64::try_from(timestamp).ok()?;
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
     } else {
-        SystemTime::UNIX_EPOCH.checked_sub(Duration::from_secs((-timestamp) as u64))
+        SystemTime::UNIX_EPOCH.checked_sub(Duration::from_secs(timestamp.unsigned_abs()))
     }
 }
 
@@ -1633,9 +1663,8 @@ fn hash_api_key_argon2(key: &str) -> Result<String, String> {
 
 fn verify_api_key_hash(raw_key: &str, stored_hash: &str) -> bool {
     if stored_hash.starts_with("$argon2") {
-        let parsed = match PasswordHash::new(stored_hash) {
-            Ok(parsed) => parsed,
-            Err(_) => return false,
+        let Ok(parsed) = PasswordHash::new(stored_hash) else {
+            return false;
         };
         return Argon2::default()
             .verify_password(raw_key.as_bytes(), &parsed)
@@ -1752,11 +1781,14 @@ impl AuthContext {
         }
     }
 
-    /// Get the project_id this key is scoped to (None = global/admin).
+    /// Get the `project_id` this key is scoped to (None = global/admin).
     pub fn project_id(&self) -> Option<&str> {
         if let Some(allowed_projects) = &self.allowed_project_ids {
             if allowed_projects.len() == 1 {
-                return allowed_projects.iter().next().map(|p| p.as_str());
+                return allowed_projects
+                    .iter()
+                    .next()
+                    .map(std::string::String::as_str);
             }
             return None;
         }
@@ -1764,14 +1796,14 @@ impl AuthContext {
     }
 
     /// Returns true if this context has global access (dev mode or admin with no project scope).
-    pub fn is_global(&self) -> bool {
+    pub const fn is_global(&self) -> bool {
         self.is_dev_mode
             || self.is_platform_admin
             || (self.allowed_project_ids.is_none() && self.api_key.project_id.is_none())
     }
 
     /// Returns the set of allowed projects for JWT user auth mode.
-    pub fn allowed_project_ids(&self) -> Option<&HashSet<String>> {
+    pub const fn allowed_project_ids(&self) -> Option<&HashSet<String>> {
         self.allowed_project_ids.as_ref()
     }
 
@@ -1817,10 +1849,7 @@ impl AuthContext {
         }
         Err((
             StatusCode::FORBIDDEN,
-            format!(
-                "Insufficient permissions: this API key requires the '{}' scope.",
-                scope
-            ),
+            format!("Insufficient permissions: this API key requires the '{scope}' scope."),
         ))
     }
 
@@ -1850,23 +1879,21 @@ pub enum AuthError {
 }
 
 impl AuthError {
-    pub fn status_code(&self) -> StatusCode {
+    pub const fn status_code(&self) -> StatusCode {
         match self {
-            AuthError::MissingKey => StatusCode::UNAUTHORIZED,
-            AuthError::InvalidKey => StatusCode::UNAUTHORIZED,
-            AuthError::InsufficientScope => StatusCode::FORBIDDEN,
-            AuthError::ProjectAccessDenied => StatusCode::FORBIDDEN,
+            Self::MissingKey | Self::InvalidKey => StatusCode::UNAUTHORIZED,
+            Self::InsufficientScope | Self::ProjectAccessDenied => StatusCode::FORBIDDEN,
         }
     }
 
-    pub fn message(&self) -> &'static str {
+    pub const fn message(&self) -> &'static str {
         match self {
-            AuthError::MissingKey => {
+            Self::MissingKey => {
                 "Authentication required. Use X-API-Key, Authorization: Bearer <token>, or a valid UI session cookie."
             }
-            AuthError::InvalidKey => "Invalid API key, JWT token, or UI session.",
-            AuthError::InsufficientScope => "Insufficient permissions.",
-            AuthError::ProjectAccessDenied => "Access to project denied.",
+            Self::InvalidKey => "Invalid API key, JWT token, or UI session.",
+            Self::InsufficientScope => "Insufficient permissions.",
+            Self::ProjectAccessDenied => "Access to project denied.",
         }
     }
 }
@@ -1983,7 +2010,7 @@ fn extract_user_agent(parts: &Parts) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn requires_csrf(method: &Method) -> bool {
+const fn requires_csrf(method: &Method) -> bool {
     matches!(
         *method,
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE
@@ -1991,6 +2018,7 @@ fn requires_csrf(method: &Method) -> bool {
 }
 
 /// Middleware for API key authentication.
+#[allow(clippy::too_many_lines)]
 pub async fn auth_middleware(
     State(key_store): State<Arc<ApiKeyStore>>,
     mut request: Request,
@@ -2033,10 +2061,7 @@ pub async fn auth_middleware(
             .await;
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "Too many failed authentication attempts. Retry in {}s.",
-                retry_after
-            ),
+            format!("Too many failed authentication attempts. Retry in {retry_after}s."),
         ));
     }
 
@@ -2048,25 +2073,22 @@ pub async fn auth_middleware(
             ));
         }
         RequestCredential::ApiKey(raw_key) => {
-            let api_key = match key_store.validate_key(&raw_key).await {
-                Some(api_key) => api_key,
-                None => {
-                    warn!(key_prefix = %raw_key.chars().take(8).collect::<String>(), "Invalid API key");
-                    key_store
-                        .record_auth_failure(
-                            client_ip.as_deref(),
-                            user_agent.as_deref(),
-                            &request_path,
-                            &request_method,
-                            "invalid_api_key",
-                            "x-api-key",
-                        )
-                        .await;
-                    return Err((
-                        AuthError::InvalidKey.status_code(),
-                        AuthError::InvalidKey.message().to_string(),
-                    ));
-                }
+            let Some(api_key) = key_store.validate_key(&raw_key).await else {
+                warn!(key_prefix = %raw_key.chars().take(8).collect::<String>(), "Invalid API key");
+                key_store
+                    .record_auth_failure(
+                        client_ip.as_deref(),
+                        user_agent.as_deref(),
+                        &request_path,
+                        &request_method,
+                        "invalid_api_key",
+                        "x-api-key",
+                    )
+                    .await;
+                return Err((
+                    AuthError::InvalidKey.status_code(),
+                    AuthError::InvalidKey.message().to_string(),
+                ));
             };
             (api_key, AuthMode::ApiKey, None, false)
         }
@@ -2076,9 +2098,12 @@ pub async fn auth_middleware(
                 (api_key, AuthMode::ApiKey, None, false)
             } else if key_store.is_ui_jwt_enabled() {
                 match key_store.authenticate_ui_jwt(&raw_token).await {
-                    Ok((api_key, allowed_projects, platform_admin)) => {
-                        (api_key, AuthMode::UiJwt, Some(allowed_projects), platform_admin)
-                    }
+                    Ok((api_key, allowed_projects, platform_admin)) => (
+                        api_key,
+                        AuthMode::UiJwt,
+                        Some(allowed_projects),
+                        platform_admin,
+                    ),
                     Err(err) => {
                         warn!("Invalid UI JWT token: {err}");
                         key_store
@@ -2123,7 +2148,12 @@ pub async fn auth_middleware(
             .authenticate_ui_session(&session_token, csrf_token.as_deref(), require_csrf)
             .await
         {
-            Ok((api_key, allowed_projects, platform_admin)) => (api_key, AuthMode::UiJwt, Some(allowed_projects), platform_admin),
+            Ok((api_key, allowed_projects, platform_admin)) => (
+                api_key,
+                AuthMode::UiJwt,
+                Some(allowed_projects),
+                platform_admin,
+            ),
             Err(err) => {
                 warn!("Invalid UI session: {err}");
                 key_store
@@ -2175,8 +2205,8 @@ pub async fn auth_middleware(
     Ok(next.run(request).await)
 }
 
-/// Extractor for getting AuthContext from request extensions.
-/// Use axum::Extension<AuthContext> instead, or access via request.extensions().
+/// Extractor for getting `AuthContext` from request extensions.
+/// Use `axum::Extension`<AuthContext> instead, or access via `request.extensions()`.
 pub fn get_auth_context(extensions: &axum::http::Extensions) -> Option<&AuthContext> {
     extensions.get::<AuthContext>()
 }
@@ -2429,7 +2459,8 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
         )
         .unwrap();
 
-        let (api_key, allowed_projects, _is_admin) = store.authenticate_ui_jwt(&token).await.unwrap();
+        let (api_key, allowed_projects, _is_admin) =
+            store.authenticate_ui_jwt(&token).await.unwrap();
 
         assert!(allowed_projects.contains(&project_a));
         assert!(allowed_projects.contains(&project_b));
@@ -2458,7 +2489,8 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
         )
         .unwrap();
 
-        let (api_key, allowed_projects, _is_admin) = store.authenticate_ui_jwt(&token).await.unwrap();
+        let (api_key, allowed_projects, _is_admin) =
+            store.authenticate_ui_jwt(&token).await.unwrap();
         assert_eq!(allowed_projects.len(), 1);
         assert!(api_key.scopes.contains(&"read".to_string()));
         assert!(api_key.scopes.contains(&"write".to_string()));
@@ -2498,7 +2530,8 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
         )
         .unwrap();
 
-        let (api_key, allowed_projects, _is_admin) = store.authenticate_ui_jwt(&token).await.unwrap();
+        let (api_key, allowed_projects, _is_admin) =
+            store.authenticate_ui_jwt(&token).await.unwrap();
         assert_eq!(allowed_projects.len(), 1);
         assert!(api_key.scopes.contains(&"read".to_string()));
         assert!(api_key.scopes.contains(&"write".to_string()));

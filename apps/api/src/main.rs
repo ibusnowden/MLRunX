@@ -1,4 +1,4 @@
-//! MLRunX API Server
+//! `MLRunX` API Server
 //!
 //! This is the monolith API server that handles:
 //! - HTTP REST API for queries and SDK HTTP transport
@@ -81,7 +81,7 @@ enum EndpointRbacTier {
 }
 
 impl EndpointRbacTier {
-    fn scope(self) -> &'static str {
+    const fn scope(self) -> &'static str {
         match self {
             Self::Read => "read",
             Self::Write => "write",
@@ -89,7 +89,7 @@ impl EndpointRbacTier {
         }
     }
 
-    fn env_flag_name(self) -> &'static str {
+    const fn env_flag_name(self) -> &'static str {
         match self {
             Self::Read => "MLRUNX_RBAC_READ_ENFORCEMENT_ENABLED",
             Self::Write => "MLRUNX_RBAC_WRITE_ENFORCEMENT_ENABLED",
@@ -190,7 +190,7 @@ fn validate_path_id(id: &str, name: &str) -> Result<(), (StatusCode, String)> {
     Ok(())
 }
 
-fn auth_mode_label(auth: &AuthContext) -> &'static str {
+const fn auth_mode_label(auth: &AuthContext) -> &'static str {
     match auth.auth_mode {
         AuthMode::ApiKey => "api_key",
         AuthMode::UiJwt => "ui_jwt",
@@ -239,6 +239,28 @@ fn should_enforce_scope(auth: &AuthContext, tier: EndpointRbacTier) -> bool {
     env_flag_default(tier.env_flag_name(), true)
 }
 
+fn usize_to_i32_saturating(value: usize) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+fn usize_to_i64_saturating(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn i64_to_u64_or_zero(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
+}
+
+fn retry_after_seconds(wait: f64) -> u64 {
+    if !wait.is_finite() || wait <= 0.0 {
+        return 1;
+    }
+    std::time::Duration::try_from_secs_f64(wait.ceil())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(u64::MAX)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn emit_audit_event(
     state: &AppState,
     auth: Option<&AuthContext>,
@@ -259,7 +281,11 @@ async fn emit_audit_event(
     };
 
     let (request_id, client_ip, user_agent) = if let Some(auth) = auth {
-        (Some(auth.request_id.clone()), auth.client_ip.clone(), auth.user_agent.clone())
+        (
+            Some(auth.request_id.clone()),
+            auth.client_ip.clone(),
+            auth.user_agent.clone(),
+        )
     } else {
         (None, None, None)
     };
@@ -291,6 +317,7 @@ async fn emit_audit_event(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn require_endpoint_access(
     state: &AppState,
     auth: &AuthContext,
@@ -402,10 +429,12 @@ fn require_ui_run_owner(auth: &AuthContext, run: &RunRow) -> Result<(), (StatusC
         return Ok(());
     }
 
-    let user_id = auth_user_id(auth).ok_or((
-        StatusCode::FORBIDDEN,
-        "Unable to resolve user identity for run authorization.".to_string(),
-    ))?;
+    let user_id = auth_user_id(auth).ok_or_else(|| {
+        (
+            StatusCode::FORBIDDEN,
+            "Unable to resolve user identity for run authorization.".to_string(),
+        )
+    })?;
 
     if let Some(owner_user_id) = run.created_by_user_id.as_deref() {
         if owner_user_id != user_id {
@@ -428,16 +457,18 @@ async fn require_ui_project_owner(
         return Ok(());
     }
 
-    let user_id = auth_user_id(auth).ok_or((
-        StatusCode::FORBIDDEN,
-        "Unable to resolve user identity for project authorization.".to_string(),
-    ))?;
+    let user_id = auth_user_id(auth).ok_or_else(|| {
+        (
+            StatusCode::FORBIDDEN,
+            "Unable to resolve user identity for project authorization.".to_string(),
+        )
+    })?;
 
     let memberships = state
         .sqlite_store
         .list_active_project_memberships(&user_id)
         .await
-        .map_err(|e| internal_error(e))?;
+        .map_err(internal_error)?;
 
     let owns_project = memberships
         .iter()
@@ -546,9 +577,10 @@ async fn maybe_shadow_write_run_to_postgres(
         }
     };
 
-    let tags_json = tags
-        .map(|t| serde_json::to_value(t).unwrap_or_else(|_| serde_json::json!({})))
-        .unwrap_or_else(|| serde_json::json!({}));
+    let tags_json = tags.map_or_else(
+        || serde_json::json!({}),
+        |t| serde_json::to_value(t).unwrap_or_else(|_| serde_json::json!({})),
+    );
 
     let result = RunRepository::create(CreateRunInput {
         id: Some(run_uuid),
@@ -599,16 +631,13 @@ async fn maybe_shadow_finish_run_in_postgres(run_id: &str, status: &str) {
             return;
         }
     };
-    let status_value = match postgres_run_status_from_http(status) {
-        Some(value) => value,
-        None => {
-            warn!(
-                run_id = %run_id,
-                status = %status,
-                "Skipped PostgreSQL run status shadow write for unknown status"
-            );
-            return;
-        }
+    let Some(status_value) = postgres_run_status_from_http(status) else {
+        warn!(
+            run_id = %run_id,
+            status = %status,
+            "Skipped PostgreSQL run status shadow write for unknown status"
+        );
+        return;
     };
 
     if let Err(err) = RunRepository::update_status(run_uuid, status_value, None).await {
@@ -697,6 +726,7 @@ fn build_clear_cookie(name: &str, secure: bool, same_site: &str) -> String {
     cookie
 }
 
+#[allow(clippy::too_many_lines)]
 async fn http_ui_auth_login(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -723,10 +753,7 @@ async fn http_ui_auth_login(
             .await;
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "Too many failed authentication attempts. Retry in {}s.",
-                retry_after
-            ),
+            format!("Too many failed authentication attempts. Retry in {retry_after}s."),
         ));
     }
 
@@ -978,20 +1005,20 @@ async fn http_list_projects(
             .sqlite_store
             .list_projects()
             .await
-            .map_err(|e| internal_error(e))?
+            .map_err(internal_error)?
     } else if let Some(allowed_projects) = auth.allowed_project_ids() {
         let project_ids: Vec<String> = allowed_projects.iter().cloned().collect();
         state
             .sqlite_store
             .list_projects_by_ids(&project_ids)
             .await
-            .map_err(|e| internal_error(e))?
+            .map_err(internal_error)?
     } else if let Some(project_id) = auth.project_id() {
         state
             .sqlite_store
             .list_projects_by_ids(&[project_id.to_string()])
             .await
-            .map_err(|e| internal_error(e))?
+            .map_err(internal_error)?
     } else {
         Vec::new()
     };
@@ -1000,6 +1027,7 @@ async fn http_list_projects(
     Ok(Json(ListProjectsResponse { projects }))
 }
 
+#[allow(clippy::too_many_lines)]
 async fn http_create_project(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -1015,10 +1043,12 @@ async fn http_create_project(
 
     if auth.is_ui_jwt() {
         auth.require_scope("write")?;
-        let user_id = auth_user_id(&auth).ok_or((
-            StatusCode::FORBIDDEN,
-            "Unable to resolve user identity for project creation.".to_string(),
-        ))?;
+        let user_id = auth_user_id(&auth).ok_or_else(|| {
+            (
+                StatusCode::FORBIDDEN,
+                "Unable to resolve user identity for project creation.".to_string(),
+            )
+        })?;
 
         let row = state
             .sqlite_store
@@ -1028,7 +1058,7 @@ async fn http_create_project(
                 if is_unique_project_name_error(&e) {
                     (
                         StatusCode::CONFLICT,
-                        format!("Project '{}' already exists.", name),
+                        format!("Project '{name}' already exists."),
                     )
                 } else {
                     internal_error(e)
@@ -1039,7 +1069,7 @@ async fn http_create_project(
             .sqlite_store
             .grant_project_membership(&row.id, &user_id, "owner", Some(&user_id))
             .await
-            .map_err(|e| internal_error(e))?;
+            .map_err(internal_error)?;
         maybe_shadow_write_project_to_postgres(&row).await;
 
         emit_audit_event(
@@ -1088,7 +1118,7 @@ async fn http_create_project(
             if is_unique_project_name_error(&e) {
                 (
                     StatusCode::CONFLICT,
-                    format!("Project '{}' already exists.", name),
+                    format!("Project '{name}' already exists."),
                 )
             } else {
                 internal_error(e)
@@ -1125,11 +1155,13 @@ async fn http_delete_project(
         .sqlite_store
         .get_project_by_id(&project_id)
         .await
-        .map_err(|e| internal_error(e))?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            format!("Project not found: '{project_id}'"),
-        ))?;
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Project not found: '{project_id}'"),
+            )
+        })?;
 
     require_endpoint_access(
         &state,
@@ -1360,7 +1392,7 @@ async fn http_admin_list_users(
         .sqlite_store
         .list_users()
         .await
-        .map_err(|e| internal_error(e))?
+        .map_err(internal_error)?
         .into_iter()
         .map(admin_user_response_from_row)
         .collect();
@@ -1401,7 +1433,7 @@ async fn http_admin_list_user_memberships(
         .sqlite_store
         .get_user_by_id(&user_id)
         .await
-        .map_err(|e| internal_error(e))?
+        .map_err(internal_error)?
         .is_some();
     if !user_exists {
         return Err((
@@ -1414,7 +1446,7 @@ async fn http_admin_list_user_memberships(
         .sqlite_store
         .list_user_project_memberships(&user_id, query.include_revoked)
         .await
-        .map_err(|e| internal_error(e))?
+        .map_err(internal_error)?
         .into_iter()
         .map(admin_membership_response_from_row)
         .collect();
@@ -1453,7 +1485,7 @@ async fn http_admin_disable_user(
         .sqlite_store
         .get_user_by_id(&user_id)
         .await
-        .map_err(|e| internal_error(e))?
+        .map_err(internal_error)?
         .is_some();
     if !user_exists {
         return Err((
@@ -1466,7 +1498,7 @@ async fn http_admin_disable_user(
         .sqlite_store
         .set_user_disabled(&user_id, true)
         .await
-        .map_err(|e| internal_error(e))?;
+        .map_err(internal_error)?;
 
     // Invalidate all active sessions for the disabled user so existing tokens
     // cannot be used after the account is disabled.
@@ -1474,17 +1506,19 @@ async fn http_admin_disable_user(
         .sqlite_store
         .revoke_all_sessions_for_user(&user_id)
         .await
-        .map_err(|e| internal_error(e))?;
+        .map_err(internal_error)?;
 
     let user = state
         .sqlite_store
         .get_user_by_id(&user_id)
         .await
-        .map_err(|e| internal_error(e))?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            format!("User not found: '{user_id}'"),
-        ))?;
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("User not found: '{user_id}'"),
+            )
+        })?;
 
     emit_audit_event(
         &state,
@@ -1515,7 +1549,7 @@ async fn http_admin_enable_user(
         .sqlite_store
         .get_user_by_id(&user_id)
         .await
-        .map_err(|e| internal_error(e))?
+        .map_err(internal_error)?
         .is_some();
     if !user_exists {
         return Err((
@@ -1528,17 +1562,19 @@ async fn http_admin_enable_user(
         .sqlite_store
         .set_user_disabled(&user_id, false)
         .await
-        .map_err(|e| internal_error(e))?;
+        .map_err(internal_error)?;
 
     let user = state
         .sqlite_store
         .get_user_by_id(&user_id)
         .await
-        .map_err(|e| internal_error(e))?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            format!("User not found: '{user_id}'"),
-        ))?;
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("User not found: '{user_id}'"),
+            )
+        })?;
 
     emit_audit_event(
         &state,
@@ -1569,7 +1605,7 @@ async fn http_admin_list_sessions(
             .sqlite_store
             .get_user_by_id(user_id)
             .await
-            .map_err(|e| internal_error(e))?
+            .map_err(internal_error)?
             .is_some();
         if !user_exists {
             return Err((
@@ -1583,7 +1619,7 @@ async fn http_admin_list_sessions(
         .sqlite_store
         .list_auth_sessions_for_admin(query.user_id.as_deref(), query.include_revoked)
         .await
-        .map_err(|e| internal_error(e))?
+        .map_err(internal_error)?
         .into_iter()
         .map(admin_session_response_from_row)
         .collect();
@@ -1626,7 +1662,7 @@ async fn http_admin_revoke_session(
         .sqlite_store
         .revoke_auth_session_by_id(&session_id)
         .await
-        .map_err(|e| internal_error(e))?;
+        .map_err(internal_error)?;
     if !revoked {
         return Err((
             StatusCode::NOT_FOUND,
@@ -1671,7 +1707,7 @@ async fn http_admin_list_audit_events(
             limit,
         )
         .await
-        .map_err(|e| internal_error(e))?
+        .map_err(internal_error)?
         .into_iter()
         .map(admin_audit_event_response_from_row)
         .collect();
@@ -1742,6 +1778,7 @@ async fn http_admin_rotate_bootstrap_key(
 }
 
 /// Initialize a run via HTTP (for SDK HTTP transport).
+#[allow(clippy::too_many_lines)]
 async fn http_init_run(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -1782,15 +1819,17 @@ async fn http_init_run(
 
     // Phase 1: explicit project boundary.
     // Run init must target an existing project_id; project creation is handled via /api/v1/projects.
-    let project_id = req.project_id.as_ref().ok_or((
-        StatusCode::BAD_REQUEST,
-        "project_id is required. Create a project first via POST /api/v1/projects.".to_string(),
-    ))?;
+    let project_id = req.project_id.as_ref().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "project_id is required. Create a project first via POST /api/v1/projects.".to_string(),
+        )
+    })?;
     let resolved_project_name = state
         .sqlite_store
         .get_project_name_by_id(project_id)
         .await
-        .map_err(|e| internal_error(e))?
+        .map_err(internal_error)?
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
@@ -1855,7 +1894,7 @@ async fn http_init_run(
             created_by_user_id.as_deref(),
         )
         .await
-        .map_err(|e| internal_error(e))?;
+        .map_err(internal_error)?;
 
     // Set initial tags if provided
     if let Some(tags) = &req.tags {
@@ -1865,7 +1904,7 @@ async fn http_init_run(
             .sqlite_store
             .set_tags(&run_id, &tag_pairs)
             .await
-            .map_err(|e| internal_error(e))?;
+            .map_err(internal_error)?;
     }
 
     if let Err(e) = state
@@ -1897,7 +1936,7 @@ async fn http_init_run(
     emit_audit_event(
         &state,
         Some(&auth),
-        Some(&project_id),
+        Some(project_id),
         Some(&run_id),
         "run.init",
         "run",
@@ -1970,6 +2009,7 @@ struct LogEventData {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(clippy::struct_field_names)]
 struct BatchStats {
     metric_count: Option<i64>,
     param_count: Option<i64>,
@@ -2030,6 +2070,7 @@ fn sanitize_run_event_message(raw: &str) -> Option<String> {
 }
 
 /// Ingest a batch of events via HTTP (for SDK HTTP transport).
+#[allow(clippy::too_many_lines)]
 async fn http_ingest_batch(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -2130,10 +2171,10 @@ async fn http_ingest_batch(
             &batch_id,
             seq,
             &payload_hash,
-            metric_count as i32,
-            param_count as i32,
-            tag_count as i32,
-            event_count as i32,
+            usize_to_i32_saturating(metric_count),
+            usize_to_i32_saturating(param_count),
+            usize_to_i32_saturating(tag_count),
+            usize_to_i32_saturating(event_count),
         )
         .await;
 
@@ -2158,8 +2199,7 @@ async fn http_ingest_batch(
             return Err((
                 StatusCode::CONFLICT,
                 format!(
-                    "Batch {} conflicts with existing batch (expected hash {}, got {})",
-                    batch_id, expected_hash, actual_hash
+                    "Batch {batch_id} conflicts with existing batch (expected hash {expected_hash}, got {actual_hash})"
                 ),
             ));
         }
@@ -2168,8 +2208,7 @@ async fn http_ingest_batch(
             actual_seq,
         } => {
             warnings.push(format!(
-                "Batch received out of order (expected seq >= {}, got {})",
-                expected_seq, actual_seq
+                "Batch received out of order (expected seq >= {expected_seq}, got {actual_seq})"
             ));
         }
         IdempotencyResult::New => {
@@ -2229,7 +2268,7 @@ async fn http_ingest_batch(
         .filter(|m| accepted_metrics.contains(&m.name))
         .filter_map(|m| {
             let finite_value = m.value.is_finite();
-            let finite_timestamp = m.timestamp.map(|ts| ts.is_finite()).unwrap_or(true);
+            let finite_timestamp = m.timestamp.is_none_or(f64::is_finite);
             if finite_value && finite_timestamp {
                 Some(MetricRow {
                     name: m.name.clone(),
@@ -2269,7 +2308,7 @@ async fn http_ingest_batch(
 
         state
             .sqlite_store
-            .increment_metrics_count(&req.run_id, accepted_metric_count as i64)
+            .increment_metrics_count(&req.run_id, usize_to_i64_saturating(accepted_metric_count))
             .await
             .map_err(|e| {
                 (
@@ -2311,12 +2350,9 @@ async fn http_ingest_batch(
         .events
         .iter()
         .filter_map(|event| {
-            let message = match sanitize_run_event_message(&event.message) {
-                Some(message) => message,
-                None => {
-                    dropped_event_count += 1;
-                    return None;
-                }
+            let Some(message) = sanitize_run_event_message(&event.message) else {
+                dropped_event_count += 1;
+                return None;
             };
             let timestamp = match event.timestamp {
                 Some(value) if !value.is_finite() => {
@@ -2399,7 +2435,7 @@ async fn http_ingest_batch(
 
     Ok(Json(IngestBatchHttpResponse {
         status: "ok".to_string(),
-        accepted: total as i64,
+        accepted: usize_to_i64_saturating(total),
         duplicate: false,
         warnings,
     }))
@@ -2452,7 +2488,7 @@ async fn http_finish_run(
         .sqlite_store
         .finish_run(&run_id, &req.status)
         .await
-        .map_err(|e| internal_error(e))?;
+        .map_err(internal_error)?;
     if let Err(e) = state
         .sqlite_store
         .insert_run_events(
@@ -2643,8 +2679,7 @@ fn validate_ui_key_name(name: Option<&str>) -> Result<String, (StatusCode, Strin
         return Err((
             StatusCode::BAD_REQUEST,
             format!(
-                "name must be between {} and {} characters.",
-                UI_KEY_NAME_MIN_LEN, UI_KEY_NAME_MAX_LEN
+                "name must be between {UI_KEY_NAME_MIN_LEN} and {UI_KEY_NAME_MAX_LEN} characters."
             ),
         ));
     }
@@ -2670,7 +2705,9 @@ fn validate_ui_key_name(name: Option<&str>) -> Result<String, (StatusCode, Strin
     Ok(trimmed.to_string())
 }
 
-fn resolve_ui_key_ttl_seconds(expires_in_seconds: Option<u64>) -> Result<u64, (StatusCode, String)> {
+fn resolve_ui_key_ttl_seconds(
+    expires_in_seconds: Option<u64>,
+) -> Result<u64, (StatusCode, String)> {
     let Some(ttl) = expires_in_seconds else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -2689,10 +2726,7 @@ fn resolve_ui_key_ttl_seconds(expires_in_seconds: Option<u64>) -> Result<u64, (S
     if ttl > max_ttl {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!(
-                "expires_in_seconds exceeds policy maximum of {} seconds.",
-                max_ttl
-            ),
+            format!("expires_in_seconds exceeds policy maximum of {max_ttl} seconds."),
         ));
     }
 
@@ -2715,10 +2749,7 @@ fn normalize_requested_scopes(scopes: &[String]) -> Result<Vec<String>, (StatusC
         if !valid_scopes.contains(&value.as_str()) {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!(
-                    "Invalid scope '{}'. Valid scopes: admin, write, read",
-                    scope
-                ),
+                format!("Invalid scope '{scope}'. Valid scopes: admin, write, read"),
             ));
         }
         if !normalized.iter().any(|existing| existing == &value) {
@@ -2733,10 +2764,12 @@ fn resolve_ui_key_project_id(
     auth: &AuthContext,
     requested_project_id: Option<&str>,
 ) -> Result<String, (StatusCode, String)> {
-    let allowed_projects = auth.allowed_project_ids().ok_or((
-        StatusCode::FORBIDDEN,
-        "UI session is missing project memberships.".to_string(),
-    ))?;
+    let allowed_projects = auth.allowed_project_ids().ok_or_else(|| {
+        (
+            StatusCode::FORBIDDEN,
+            "UI session is missing project memberships.".to_string(),
+        )
+    })?;
 
     let Some(project_id) = requested_project_id else {
         return Err((
@@ -2751,10 +2784,7 @@ fn resolve_ui_key_project_id(
 
     Err((
         StatusCode::FORBIDDEN,
-        format!(
-            "Access denied: cannot manage API keys for project '{}'.",
-            project_id
-        ),
+        format!("Access denied: cannot manage API keys for project '{project_id}'."),
     ))
 }
 
@@ -2766,10 +2796,7 @@ fn ensure_requested_scopes_within_caller(
         if !auth.api_key.has_scope(scope) {
             return Err((
                 StatusCode::FORBIDDEN,
-                format!(
-                    "Insufficient permissions: your UI session cannot grant '{}' scope.",
-                    scope
-                ),
+                format!("Insufficient permissions: your UI session cannot grant '{scope}' scope."),
             ));
         }
     }
@@ -2785,12 +2812,13 @@ fn filter_keys_to_ui_memberships(auth: &AuthContext, keys: Vec<auth::ApiKey>) ->
         .filter(|key| {
             key.project_id
                 .as_ref()
-                .map_or(false, |project_id| allowed_projects.contains(project_id))
+                .is_some_and(|project_id| allowed_projects.contains(project_id))
         })
         .collect()
 }
 
 /// Create a new API key.
+#[allow(clippy::too_many_lines)]
 async fn http_create_key(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -2960,13 +2988,20 @@ async fn http_create_key(
         .await?;
     }
 
+    let key_owner_user_id = if auth.is_ui_jwt() {
+        auth_user_id(&auth)
+    } else {
+        None
+    };
+
     let (raw_key, key) = state
         .key_store
-        .create_key(
+        .create_key_with_owner(
             target_project_id.clone(),
             target_name.clone(),
             normalized_scopes.clone(),
             target_expires_in_seconds,
+            key_owner_user_id.clone(),
         )
         .await;
 
@@ -2990,6 +3025,7 @@ async fn http_create_key(
         serde_json::json!({
             "scopes": normalized_scopes,
             "expires_in_seconds": target_expires_in_seconds,
+            "created_by_user_id": key_owner_user_id,
         }),
     )
     .await;
@@ -3087,7 +3123,7 @@ async fn http_list_keys(
     }))
 }
 
-/// Revoke an API key by its key_id.
+/// Revoke an API key by its `key_id`.
 async fn http_revoke_key(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -3155,7 +3191,7 @@ async fn http_revoke_key(
                 serde_json::json!({ "status": "ok", "revoked": key_id }),
             ))
         }
-        None => Err((StatusCode::NOT_FOUND, format!("Key not found: {}", key_id))),
+        None => Err((StatusCode::NOT_FOUND, format!("Key not found: {key_id}"))),
     }
 }
 
@@ -3244,7 +3280,7 @@ async fn http_create_share_token(
             expires_at.as_deref(),
         )
         .await
-        .map_err(|e| internal_error(e))?;
+        .map_err(internal_error)?;
 
     info!(run_id = %run_id, "Created share token");
 
@@ -3264,7 +3300,7 @@ async fn http_create_share_token(
     .await;
 
     Ok(Json(CreateShareResponse {
-        share_url: format!("/api/v1/shared/{}", token),
+        share_url: format!("/api/v1/shared/{token}"),
         token,
         run_id,
         expires_at,
@@ -3291,7 +3327,7 @@ async fn http_get_shared_run(
         .sqlite_store
         .get_run(&share.run_id)
         .await
-        .map_err(|e| internal_error(e))?;
+        .map_err(internal_error)?;
 
     let tags = state
         .sqlite_store
@@ -3312,8 +3348,8 @@ async fn http_get_shared_run(
         project_id: run.project_id,
         name: run.name,
         status: run.status,
-        metrics_count: run.metrics_count as u64,
-        params_count: run.params_count as u64,
+        metrics_count: i64_to_u64_or_zero(run.metrics_count),
+        params_count: i64_to_u64_or_zero(run.params_count),
         tags,
         created_at: run.created_at,
         updated_at: run.updated_at,
@@ -3354,7 +3390,7 @@ async fn http_get_shared_metrics(
         .sqlite_store
         .get_metrics(&share.run_id, &names, query.max_points)
         .await
-        .map_err(|e| internal_error(e))?;
+        .map_err(internal_error)?;
 
     let available_metrics = state
         .sqlite_store
@@ -3506,7 +3542,8 @@ struct ListRunsResponse {
     offset: usize,
 }
 
-/// List runs with optional filtering (queries from SQLite).
+/// List runs with optional filtering (queries from `SQLite`).
+#[allow(clippy::too_many_lines)]
 async fn http_list_runs(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -3552,10 +3589,7 @@ async fn http_list_runs(
                 .await;
                 return Err((
                     StatusCode::FORBIDDEN,
-                    format!(
-                        "Access denied: this user is not a member of project '{}'.",
-                        requested
-                    ),
+                    format!("Access denied: this user is not a member of project '{requested}'."),
                 ));
             }
             Some(requested.clone())
@@ -3591,8 +3625,7 @@ async fn http_list_runs(
                         return Err((
                             StatusCode::FORBIDDEN,
                             format!(
-                                "Access denied: your key is scoped to project '{}', cannot query '{}'.",
-                                scoped_project, requested
+                                "Access denied: your key is scoped to project '{scoped_project}', cannot query '{requested}'."
                             ),
                         ));
                     }
@@ -3604,10 +3637,12 @@ async fn http_list_runs(
     };
 
     let owner_user_filter = if auth.is_ui_jwt() && !auth.is_platform_admin {
-        Some(auth_user_id(&auth).ok_or((
-            StatusCode::FORBIDDEN,
-            "Unable to resolve user identity for run listing.".to_string(),
-        ))?)
+        Some(auth_user_id(&auth).ok_or_else(|| {
+            (
+                StatusCode::FORBIDDEN,
+                "Unable to resolve user identity for run listing.".to_string(),
+            )
+        })?)
     } else {
         None
     };
@@ -3624,7 +3659,7 @@ async fn http_list_runs(
             offset,
         )
         .await
-        .map_err(|e| internal_error(e))?;
+        .map_err(internal_error)?;
 
     // Convert to response format
     let mut runs_response = Vec::new();
@@ -3643,8 +3678,8 @@ async fn http_list_runs(
             project_id: run.project_id,
             name: run.name,
             status: run.status,
-            metrics_count: run.metrics_count as u64,
-            params_count: run.params_count as u64,
+            metrics_count: i64_to_u64_or_zero(run.metrics_count),
+            params_count: i64_to_u64_or_zero(run.params_count),
             tags,
             created_at: run.created_at,
             updated_at: run.updated_at,
@@ -3731,8 +3766,8 @@ async fn http_get_run(
         project_id: run.project_id.clone(),
         name: run.name.clone(),
         status: run.status.clone(),
-        metrics_count: run.metrics_count as u64,
-        params_count: run.params_count as u64,
+        metrics_count: i64_to_u64_or_zero(run.metrics_count),
+        params_count: i64_to_u64_or_zero(run.params_count),
         tags,
         created_at: run.created_at.clone(),
         updated_at: run.updated_at.clone(),
@@ -3760,7 +3795,7 @@ struct MetricsQuery {
     end_step: Option<i64>,
 }
 
-fn default_max_points() -> usize {
+const fn default_max_points() -> usize {
     1000
 }
 
@@ -3771,7 +3806,7 @@ struct RunEventsQuery {
     limit: usize,
 }
 
-fn default_run_events_limit() -> usize {
+const fn default_run_events_limit() -> usize {
     200
 }
 
@@ -3808,7 +3843,7 @@ async fn http_get_metrics(
         .sqlite_store
         .get_run(&run_id)
         .await
-        .map_err(|_| (StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)))?;
+        .map_err(|_| (StatusCode::NOT_FOUND, format!("Run not found: {run_id}")))?;
     require_endpoint_access(
         &state,
         &auth,
@@ -3838,7 +3873,7 @@ async fn http_get_metrics(
         .sqlite_store
         .get_metrics(&run_id, &names, query.max_points)
         .await
-        .map_err(|e| internal_error(e))?;
+        .map_err(internal_error)?;
 
     // Get available metric names
     let available_metrics = state
@@ -3887,7 +3922,7 @@ async fn http_get_run_events(
         .sqlite_store
         .get_run(&run_id)
         .await
-        .map_err(|_| (StatusCode::NOT_FOUND, format!("Run not found: {}", run_id)))?;
+        .map_err(|_| (StatusCode::NOT_FOUND, format!("Run not found: {run_id}")))?;
 
     require_endpoint_access(
         &state,
@@ -3908,7 +3943,7 @@ async fn http_get_run_events(
         .sqlite_store
         .list_run_events(&run_id, query.after_id, fetch_limit)
         .await
-        .map_err(|e| internal_error(e))?;
+        .map_err(internal_error)?;
 
     let has_more = rows.len() > limit;
     if has_more {
@@ -4041,7 +4076,7 @@ async fn http_compare_runs(
             .sqlite_store
             .get_metrics(run_id, &names, req.max_points)
             .await
-            .map_err(|e| internal_error(e))?;
+            .map_err(internal_error)?;
 
         let series: Vec<services::MetricSeries> = sqlite_series
             .into_iter()
@@ -4111,7 +4146,7 @@ struct HttpRateLimiter {
     capacity: u32,
     /// Tokens added per second.
     refill_rate: f64,
-    /// Per-IP state: (tokens_remaining, last_refill_instant).
+    /// Per-IP state: (`tokens_remaining`, `last_refill_instant`).
     buckets: tokio::sync::Mutex<std::collections::HashMap<String, (f64, std::time::Instant)>>,
 }
 
@@ -4136,18 +4171,20 @@ impl HttpRateLimiter {
         Self::new(capacity, refill_rate)
     }
 
-    /// Try to consume one token. Returns Ok(()) if allowed, Err(retry_after_secs) if denied.
+    /// Try to consume one token. Returns Ok(()) if allowed, `Err(retry_after_secs)` if denied.
     async fn check(&self, client_ip: &str) -> Result<(), u64> {
         let now = std::time::Instant::now();
         let mut buckets = self.buckets.lock().await;
 
         let (tokens, last_refill) = buckets
             .entry(client_ip.to_string())
-            .or_insert((self.capacity as f64, now));
+            .or_insert_with(|| (f64::from(self.capacity), now));
 
         // Refill tokens based on elapsed time.
         let elapsed = now.duration_since(*last_refill).as_secs_f64();
-        *tokens = (*tokens + elapsed * self.refill_rate).min(self.capacity as f64);
+        *tokens = elapsed
+            .mul_add(self.refill_rate, *tokens)
+            .min(f64::from(self.capacity));
         *last_refill = now;
 
         if *tokens >= 1.0 {
@@ -4155,13 +4192,15 @@ impl HttpRateLimiter {
             Ok(())
         } else {
             let wait = (1.0 - *tokens) / self.refill_rate;
-            Err(wait.ceil() as u64)
+            Err(retry_after_seconds(wait))
         }
     }
 
     /// Periodically prune stale entries to prevent memory growth.
     async fn prune_stale(&self) {
-        let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(300);
+        let cutoff = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(300))
+            .unwrap();
         let mut buckets = self.buckets.lock().await;
         buckets.retain(|_, (_, last_seen)| *last_seen > cutoff);
     }
@@ -4195,6 +4234,7 @@ fn extract_client_ip(headers: &HeaderMap) -> String {
 // Server Setup
 // =============================================================================
 
+#[allow(clippy::too_many_lines)]
 fn build_http_router(state: AppState) -> Router {
     let ui_jwt_enabled = state.key_store.is_ui_jwt_enabled();
 
@@ -4334,42 +4374,50 @@ fn build_http_router(state: AppState) -> Router {
     }
 
     // Security response headers + rate limiting applied to every response.
-    use axum::middleware::from_fn;
-    let rate_limiter_clone = rate_limiter.clone();
-    let security_and_rate_limit = from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
-        let rl = rate_limiter_clone.clone();
-        async move {
-            let client_ip = extract_client_ip(req.headers());
-            if let Err(retry_after) = rl.check(&client_ip).await {
-                let mut response = axum::response::Response::new(axum::body::Body::from(
-                    "Too many requests".to_string(),
-                ));
-                *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
-                response.headers_mut().insert(
-                    "retry-after",
-                    HeaderValue::from_str(&retry_after.to_string())
-                        .unwrap_or_else(|_| HeaderValue::from_static("1")),
-                );
-                return response;
-            }
+    let rate_limiter_clone = rate_limiter;
+    let security_and_rate_limit = middleware::from_fn(
+        move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let rl = rate_limiter_clone.clone();
+            async move {
+                let client_ip = extract_client_ip(req.headers());
+                if let Err(retry_after) = rl.check(&client_ip).await {
+                    let mut response = axum::response::Response::new(axum::body::Body::from(
+                        "Too many requests".to_string(),
+                    ));
+                    *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+                    response.headers_mut().insert(
+                        "retry-after",
+                        HeaderValue::from_str(&retry_after.to_string())
+                            .unwrap_or_else(|_| HeaderValue::from_static("1")),
+                    );
+                    return response;
+                }
 
-            let req_id = uuid::Uuid::now_v7().to_string();
-            let mut response = next.run(req).await;
-            let headers = response.headers_mut();
-            headers.insert("x-request-id", HeaderValue::from_str(&req_id).unwrap_or_else(|_| HeaderValue::from_static("unknown")));
-            headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
-            headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
-            headers.insert(
-                "referrer-policy",
-                HeaderValue::from_static("strict-origin-when-cross-origin"),
-            );
-            headers.insert(
-                "x-permitted-cross-domain-policies",
-                HeaderValue::from_static("none"),
-            );
-            response
-        }
-    });
+                let req_id = uuid::Uuid::now_v7().to_string();
+                let mut response = next.run(req).await;
+                let headers = response.headers_mut();
+                headers.insert(
+                    "x-request-id",
+                    HeaderValue::from_str(&req_id)
+                        .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+                );
+                headers.insert(
+                    "x-content-type-options",
+                    HeaderValue::from_static("nosniff"),
+                );
+                headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+                headers.insert(
+                    "referrer-policy",
+                    HeaderValue::from_static("strict-origin-when-cross-origin"),
+                );
+                headers.insert(
+                    "x-permitted-cross-domain-policies",
+                    HeaderValue::from_static("none"),
+                );
+                response
+            }
+        },
+    );
 
     // Combine routes
     Router::new()
@@ -4424,7 +4472,7 @@ async fn main() {
     // Default behavior: persistent sqlite-backed store.
     // Rollback/fallback: set MLRUNX_API_KEYS_IN_MEMORY=1 to use legacy in-memory behavior.
     let use_in_memory_keys = std::env::var("MLRUNX_API_KEYS_IN_MEMORY")
-        .map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"));
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
     let key_store = if use_in_memory_keys {
         info!("Using in-memory API key store (MLRUNX_API_KEYS_IN_MEMORY enabled)");
         Arc::new(ApiKeyStore::new())
@@ -4437,19 +4485,17 @@ async fn main() {
         panic!("Refusing to start: {err}");
     }
 
-    if key_store.using_insecure_default_hmac_secret() && is_production_environment() {
-        panic!(
-            "Refusing to start: MLRUNX_AUTH_HMAC_SECRET is not configured in production. \
-Set MLRUNX_AUTH_HMAC_SECRET (or MLRUNX_JWT_SECRET) and restart."
-        );
-    }
+    assert!(
+        !(key_store.using_insecure_default_hmac_secret() && is_production_environment()),
+        "Refusing to start: MLRUNX_AUTH_HMAC_SECRET is not configured in production. \
+    Set MLRUNX_AUTH_HMAC_SECRET (or MLRUNX_JWT_SECRET) and restart."
+    );
 
-    if key_store.is_auth_disabled() && is_production_environment() {
-        panic!(
-            "Refusing to start: authentication is disabled in production. \
-Set MLRUNX_AUTH_MODE=api_key or MLRUNX_AUTH_MODE=hybrid and restart."
-        );
-    }
+    assert!(
+        !(key_store.is_auth_disabled() && is_production_environment()),
+        "Refusing to start: authentication is disabled in production. \
+    Set MLRUNX_AUTH_MODE=api_key or MLRUNX_AUTH_MODE=hybrid and restart."
+    );
     if key_store.is_auth_disabled() {
         warn!("Authentication is disabled; use only in development/test environments.");
     }
@@ -5193,6 +5239,21 @@ mod tests {
                 .starts_with("mlrunx_")
         );
 
+        let stored_keys = harness
+            .sqlite_store
+            .list_api_keys(Some(&harness.primary_project_id))
+            .await
+            .expect("Failed to list keys from sqlite");
+        let stored_created_key = stored_keys
+            .iter()
+            .find(|key| key.id == created_key_id)
+            .expect("Created key should be persisted in sqlite");
+        assert_eq!(
+            stored_created_key.created_by_user_id.as_deref(),
+            Some(harness.user_id.as_str()),
+            "UI-created keys must retain owner user_id for run visibility"
+        );
+
         let list_response = harness
             .app
             .clone()
@@ -5305,6 +5366,154 @@ mod tests {
             .expect("Create key request failed");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_ui_created_key_sdk_run_is_listed_with_metrics_in_ui() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let create_key_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/keys")
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": harness.primary_project_id.clone(),
+                            "name": "sdk-run-key",
+                            "scopes": ["read", "write"],
+                            "expires_in_seconds": 3600
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create key request"),
+            )
+            .await
+            .expect("Create key request failed");
+        assert_eq!(create_key_response.status(), StatusCode::OK);
+        let created_key_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_key_response).await)
+                .expect("Create key response should be JSON");
+        let sdk_api_key = created_key_payload["api_key"]
+            .as_str()
+            .expect("Create key response must include api_key")
+            .to_string();
+
+        let init_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs")
+                    .header("content-type", "application/json")
+                    .header("x-api-key", &sdk_api_key)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": harness.primary_project_id.clone(),
+                            "name": "sdk-visible-run"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build init run request"),
+            )
+            .await
+            .expect("Init run request failed");
+        assert_eq!(init_response.status(), StatusCode::OK);
+        let init_payload: serde_json::Value =
+            serde_json::from_str(&response_text(init_response).await)
+                .expect("Init run response should be JSON");
+        let run_id = init_payload["run_id"]
+            .as_str()
+            .expect("Init run response must include run_id")
+            .to_string();
+
+        let ingest_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ingest/batch")
+                    .header("content-type", "application/json")
+                    .header("x-api-key", &sdk_api_key)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "run_id": run_id,
+                            "metrics": [
+                                { "name": "loss", "value": 1.23, "step": 1 }
+                            ],
+                            "params": [],
+                            "tags": [],
+                            "events": []
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build ingest request"),
+            )
+            .await
+            .expect("Ingest request failed");
+        assert_eq!(ingest_response.status(), StatusCode::OK);
+
+        let list_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/runs")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .body(Body::empty())
+                    .expect("Failed to build list runs request"),
+            )
+            .await
+            .expect("List runs request failed");
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_payload: serde_json::Value =
+            serde_json::from_str(&response_text(list_response).await)
+                .expect("List runs response should be JSON");
+        let listed_runs = list_payload["runs"]
+            .as_array()
+            .expect("runs must be an array");
+        assert!(
+            listed_runs
+                .iter()
+                .any(|run| { run["run_id"].as_str().map_or(false, |id| id == run_id) })
+        );
+
+        let metrics_uri = format!("/api/v1/runs/{run_id}/metrics");
+        let metrics_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(metrics_uri.as_str())
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .body(Body::empty())
+                    .expect("Failed to build metrics request"),
+            )
+            .await
+            .expect("Metrics request failed");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let metrics_payload: serde_json::Value =
+            serde_json::from_str(&response_text(metrics_response).await)
+                .expect("Metrics response should be JSON");
+        let available_metrics = metrics_payload["available_metrics"]
+            .as_array()
+            .expect("available_metrics should be an array");
+        assert!(
+            available_metrics
+                .iter()
+                .any(|name| name.as_str().map_or(false, |value| value == "loss"))
+        );
     }
 
     #[tokio::test]

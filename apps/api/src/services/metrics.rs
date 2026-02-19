@@ -57,7 +57,7 @@ pub struct MetricsQueryRequest {
     pub end_step: Option<i64>,
 }
 
-fn default_max_points() -> usize {
+const fn default_max_points() -> usize {
     1000
 }
 
@@ -74,6 +74,11 @@ pub struct MetricsQueryResponse {
 ///
 /// Uses bucket aggregation: divides the step range into N buckets
 /// and computes mean/min/max for each bucket.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 pub fn downsample_points(points: &[MetricPoint], max_points: usize) -> Vec<AggregatedPoint> {
     if points.is_empty() {
         return vec![];
@@ -116,8 +121,8 @@ pub fn downsample_points(points: &[MetricPoint], max_points: usize) -> Vec<Aggre
         .into_iter()
         .map(|(bucket_idx, values)| {
             let sum: f64 = values.iter().sum();
-            let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
-            let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             let count = values.len();
 
             AggregatedPoint {
@@ -188,8 +193,8 @@ impl RunMetrics {
                 let filtered: Vec<MetricPoint> = points
                     .into_iter()
                     .filter(|p| {
-                        start_step.map_or(true, |s| p.step >= s)
-                            && end_step.map_or(true, |e| p.step <= e)
+                        start_step.is_none_or(|s| p.step >= s)
+                            && end_step.is_none_or(|e| p.step <= e)
                     })
                     .collect();
 

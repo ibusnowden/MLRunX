@@ -1,7 +1,9 @@
-//! PostgreSQL storage implementation for metadata.
+//! `PostgreSQL` storage implementation for metadata.
 //!
 //! Provides relational storage for projects, runs, parameters, and artifacts.
-//! See: /migrations/postgres/001_metadata_schema.sql for schema.
+//! See: /`migrations/postgres/001_metadata_schema.sql` for schema.
+
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -9,7 +11,7 @@ use tokio_postgres::{NoTls, Row, types::ToSql};
 use tracing::{instrument, warn};
 use uuid::Uuid;
 
-/// Errors that can occur in PostgreSQL operations.
+/// Errors that can occur in `PostgreSQL` operations.
 #[derive(Error, Debug)]
 pub enum PostgresError {
     #[error("Database error: {0}")]
@@ -25,10 +27,10 @@ pub enum PostgresError {
     Validation(String),
 }
 
-/// Configuration for PostgreSQL connection.
+/// Configuration for `PostgreSQL` connection.
 #[derive(Debug, Clone)]
 pub struct PostgresConfig {
-    /// Connection URL (e.g., "postgres://user:pass@localhost:5432/mlrunx")
+    /// Connection URL (e.g., "<postgres://user:pass@localhost:5432/mlrunx>")
     pub url: String,
     /// Maximum connections in pool
     pub max_connections: u32,
@@ -65,7 +67,7 @@ impl PostgresConfig {
     }
 }
 
-/// Run status enum matching PostgreSQL enum.
+/// Run status enum matching `PostgreSQL` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
@@ -88,7 +90,7 @@ impl std::fmt::Display for RunStatus {
     }
 }
 
-/// Artifact type enum matching PostgreSQL enum.
+/// Artifact type enum matching `PostgreSQL` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArtifactType {
@@ -175,7 +177,7 @@ impl Parameter {
             "json" => self
                 .value_json
                 .as_ref()
-                .map(|v| v.to_string())
+                .map(std::string::ToString::to_string)
                 .unwrap_or_default(),
             _ => String::new(),
         }
@@ -184,6 +186,7 @@ impl Parameter {
 
 /// An artifact (file/model) produced by a run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_field_names)]
 pub struct Artifact {
     pub id: Uuid,
     pub run_id: Uuid,
@@ -412,11 +415,11 @@ impl ProjectRepository {
         let client = connect_client().await?;
         let row = client
             .query_one(
-                r#"
+                r"
                 INSERT INTO projects (id, name, description, owner_id, settings)
                 VALUES (COALESCE($1, uuid_generate_v4()), $2, $3, $4, COALESCE($5, '{}'::jsonb))
                 RETURNING id, name, description, owner_id, settings, created_at, updated_at
-                "#,
+                ",
                 &[
                     &input.id,
                     &input.name,
@@ -447,11 +450,11 @@ impl ProjectRepository {
         let client = connect_client().await?;
         let row = client
             .query_opt(
-                r#"
+                r"
                 SELECT id, name, description, owner_id, settings, created_at, updated_at
                 FROM projects
                 WHERE id = $1 AND deleted_at IS NULL
-                "#,
+                ",
                 &[&id],
             )
             .await
@@ -467,11 +470,11 @@ impl ProjectRepository {
         let client = connect_client().await?;
         let row = client
             .query_opt(
-                r#"
+                r"
                 SELECT id, name, description, owner_id, settings, created_at, updated_at
                 FROM projects
                 WHERE name = $1 AND deleted_at IS NULL
-                "#,
+                ",
                 &[&name],
             )
             .await
@@ -516,7 +519,7 @@ impl RunRepository {
         let status = RunStatus::Running.to_string();
         let row = client
             .query_one(
-                r#"
+                r"
                 INSERT INTO runs
                     (id, project_id, name, description, status, parent_run_id, tags, system_info, git_info)
                 VALUES
@@ -525,7 +528,7 @@ impl RunRepository {
                     id, project_id, name, description, status::text AS status, exit_code, error_message,
                     parent_run_id, resume_token, tags, system_info, git_info,
                     created_at, updated_at, started_at, finished_at, duration_seconds
-                "#,
+                ",
                 &[
                     &input.id,
                     &input.project_id,
@@ -560,14 +563,14 @@ impl RunRepository {
         let client = connect_client().await?;
         let row = client
             .query_opt(
-                r#"
+                r"
                 SELECT
                     id, project_id, name, description, status::text AS status, exit_code, error_message,
                     parent_run_id, resume_token, tags, system_info, git_info,
                     created_at, updated_at, started_at, finished_at, duration_seconds
                 FROM runs
                 WHERE id = $1 AND deleted_at IS NULL
-                "#,
+                ",
                 &[&id],
             )
             .await
@@ -582,46 +585,53 @@ impl RunRepository {
     pub async fn list(filter: ListRunsFilter) -> Result<Vec<Run>, PostgresError> {
         let client = connect_client().await?;
         let mut sql = String::from(
-            r#"
+            r"
             SELECT
                 id, project_id, name, description, status::text AS status, exit_code, error_message,
                 parent_run_id, resume_token, tags, system_info, git_info,
                 created_at, updated_at, started_at, finished_at, duration_seconds
             FROM runs
             WHERE deleted_at IS NULL
-            "#,
+            ",
         );
         let mut params: Vec<Box<dyn ToSql + Sync>> = Vec::new();
 
         if let Some(project_id) = filter.project_id {
-            sql.push_str(&format!(" AND project_id = ${}", params.len() + 1));
+            write!(&mut sql, " AND project_id = ${}", params.len() + 1)
+                .expect("writing to a String should not fail");
             params.push(Box::new(project_id));
         }
         if let Some(status) = filter.status {
-            sql.push_str(&format!(" AND status = ${}::run_status", params.len() + 1));
+            write!(&mut sql, " AND status = ${}::run_status", params.len() + 1)
+                .expect("writing to a String should not fail");
             params.push(Box::new(status.to_string()));
         }
         if let Some(parent_run_id) = filter.parent_run_id {
-            sql.push_str(&format!(" AND parent_run_id = ${}", params.len() + 1));
+            write!(&mut sql, " AND parent_run_id = ${}", params.len() + 1)
+                .expect("writing to a String should not fail");
             params.push(Box::new(parent_run_id));
         }
         if let Some(tags) = filter.tags {
-            sql.push_str(&format!(" AND tags @> ${}::jsonb", params.len() + 1));
+            write!(&mut sql, " AND tags @> ${}::jsonb", params.len() + 1)
+                .expect("writing to a String should not fail");
             params.push(Box::new(tags));
         }
 
         sql.push_str(" ORDER BY created_at DESC");
 
         if let Some(limit) = filter.limit {
-            sql.push_str(&format!(" LIMIT ${}", params.len() + 1));
+            write!(&mut sql, " LIMIT ${}", params.len() + 1)
+                .expect("writing to a String should not fail");
             params.push(Box::new(limit));
         }
         if let Some(offset) = filter.offset {
-            sql.push_str(&format!(" OFFSET ${}", params.len() + 1));
+            write!(&mut sql, " OFFSET ${}", params.len() + 1)
+                .expect("writing to a String should not fail");
             params.push(Box::new(offset));
         }
 
-        let params_refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&(dyn ToSql + Sync)> =
+            params.iter().map(std::convert::AsRef::as_ref).collect();
         let rows = client
             .query(sql.as_str(), params_refs.as_slice())
             .await
@@ -641,7 +651,7 @@ impl RunRepository {
         let status_text = status.to_string();
         let row = client
             .query_opt(
-                r#"
+                r"
                 UPDATE runs
                 SET status = $2::run_status, error_message = $3
                 WHERE id = $1 AND deleted_at IS NULL
@@ -649,7 +659,7 @@ impl RunRepository {
                     id, project_id, name, description, status::text AS status, exit_code, error_message,
                     parent_run_id, resume_token, tags, system_info, git_info,
                     created_at, updated_at, started_at, finished_at, duration_seconds
-                "#,
+                ",
                 &[&id, &status_text, &error_message],
             )
             .await
@@ -665,7 +675,7 @@ impl RunRepository {
         let client = connect_client().await?;
         let row = client
             .query_opt(
-                r#"
+                r"
                 UPDATE runs
                 SET tags = $2
                 WHERE id = $1 AND deleted_at IS NULL
@@ -673,7 +683,7 @@ impl RunRepository {
                     id, project_id, name, description, status::text AS status, exit_code, error_message,
                     parent_run_id, resume_token, tags, system_info, git_info,
                     created_at, updated_at, started_at, finished_at, duration_seconds
-                "#,
+                ",
                 &[&id, &tags],
             )
             .await
@@ -786,12 +796,12 @@ impl ParameterRepository {
         let client = connect_client().await?;
         let rows = client
             .query(
-                r#"
+                r"
                 SELECT id, run_id, name, value_string, value_float, value_int, value_bool, value_json, value_type, created_at
                 FROM parameters
                 WHERE run_id = $1
                 ORDER BY name ASC
-                "#,
+                ",
                 &[&run_id],
             )
             .await
@@ -814,7 +824,7 @@ impl ArtifactRepository {
         let artifact_type = input.artifact_type.to_string();
         let row = client
             .query_one(
-                r#"
+                r"
                 INSERT INTO artifacts
                     (run_id, name, type, description, storage_path, storage_type, size_bytes, mime_type, checksum_md5, checksum_sha256, metadata)
                 VALUES
@@ -822,7 +832,7 @@ impl ArtifactRepository {
                 RETURNING
                     id, run_id, name, type::text AS artifact_type, description, storage_path, storage_type,
                     size_bytes, mime_type, checksum_md5, checksum_sha256, metadata, created_at
-                "#,
+                ",
                 &[
                     &input.run_id,
                     &input.name,
@@ -865,13 +875,13 @@ impl ArtifactRepository {
         let client = connect_client().await?;
         let row = client
             .query_opt(
-                r#"
+                r"
                 SELECT
                     id, run_id, name, type::text AS artifact_type, description, storage_path, storage_type,
                     size_bytes, mime_type, checksum_md5, checksum_sha256, metadata, created_at
                 FROM artifacts
                 WHERE id = $1
-                "#,
+                ",
                 &[&id],
             )
             .await
@@ -887,14 +897,14 @@ impl ArtifactRepository {
         let client = connect_client().await?;
         let rows = client
             .query(
-                r#"
+                r"
                 SELECT
                     id, run_id, name, type::text AS artifact_type, description, storage_path, storage_type,
                     size_bytes, mime_type, checksum_md5, checksum_sha256, metadata, created_at
                 FROM artifacts
                 WHERE run_id = $1
                 ORDER BY created_at DESC
-                "#,
+                ",
                 &[&run_id],
             )
             .await

@@ -5,7 +5,7 @@
 //! - Unique metric names per run
 //! - Total tags per project
 //!
-//! Prevents high-cardinality data from overwhelming ClickHouse.
+//! Prevents high-cardinality data from overwhelming `ClickHouse`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -15,6 +15,7 @@ use tracing::{debug, warn};
 
 /// Configuration for cardinality limits.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_field_names)]
 pub struct LimitsConfig {
     /// Maximum tag keys per run
     pub max_tag_keys_per_run: usize,
@@ -123,7 +124,7 @@ struct RunCardinality {
 /// Per-project cardinality tracking.
 #[derive(Debug, Default)]
 struct ProjectCardinality {
-    /// Total unique (tag_key, tag_value) pairs for this project
+    /// Total unique (`tag_key`, `tag_value`) pairs for this project
     tag_pairs: HashSet<(String, String)>,
 }
 
@@ -159,7 +160,7 @@ impl CardinalityTracker {
     }
 
     /// Get the limits configuration.
-    pub fn config(&self) -> &LimitsConfig {
+    pub const fn config(&self) -> &LimitsConfig {
         &self.config
     }
 
@@ -207,32 +208,31 @@ impl CardinalityTracker {
             }
 
             // Check run tag key limit (only for new keys)
-            if !run.tag_keys.contains(key) {
-                if run.tag_keys.len() >= self.config.max_tag_keys_per_run {
-                    if result.dropped_tags.is_empty() {
-                        result.warnings.push(format!(
-                            "Run {} has reached max tag keys ({})",
-                            run_id, self.config.max_tag_keys_per_run
-                        ));
-                    }
-                    result.dropped_tags.push((key.clone(), value.clone()));
-                    continue;
+            if !run.tag_keys.contains(key) && run.tag_keys.len() >= self.config.max_tag_keys_per_run
+            {
+                if result.dropped_tags.is_empty() {
+                    result.warnings.push(format!(
+                        "Run {} has reached max tag keys ({})",
+                        run_id, self.config.max_tag_keys_per_run
+                    ));
                 }
+                result.dropped_tags.push((key.clone(), value.clone()));
+                continue;
             }
 
             // Check project tag limit (only for new pairs)
             let pair = (key.clone(), value.clone());
-            if !project.tag_pairs.contains(&pair) {
-                if project.tag_pairs.len() >= self.config.max_tags_per_project {
-                    if result.dropped_tags.is_empty() {
-                        result.warnings.push(format!(
-                            "Project {} has reached max tags ({})",
-                            project_id, self.config.max_tags_per_project
-                        ));
-                    }
-                    result.dropped_tags.push((key.clone(), value.clone()));
-                    continue;
+            if !project.tag_pairs.contains(&pair)
+                && project.tag_pairs.len() >= self.config.max_tags_per_project
+            {
+                if result.dropped_tags.is_empty() {
+                    result.warnings.push(format!(
+                        "Project {} has reached max tags ({})",
+                        project_id, self.config.max_tags_per_project
+                    ));
                 }
+                result.dropped_tags.push((key.clone(), value.clone()));
+                continue;
             }
 
             // Accept the tag
@@ -255,17 +255,17 @@ impl CardinalityTracker {
             }
 
             // Check run metric name limit (only for new names)
-            if !run.metric_names.contains(name) {
-                if run.metric_names.len() >= self.config.max_metric_names_per_run {
-                    if result.dropped_metrics.is_empty() {
-                        result.warnings.push(format!(
-                            "Run {} has reached max metric names ({})",
-                            run_id, self.config.max_metric_names_per_run
-                        ));
-                    }
-                    result.dropped_metrics.push(name.clone());
-                    continue;
+            if !run.metric_names.contains(name)
+                && run.metric_names.len() >= self.config.max_metric_names_per_run
+            {
+                if result.dropped_metrics.is_empty() {
+                    result.warnings.push(format!(
+                        "Run {} has reached max metric names ({})",
+                        run_id, self.config.max_metric_names_per_run
+                    ));
                 }
+                result.dropped_metrics.push(name.clone());
+                continue;
             }
 
             // Accept the metric

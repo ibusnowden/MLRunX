@@ -1,7 +1,7 @@
-//! SQLite storage implementation for local development.
+//! `SQLite` storage implementation for local development.
 //!
 //! Provides persistent storage without requiring Docker/ClickHouse/PostgreSQL.
-//! Data is stored in a single SQLite file for easy development and testing.
+//! Data is stored in a single `SQLite` file for easy development and testing.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -12,10 +12,9 @@ use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 const SQLITE_SCHEMA_VERSION: &str = "2026-02-14.1";
-const SQLITE_SCHEMA_DESCRIPTION: &str =
-    "adds is_platform_admin column to users table";
+const SQLITE_SCHEMA_DESCRIPTION: &str = "adds is_platform_admin column to users table";
 
-/// Errors that can occur in SQLite operations.
+/// Errors that can occur in `SQLite` operations.
 #[derive(Error, Debug)]
 pub enum SqliteError {
     #[error("Database error: {0}")]
@@ -28,10 +27,10 @@ pub enum SqliteError {
     Io(#[from] std::io::Error),
 }
 
-/// Configuration for SQLite storage.
+/// Configuration for `SQLite` storage.
 #[derive(Debug, Clone)]
 pub struct SqliteConfig {
-    /// Path to the SQLite database file
+    /// Path to the `SQLite` database file
     pub path: String,
 }
 
@@ -54,7 +53,7 @@ impl SqliteConfig {
 
 /// SQLite-backed storage for runs and metrics.
 ///
-/// This replaces InMemoryStore for persistent local development.
+/// This replaces `InMemoryStore` for persistent local development.
 pub struct SqliteStore {
     conn: Arc<Mutex<Connection>>,
 }
@@ -81,7 +80,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Create a new SQLite store, initializing the database schema.
+    /// Create a new `SQLite` store, initializing the database schema.
     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self, SqliteError> {
         let conn = Connection::open(path)?;
 
@@ -100,7 +99,7 @@ impl SqliteStore {
         Ok(store)
     }
 
-    /// Create an in-memory SQLite store (useful for testing).
+    /// Create an in-memory `SQLite` store (useful for testing).
     pub async fn new_in_memory() -> Result<Self, SqliteError> {
         let conn = Connection::open_in_memory()?;
         let store = Self {
@@ -113,10 +112,11 @@ impl SqliteStore {
     }
 
     /// Initialize the database schema.
+    #[allow(clippy::too_many_lines)]
     async fn init_schema(&self) -> Result<(), SqliteError> {
         let conn = self.conn.lock().await;
 
-        conn.execute_batch(r#"
+        conn.execute_batch(r"
             -- Projects table
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY,
@@ -329,7 +329,7 @@ impl SqliteStore {
                 description TEXT NOT NULL,
                 applied_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
-        "#)?;
+        ")?;
 
         // Backward-compatible migration for SQLite files created before run ownership columns.
         Self::ensure_table_column(
@@ -636,7 +636,7 @@ impl SqliteStore {
     pub async fn list_users(&self) -> Result<Vec<UserRow>, SqliteError> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            r#"
+            r"
             SELECT
                 u.id,
                 u.email,
@@ -662,7 +662,7 @@ impl SqliteStore {
                 ) AS active_session_count
             FROM users u
             ORDER BY u.created_at DESC
-            "#,
+            ",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(UserRow {
@@ -689,7 +689,7 @@ impl SqliteStore {
     pub async fn get_user_by_id(&self, user_id: &str) -> Result<Option<UserRow>, SqliteError> {
         let conn = self.conn.lock().await;
         conn.query_row(
-            r#"
+            r"
             SELECT
                 u.id,
                 u.email,
@@ -716,7 +716,7 @@ impl SqliteStore {
             FROM users u
             WHERE u.id = ?1
             LIMIT 1
-            "#,
+            ",
             params![user_id],
             |row| {
                 Ok(UserRow {
@@ -760,7 +760,7 @@ impl SqliteStore {
         Ok(changed > 0)
     }
 
-    /// Sync the is_platform_admin flag for a user based on the configured admin email.
+    /// Sync the `is_platform_admin` flag for a user based on the configured admin email.
     /// Returns true if the user is (now) a platform admin.
     pub async fn sync_platform_admin_flag(
         &self,
@@ -784,7 +784,7 @@ impl SqliteStore {
 
         conn.execute(
             "UPDATE users SET is_platform_admin = ?1 WHERE id = ?2",
-            params![is_admin as i64, user_id],
+            params![i64::from(is_admin), user_id],
         )?;
 
         Ok(is_admin)
@@ -834,10 +834,10 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
 
         let mut stmt = conn.prepare(
-            r#"SELECT project_id, role
+            r"SELECT project_id, role
                FROM project_memberships
                WHERE user_id = ?1 AND revoked_at IS NULL
-               ORDER BY created_at DESC"#,
+               ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![user_id], |row| {
             Ok(ProjectMembershipRow {
@@ -858,21 +858,21 @@ impl SqliteStore {
     ) -> Result<Vec<UserProjectMembershipRow>, SqliteError> {
         let conn = self.conn.lock().await;
         let sql = if include_revoked {
-            r#"
+            r"
             SELECT pm.project_id, p.name, pm.role, pm.granted_by_user_id, pm.created_at, pm.revoked_at
             FROM project_memberships pm
             JOIN projects p ON p.id = pm.project_id
             WHERE pm.user_id = ?1
             ORDER BY pm.created_at DESC
-            "#
+            "
         } else {
-            r#"
+            r"
             SELECT pm.project_id, p.name, pm.role, pm.granted_by_user_id, pm.created_at, pm.revoked_at
             FROM project_memberships pm
             JOIN projects p ON p.id = pm.project_id
             WHERE pm.user_id = ?1 AND pm.revoked_at IS NULL
             ORDER BY pm.created_at DESC
-            "#
+            "
         };
 
         let mut stmt = conn.prepare(sql)?;
@@ -892,6 +892,7 @@ impl SqliteStore {
     }
 
     /// Insert a security/audit event.
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_audit_event(
         &self,
         actor_user_id: Option<&str>,
@@ -928,12 +929,12 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
 
         let mut sql = String::from(
-            r#"
+            r"
             SELECT id, occurred_at, actor_user_id, actor_key_id, project_id, run_id,
                    action, resource_type, resource_id, outcome, request_id, client_ip, user_agent, metadata
             FROM audit_events
             WHERE 1=1
-            "#,
+            ",
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![];
 
@@ -963,7 +964,7 @@ impl SqliteStore {
         params_vec.push(Box::new(sql_limit));
 
         let params_refs: Vec<&dyn rusqlite::ToSql> =
-            params_vec.iter().map(|value| value.as_ref()).collect();
+            params_vec.iter().map(std::convert::AsRef::as_ref).collect();
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
@@ -989,6 +990,7 @@ impl SqliteStore {
     }
 
     /// Create a UI auth session.
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_auth_session(
         &self,
         id: &str,
@@ -1017,14 +1019,14 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
 
         conn.query_row(
-            r#"
+            r"
             SELECT id, user_id, token_hash, csrf_hash, expires_at, revoked_at
             FROM auth_sessions
             WHERE token_hash = ?1
               AND revoked_at IS NULL
               AND expires_at > datetime('now')
             LIMIT 1
-            "#,
+            ",
             params![token_hash],
             |row| {
                 Ok(AuthSessionRow {
@@ -1041,12 +1043,21 @@ impl SqliteStore {
         .map_err(SqliteError::from)
     }
 
-    /// Update an auth session last-seen timestamp.
-    pub async fn touch_auth_session(&self, session_id: &str) -> Result<(), SqliteError> {
+    /// Update an auth session last-seen timestamp and extend expiry.
+    pub async fn touch_auth_session(
+        &self,
+        session_id: &str,
+        ttl_seconds: u64,
+    ) -> Result<(), SqliteError> {
         let conn = self.conn.lock().await;
+        let ttl_modifier = format!("+{} seconds", ttl_seconds.max(1));
         conn.execute(
-            "UPDATE auth_sessions SET last_seen_at = datetime('now'), updated_at = datetime('now') WHERE id = ?1",
-            params![session_id],
+            "UPDATE auth_sessions
+             SET last_seen_at = datetime('now'),
+                 updated_at = datetime('now'),
+                 expires_at = datetime('now', ?2)
+             WHERE id = ?1",
+            params![session_id, ttl_modifier],
         )?;
         Ok(())
     }
@@ -1073,11 +1084,11 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
 
         let mut sql = String::from(
-            r#"
+            r"
             SELECT id, user_id, created_at, last_seen_at, expires_at, revoked_at, client_ip, user_agent
             FROM auth_sessions
             WHERE 1=1
-            "#,
+            ",
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![];
 
@@ -1091,7 +1102,7 @@ impl SqliteStore {
         sql.push_str(" ORDER BY created_at DESC");
 
         let params_refs: Vec<&dyn rusqlite::ToSql> =
-            params_vec.iter().map(|p| p.as_ref()).collect();
+            params_vec.iter().map(std::convert::AsRef::as_ref).collect();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
             Ok(AuthSessionAdminRow {
@@ -1121,10 +1132,7 @@ impl SqliteStore {
 
     /// Revoke all active sessions for a user.
     /// Called when a user account is disabled to prevent continued access.
-    pub async fn revoke_all_sessions_for_user(
-        &self,
-        user_id: &str,
-    ) -> Result<usize, SqliteError> {
+    pub async fn revoke_all_sessions_for_user(&self, user_id: &str) -> Result<usize, SqliteError> {
         let conn = self.conn.lock().await;
         let changed = conn.execute(
             "UPDATE auth_sessions SET revoked_at = datetime('now'), updated_at = datetime('now') WHERE user_id = ?1 AND revoked_at IS NULL",
@@ -1157,7 +1165,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Get the project_id for a run (lightweight ownership check).
+    /// Get the `project_id` for a run (lightweight ownership check).
     pub async fn get_run_project_id(&self, run_id: &str) -> Result<String, SqliteError> {
         let conn = self.conn.lock().await;
 
@@ -1168,7 +1176,7 @@ impl SqliteStore {
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => {
-                SqliteError::NotFound(format!("Run not found: {}", run_id))
+                SqliteError::NotFound(format!("Run not found: {run_id}"))
             }
             _ => SqliteError::Database(e),
         })
@@ -1192,10 +1200,10 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
 
         conn.query_row(
-            r#"SELECT id, project_id, name, status, created_by_key_id, created_by_user_id, created_at, updated_at,
+            r"SELECT id, project_id, name, status, created_by_key_id, created_by_user_id, created_at, updated_at,
                       finished_at, metrics_count, params_count,
                       (julianday(COALESCE(finished_at, updated_at)) - julianday(created_at)) * 86400.0
-               FROM runs WHERE id = ?1"#,
+               FROM runs WHERE id = ?1",
             params![run_id],
             |row| {
                 Ok(RunRow {
@@ -1216,7 +1224,7 @@ impl SqliteStore {
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => {
-                SqliteError::NotFound(format!("Run not found: {}", run_id))
+                SqliteError::NotFound(format!("Run not found: {run_id}"))
             }
             _ => SqliteError::Database(e),
         })
@@ -1268,7 +1276,7 @@ impl SqliteStore {
         }
 
         if let Some(q) = query {
-            let pattern = format!("%{}%", q);
+            let pattern = format!("%{q}%");
             sql.push_str(" AND (r.name LIKE ? OR r.id LIKE ?)");
             count_sql.push_str(" AND (r.name LIKE ? OR r.id LIKE ?)");
             params_vec.push(Box::new(pattern.clone()));
@@ -1280,17 +1288,17 @@ impl SqliteStore {
         // Get total count
         let total: usize = {
             let params_refs: Vec<&dyn rusqlite::ToSql> =
-                params_vec.iter().map(|p| p.as_ref()).collect();
+                params_vec.iter().map(std::convert::AsRef::as_ref).collect();
             conn.query_row(&count_sql, params_refs.as_slice(), |row| row.get(0))?
         };
 
         // Add limit and offset
-        params_vec.push(Box::new(limit as i64));
-        params_vec.push(Box::new(offset as i64));
+        params_vec.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
+        params_vec.push(Box::new(i64::try_from(offset).unwrap_or(i64::MAX)));
 
         // Get runs
         let params_refs: Vec<&dyn rusqlite::ToSql> =
-            params_vec.iter().map(|p| p.as_ref()).collect();
+            params_vec.iter().map(std::convert::AsRef::as_ref).collect();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
             Ok(RunRow {
@@ -1328,7 +1336,7 @@ impl SqliteStore {
         let changes = conn.execute("DELETE FROM runs WHERE id = ?1", params![run_id])?;
 
         if changes == 0 {
-            return Err(SqliteError::NotFound(format!("Run not found: {}", run_id)));
+            return Err(SqliteError::NotFound(format!("Run not found: {run_id}")));
         }
 
         info!(run_id = %run_id, "Deleted run and associated data");
@@ -1424,6 +1432,11 @@ impl SqliteStore {
     }
 
     /// Get metrics for a run.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_wrap,
+        clippy::cast_possible_truncation
+    )]
     pub async fn get_metrics(
         &self,
         run_id: &str,
@@ -1482,8 +1495,7 @@ impl SqliteStore {
                 let bucket_size = step_range / bucket_count as f64;
 
                 // Query with bucket aggregation
-                let mut stmt = conn.prepare(&format!(
-                    r#"SELECT
+                let mut stmt = conn.prepare(r"SELECT
                         CAST((?3 + (CAST((step - ?3) / ?4 AS INTEGER) * ?4)) AS INTEGER) as bucket_step,
                         AVG(value) as mean,
                         MIN(value) as min_val,
@@ -1493,8 +1505,7 @@ impl SqliteStore {
                     WHERE run_id = ?1 AND name = ?2
                     GROUP BY bucket_step
                     ORDER BY bucket_step
-                    LIMIT ?5"#
-                ))?;
+                    LIMIT ?5")?;
 
                 let rows = stmt.query_map(
                     params![
@@ -1586,7 +1597,7 @@ impl SqliteStore {
         limit: usize,
     ) -> Result<Vec<RunEventRow>, SqliteError> {
         let conn = self.conn.lock().await;
-        let safe_limit = limit.clamp(1, 1000) as i64;
+        let safe_limit = i64::try_from(limit.clamp(1, 1000)).unwrap_or(i64::MAX);
 
         let rows = if let Some(after) = after_id {
             let mut stmt = conn.prepare(
@@ -1705,6 +1716,7 @@ impl SqliteStore {
     // =========================================================================
 
     /// Insert a new API key record.
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_api_key(
         &self,
         id: &str,
@@ -1712,6 +1724,7 @@ impl SqliteStore {
         key_fingerprint: Option<&str>,
         key_prefix: &str,
         project_id: Option<&str>,
+        created_by_user_id: Option<&str>,
         name: Option<&str>,
         scopes_json: &str,
         expires_at: Option<&str>,
@@ -1719,14 +1732,15 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
 
         conn.execute(
-            r#"INSERT INTO api_keys (id, key_hash, key_fingerprint, key_prefix, project_id, name, scopes, expires_at)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+            r"INSERT INTO api_keys (id, key_hash, key_fingerprint, key_prefix, project_id, created_by_user_id, name, scopes, expires_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 id,
                 key_hash,
                 key_fingerprint,
                 key_prefix,
                 project_id,
+                created_by_user_id,
                 name,
                 scopes_json,
                 expires_at
@@ -1772,9 +1786,9 @@ impl SqliteStore {
 
         let row = conn
             .query_row(
-                r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at, expires_at
+                r"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at, expires_at
                    FROM api_keys
-                   WHERE key_fingerprint = ?1"#,
+                   WHERE key_fingerprint = ?1",
                 params![key_fingerprint],
                 |row| {
                     Ok(ApiKeyRow {
@@ -1806,9 +1820,9 @@ impl SqliteStore {
 
         let row = conn
             .query_row(
-                r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at, expires_at
+                r"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at, expires_at
                    FROM api_keys
-                   WHERE key_hash = ?1"#,
+                   WHERE key_hash = ?1",
                 params![key_hash],
                 |row| {
                     Ok(ApiKeyRow {
@@ -1876,57 +1890,54 @@ impl SqliteStore {
 
         let mut keys = Vec::new();
 
-        match project_id {
-            Some(project_id) => {
-                let mut stmt = conn.prepare(
-                    r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at, expires_at
-                       FROM api_keys
-                       WHERE project_id = ?1
-                       ORDER BY created_at DESC"#,
-                )?;
-                let rows = stmt.query_map(params![project_id], |row| {
-                    Ok(ApiKeyRow {
-                        id: row.get(0)?,
-                        key_hash: row.get(1)?,
-                        key_prefix: row.get(2)?,
-                        project_id: row.get(3)?,
-                        created_by_user_id: row.get(4)?,
-                        name: row.get(5)?,
-                        scopes_json: row.get(6)?,
-                        created_at: row.get(7)?,
-                        last_used_at: row.get(8)?,
-                        revoked_at: row.get(9)?,
-                        expires_at: row.get(10)?,
-                    })
-                })?;
-                for row in rows {
-                    keys.push(row?);
-                }
+        if let Some(project_id) = project_id {
+            let mut stmt = conn.prepare(
+                r"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at, expires_at
+                   FROM api_keys
+                   WHERE project_id = ?1
+                   ORDER BY created_at DESC",
+            )?;
+            let rows = stmt.query_map(params![project_id], |row| {
+                Ok(ApiKeyRow {
+                    id: row.get(0)?,
+                    key_hash: row.get(1)?,
+                    key_prefix: row.get(2)?,
+                    project_id: row.get(3)?,
+                    created_by_user_id: row.get(4)?,
+                    name: row.get(5)?,
+                    scopes_json: row.get(6)?,
+                    created_at: row.get(7)?,
+                    last_used_at: row.get(8)?,
+                    revoked_at: row.get(9)?,
+                    expires_at: row.get(10)?,
+                })
+            })?;
+            for row in rows {
+                keys.push(row?);
             }
-            None => {
-                let mut stmt = conn.prepare(
-                    r#"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at, expires_at
-                       FROM api_keys
-                       ORDER BY created_at DESC"#,
-                )?;
-                let rows = stmt.query_map([], |row| {
-                    Ok(ApiKeyRow {
-                        id: row.get(0)?,
-                        key_hash: row.get(1)?,
-                        key_prefix: row.get(2)?,
-                        project_id: row.get(3)?,
-                        created_by_user_id: row.get(4)?,
-                        name: row.get(5)?,
-                        scopes_json: row.get(6)?,
-                        created_at: row.get(7)?,
-                        last_used_at: row.get(8)?,
-                        revoked_at: row.get(9)?,
-                        expires_at: row.get(10)?,
-                    })
-                })?;
-                for row in rows {
-                    keys.push(row?);
-                }
+        } else {
+            let mut stmt = conn.prepare(
+                r"SELECT id, key_hash, key_prefix, project_id, created_by_user_id, name, scopes, created_at, last_used_at, revoked_at, expires_at
+                   FROM api_keys
+                   ORDER BY created_at DESC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(ApiKeyRow {
+                    id: row.get(0)?,
+                    key_hash: row.get(1)?,
+                    key_prefix: row.get(2)?,
+                    project_id: row.get(3)?,
+                    created_by_user_id: row.get(4)?,
+                    name: row.get(5)?,
+                    scopes_json: row.get(6)?,
+                    created_at: row.get(7)?,
+                    last_used_at: row.get(8)?,
+                    revoked_at: row.get(9)?,
+                    expires_at: row.get(10)?,
+                })
+            })?;
+            for row in rows {
+                keys.push(row?);
             }
         }
 
@@ -1956,14 +1967,14 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Validate a share token and return the associated run_id if valid.
+    /// Validate a share token and return the associated `run_id` if valid.
     pub async fn validate_share_token(&self, token: &str) -> Result<ShareTokenRow, SqliteError> {
         let conn = self.conn.lock().await;
 
         let row = conn
             .query_row(
-                r#"SELECT token, run_id, created_by_key_prefix, created_at, expires_at, revoked_at
-               FROM share_tokens WHERE token = ?1"#,
+                r"SELECT token, run_id, created_by_key_prefix, created_at, expires_at, revoked_at
+               FROM share_tokens WHERE token = ?1",
                 params![token],
                 |row| {
                     Ok(ShareTokenRow {
@@ -2008,8 +2019,8 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
 
         let mut stmt = conn.prepare(
-            r#"SELECT token, run_id, created_by_key_prefix, created_at, expires_at, revoked_at
-               FROM share_tokens WHERE run_id = ?1 ORDER BY created_at DESC"#,
+            r"SELECT token, run_id, created_by_key_prefix, created_at, expires_at, revoked_at
+               FROM share_tokens WHERE run_id = ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![run_id], |row| {
             Ok(ShareTokenRow {
@@ -2215,7 +2226,7 @@ pub struct RunEventInput {
     pub timestamp: Option<f64>,
 }
 
-/// A row from the run_events table.
+/// A row from the `run_events` table.
 #[derive(Debug, Clone)]
 pub struct RunEventRow {
     pub id: i64,
@@ -2277,6 +2288,7 @@ mod tests {
                 None,
                 "mlrunx_d",
                 Some(&project_id),
+                None,
                 Some("delete-project-key"),
                 r#"["read","write"]"#,
                 None,
@@ -2801,6 +2813,7 @@ mod tests {
                 None,
                 key_prefix,
                 Some(&project_id),
+                None,
                 Some("key-one"),
                 scopes_json,
                 None,
@@ -2974,5 +2987,56 @@ mod tests {
             .unwrap();
         assert_eq!(with_revoked.len(), 1);
         assert!(with_revoked[0].revoked_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_touch_auth_session_extends_expiry() {
+        let store = create_test_store().await;
+        let user_id = store
+            .get_or_create_user_identity(
+                "jwt",
+                "subject-touch-session",
+                Some("touch-session@example.com"),
+                Some("Touch Session User"),
+            )
+            .await
+            .unwrap();
+
+        store
+            .insert_auth_session(
+                "session-touch-1",
+                &user_id,
+                "token-touch-1",
+                "csrf-touch-1",
+                "2000-01-01 00:00:00",
+                Some("touch-agent"),
+                Some("127.0.0.1"),
+            )
+            .await
+            .unwrap();
+
+        store
+            .touch_auth_session("session-touch-1", 3600)
+            .await
+            .unwrap();
+
+        let sessions = store
+            .list_auth_sessions_for_admin(Some(&user_id), true)
+            .await
+            .unwrap();
+        let session = sessions
+            .iter()
+            .find(|row| row.id == "session-touch-1")
+            .expect("session should exist after touch");
+
+        let extended_expiry =
+            chrono::NaiveDateTime::parse_from_str(&session.expires_at, "%Y-%m-%d %H:%M:%S")
+                .expect("expires_at should be parseable");
+        let min_expected = (chrono::Utc::now() + chrono::Duration::minutes(50)).naive_utc();
+
+        assert!(
+            extended_expiry >= min_expected,
+            "touch_auth_session should extend expiry into the future"
+        );
     }
 }

@@ -3,7 +3,7 @@
 //! Handles high-throughput data ingestion from ML training SDKs.
 //! See: /docs/spec/ingest.md for full semantics.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -22,7 +22,7 @@ use mlrunx_proto::mlrunx::v1::{
     LogTagsRequest, LogTagsResponse, RunId, RunStatus, ingest_service_server::IngestService,
 };
 
-/// In-memory run state for alpha (will be replaced by PostgreSQL in STO-002).
+/// In-memory run state for alpha (will be replaced by `PostgreSQL` in STO-002).
 #[derive(Debug, Clone)]
 pub struct RunState {
     pub run_id: String,
@@ -41,7 +41,7 @@ pub struct RunState {
 pub struct InMemoryStore {
     pub runs: RwLock<HashMap<String, RunState>>,
     /// Track seen batch IDs for idempotency
-    pub seen_batches: RwLock<HashMap<String, ()>>,
+    pub seen_batches: RwLock<HashSet<String>>,
     /// Metric data storage per run
     pub metrics: RwLock<HashMap<String, super::metrics::RunMetrics>>,
 }
@@ -52,13 +52,13 @@ impl InMemoryStore {
     }
 }
 
-/// Implementation of the IngestService gRPC service.
+/// Implementation of the `IngestService` gRPC service.
 pub struct IngestServiceImpl {
     store: Arc<InMemoryStore>,
 }
 
 impl IngestServiceImpl {
-    pub fn new(store: Arc<InMemoryStore>) -> Self {
+    pub const fn new(store: Arc<InMemoryStore>) -> Self {
         Self { store }
     }
 }
@@ -66,10 +66,21 @@ impl IngestServiceImpl {
 fn now_timestamp() -> Option<Timestamp> {
     let now = SystemTime::now();
     let duration = now.duration_since(SystemTime::UNIX_EPOCH).ok()?;
-    Some(Timestamp {
-        seconds: duration.as_secs() as i64,
-        nanos: duration.subsec_nanos() as i32,
-    })
+    let seconds = i64::try_from(duration.as_secs()).unwrap_or(i64::MAX);
+    let nanos = i32::try_from(duration.subsec_nanos()).unwrap_or(i32::MAX);
+    Some(Timestamp { seconds, nanos })
+}
+
+fn usize_to_i64_saturating(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn usize_to_u64_saturating(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn u64_to_i64_saturating(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn env_flag(name: &str) -> bool {
@@ -138,7 +149,7 @@ impl IngestService for IngestServiceImpl {
                 run_id: Some(RunId {
                     value: existing.run_id.clone(),
                 }),
-                resume_token: format!("resume-{}", run_id),
+                resume_token: format!("resume-{run_id}"),
                 server_time: now_timestamp(),
                 resumed: true,
                 warnings: vec![],
@@ -175,7 +186,7 @@ impl IngestService for IngestServiceImpl {
             run_id: Some(RunId {
                 value: run_id.clone(),
             }),
-            resume_token: format!("resume-{}", run_id),
+            resume_token: format!("resume-{run_id}"),
             server_time: now_timestamp(),
             resumed: false,
             warnings: vec![],
@@ -184,6 +195,7 @@ impl IngestService for IngestServiceImpl {
 
     /// Log a batch of metrics.
     #[instrument(skip(self, request), fields(run_id, batch_id, point_count))]
+    #[allow(clippy::cast_precision_loss)]
     async fn log_metrics(
         &self,
         request: Request<LogMetricsRequest>,
@@ -200,24 +212,23 @@ impl IngestService for IngestServiceImpl {
         {
             let mut seen = self.store.seen_batches.write().await;
             let batch_key = format!("{}:{}", run_id.value, req.batch_id);
-            if seen.contains_key(&batch_key) {
+            if seen.contains(&batch_key) {
                 debug!(batch_id = %req.batch_id, "Batch already processed (idempotent)");
                 return Ok(Response::new(LogMetricsResponse {
                     accepted_count: 0,
                     deduplicated_count: req
                         .metrics
                         .as_ref()
-                        .map(|m| m.points.len() as i64)
-                        .unwrap_or(0),
+                        .map_or(0, |m| usize_to_i64_saturating(m.points.len())),
                     warnings: vec![],
                     server_time: now_timestamp(),
                 }));
             }
-            seen.insert(batch_key, ());
+            seen.insert(batch_key);
         }
 
         // Verify run exists
-        let point_count = req.metrics.as_ref().map(|m| m.points.len()).unwrap_or(0);
+        let point_count = req.metrics.as_ref().map_or(0, |m| m.points.len());
         tracing::Span::current().record("point_count", point_count);
 
         {
@@ -233,7 +244,7 @@ impl IngestService for IngestServiceImpl {
                 )));
             }
 
-            run.metrics_count += point_count as u64;
+            run.metrics_count += usize_to_u64_saturating(point_count);
             run.updated_at = SystemTime::now();
         }
 
@@ -252,7 +263,7 @@ impl IngestService for IngestServiceImpl {
                     timestamp: point
                         .timestamp
                         .as_ref()
-                        .map(|t| t.seconds as f64 + t.nanos as f64 / 1e9),
+                        .map(|t| t.seconds as f64 + f64::from(t.nanos) / 1e9),
                 });
             }
         }
@@ -265,7 +276,7 @@ impl IngestService for IngestServiceImpl {
         );
 
         Ok(Response::new(LogMetricsResponse {
-            accepted_count: point_count as i64,
+            accepted_count: usize_to_i64_saturating(point_count),
             deduplicated_count: 0,
             warnings: vec![],
             server_time: now_timestamp(),
@@ -308,7 +319,7 @@ impl IngestService for IngestServiceImpl {
                 .get_mut(&run_id.value)
                 .ok_or_else(|| Status::not_found(format!("Run not found: {}", run_id.value)))?;
 
-            run.params_count += param_count as u64;
+            run.params_count += usize_to_u64_saturating(param_count);
             run.updated_at = SystemTime::now();
         }
 
@@ -356,7 +367,7 @@ impl IngestService for IngestServiceImpl {
         );
 
         Ok(Response::new(LogParamsResponse {
-            accepted_count: param_count as i64,
+            accepted_count: usize_to_i64_saturating(param_count),
             existing_count: 0,
             warnings,
         }))
@@ -470,7 +481,7 @@ impl IngestService for IngestServiceImpl {
     ) -> Result<Response<FinishRunResponse>, Status> {
         let req = request.into_inner();
         let status = req.status();
-        tracing::Span::current().record("status", format!("{:?}", status));
+        tracing::Span::current().record("status", format!("{status:?}"));
 
         let run_id = req
             .run_id
@@ -505,7 +516,7 @@ impl IngestService for IngestServiceImpl {
 
         Ok(Response::new(FinishRunResponse {
             duration_seconds: duration,
-            total_metrics: metrics_count as i64,
+            total_metrics: u64_to_i64_saturating(metrics_count),
             total_artifacts: 0,
             finished_at: now_timestamp(),
             warnings: vec![],

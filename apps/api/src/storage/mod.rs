@@ -1,4 +1,4 @@
-//! Storage layer implementations for MLRunX.
+//! Storage layer implementations for `MLRunX`.
 //!
 //! This module provides storage backends for metrics, metadata, and artifacts.
 
