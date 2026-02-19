@@ -1,9 +1,9 @@
 #!/bin/sh
 
-# Block committing Markdown files (.md), except root README.md
-staged_md=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.md$' | grep -v '^README\.md$')
+# Block committing Markdown files (.md), except root README.md and ARCHITECTURE.md
+staged_md=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.md$' | grep -Ev '^(README|ARCHITECTURE)\.md$')
 if [ -n "$staged_md" ]; then
-  echo "Error: committing Markdown files is disabled for this repo (except README.md)."
+  echo "Error: committing Markdown files is disabled for this repo (except README.md and ARCHITECTURE.md)."
   echo "Unstage these files before committing:"
   echo "$staged_md"
   exit 1
