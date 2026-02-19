@@ -46,6 +46,7 @@ MLRunX uses a layered testing strategy that balances fast feedback with thorough
 2. **Deterministic**: No flaky tests in required gates
 3. **Canonical commands**: CI uses same `make` targets as developers
 4. **Shift left**: Catch issues as early as possible
+5. **No soft-fail gates**: lint/test targets must fail hard on regressions
 
 ---
 
@@ -328,7 +329,7 @@ make lint-ui            # eslint && tsc --noEmit
 # === Unit Tests ===
 make test               # All unit tests
 make test-rust          # cargo test
-make test-python        # pytest -m unit sdks/
+make test-python        # uv run pytest sdks/
 make test-ui            # cd apps/ui && npm test
 
 # === Contract Tests ===

@@ -165,7 +165,8 @@ lint-python:
 
 lint-ui:
 	@echo "Linting UI..."
-	cd apps/ui && npm run lint 2>/dev/null || echo "UI lint not configured"
+	cd apps/ui && npm run lint
+	cd apps/ui && npm run typecheck
 
 fmt: fmt-rust fmt-python
 
@@ -188,7 +189,7 @@ test-python:
 
 test-ui:
 	@echo "Testing UI..."
-	cd apps/ui && npm test 2>/dev/null || echo "No UI tests yet"
+	cd apps/ui && npm test
 
 # =============================================================================
 # Contract Tests

@@ -57,6 +57,8 @@ invariants:
     description: "SQLite schema bootstrap must record a ledger row in schema_migrations."
   - id: CI-001
     description: "Nightly benchmark jobs must execute real workload runners, not synthetic placeholder values."
+  - id: CI-002
+    description: "Required lint/test gates must fail hard (no soft-fail wrappers that mask regressions)."
   - id: REL-001
     description: "Release workflow publishes both API and UI container images with version and latest tags."
 
