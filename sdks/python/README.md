@@ -8,6 +8,22 @@ Async, non-blocking ML experiment tracking SDK for Python.
 pip install mlrunx
 ```
 
+Verify your installed SDK supports `project_id`:
+
+```bash
+python - <<'PY'
+import inspect
+import mlrunx
+
+print("mlrunx:", getattr(mlrunx, "__version__", "unknown"))
+print("init signature:", inspect.signature(mlrunx.init))
+if "project_id" not in inspect.signature(mlrunx.init).parameters:
+    raise SystemExit(
+        "Outdated SDK build detected. Upgrade mlrunx before running training."
+    )
+PY
+```
+
 ## Quick Start
 
 ```python
@@ -15,7 +31,7 @@ import mlrunx
 
 # Initialize a run (works offline if server unavailable)
 run = mlrunx.init(
-    project="my-project",
+    project_id="019c63ba-ce30-7610-8500-18c31bc665de",
     name="training-run-1",
     tags={"model": "resnet50", "dataset": "imagenet"},
 )
@@ -28,12 +44,20 @@ run.log_params({
 })
 
 # Training loop - logging is non-blocking!
-for step in range(1000):
-    loss, accuracy = train_step()
-    run.log({"loss": loss, "accuracy": accuracy}, step=step)
-
-# Finish (flushes all pending data)
-run.finish()
+status = "finished"
+try:
+    for step in range(1000):
+        loss, accuracy = train_step()
+        run.log({"loss": loss, "accuracy": accuracy}, step=step)
+except KeyboardInterrupt:
+    status = "killed"
+    raise
+except Exception:
+    status = "failed"
+    raise
+finally:
+    # Always flush pending events, even on Ctrl+C.
+    run.finish(status=status)
 ```
 
 ### Using Context Manager
@@ -41,7 +65,7 @@ run.finish()
 ```python
 import mlrunx
 
-with mlrunx.init(project="my-project") as run:
+with mlrunx.init(project_id="019c63ba-ce30-7610-8500-18c31bc665de") as run:
     run.log_params({"lr": 0.001})
 
     for step in range(1000):
@@ -100,7 +124,7 @@ If the server is unavailable, events are automatically spooled to disk and synce
 
 ```python
 # Works even if server is down!
-run = mlrunx.init(project="my-project")
+run = mlrunx.init(project_id="019c63ba-ce30-7610-8500-18c31bc665de")
 print(run.is_offline)  # True if server unavailable
 
 # Events are saved to ~/.mlrunx/spool/
@@ -108,6 +132,12 @@ for step in range(1000):
     run.log({"loss": loss}, step=step)
 
 # When server comes back online, data syncs automatically
+```
+
+If logs show `Run not found` for a different run ID than your current run, your local spool likely contains stale files from older/deleted runs. Current SDK mainline discards those stale spool batches automatically during replay. On older builds, clear local pending spool files once:
+
+```bash
+rm -f ~/.mlrunx/spool/*.spool ~/.mlrunx/spool/*.pending
 ```
 
 Configure spool settings:
@@ -135,7 +165,7 @@ Initialize a new run.
 
 ```python
 run = mlrunx.init(
-    project="my-project",       # Required: project name
+    project_id="019c63ba-ce30-7610-8500-18c31bc665de",  # Required: project ID
     name="experiment-1",        # Optional: run name (auto-generated if not provided)
     tags={"key": "value"},      # Optional: initial tags
     config={"lr": 0.001},       # Optional: initial config (logged as params)
@@ -185,6 +215,8 @@ Finish the run and flush all pending data.
 run.finish(status="finished")  # or "failed", "killed"
 ```
 
+`run.finish()` should be called from a `finally` block (or use `with mlrunx.init(...) as run`) so interrupted runs still flush metrics.
+
 ## Examples
 
 ### Simple Training Loop
@@ -192,7 +224,7 @@ run.finish(status="finished")  # or "failed", "killed"
 ```python
 import mlrunx
 
-run = mlrunx.init(project="demo")
+run = mlrunx.init(project_id="019c63ba-ce30-7610-8500-18c31bc665de")
 run.log_params({"lr": 0.001, "epochs": 10})
 
 for epoch in range(10):
@@ -214,7 +246,7 @@ See [examples/pytorch_mnist.py](examples/pytorch_mnist.py) for a complete exampl
 import mlrunx
 import torch
 
-with mlrunx.init(project="mnist", tags={"framework": "pytorch"}) as run:
+with mlrunx.init(project_id="019c63ba-ce30-7610-8500-18c31bc665de", tags={"framework": "pytorch"}) as run:
     run.log_params({"lr": 0.01, "epochs": 10})
 
     for epoch in range(10):
@@ -242,7 +274,7 @@ class MLRunCallback(TrainerCallback):
         if logs:
             self.run.log(logs, step=state.global_step)
 
-with mlrunx.init(project="nlp", tags={"framework": "transformers"}) as run:
+with mlrunx.init(project_id="019c63ba-ce30-7610-8500-18c31bc665de", tags={"framework": "transformers"}) as run:
     callback = MLRunCallback(run)
     trainer = Trainer(..., callbacks=[callback])
     trainer.train()
@@ -256,6 +288,7 @@ All settings can be configured via environment variables:
 |----------|---------|-------------|
 | `MLRUNX_SERVER_URL` | `http://localhost:3001` | Server URL |
 | `MLRUNX_API_KEY` | None | API key for authentication |
+| `MLRUNX_PROJECT_ID` | None | Project ID used when `project_id` is not passed to `mlrunx.init()` |
 | `MLRUNX_BATCH_SIZE` | `1000` | Max events per batch |
 | `MLRUNX_BATCH_MAX_BYTES` | `1000000` | Max batch size in bytes |
 | `MLRUNX_BATCH_TIMEOUT_MS` | `1000` | Max time before flush (ms) |
