@@ -39,7 +39,7 @@ use axum::{
     Extension, Json, Router,
     extract::State,
     http::{
-        HeaderMap, HeaderValue, Method, StatusCode,
+        HeaderMap, HeaderValue, Method, StatusCode, Uri,
         header::{self, HeaderName},
     },
     middleware,
@@ -52,6 +52,10 @@ use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use auth::{ApiKeyStore, AuthContext, AuthMode, auth_middleware};
+use mlrunx_api_http_types::{
+    UiAuthLoginRequest, UiAuthLoginResponse, UiAuthLogoutResponse, UiAuthSessionResponse,
+};
+use mlrunx_api_policy::{UiRunOwnerPolicyError, enforce_ui_run_owner};
 use mlrunx_proto::mlrunx::v1::ingest_service_server::IngestServiceServer;
 use services::{
     CardinalityTracker, EventPayload, IdempotencyResult, IdempotencyStore, IngestServiceImpl,
@@ -121,36 +125,6 @@ fn is_production_environment() -> bool {
         raw.trim().to_ascii_lowercase().as_str(),
         "prod" | "production"
     )
-}
-
-#[derive(Debug, Deserialize)]
-struct UiAuthLoginRequest {
-    #[serde(default)]
-    jwt: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct UiAuthLoginResponse {
-    status: String,
-    user_id: String,
-    expires_at: String,
-    project_count: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct UiAuthSessionResponse {
-    authenticated: bool,
-    auth_mode: String,
-    scopes: Vec<String>,
-    project_ids: Vec<String>,
-    key_prefix: String,
-    is_dev_mode: bool,
-    is_platform_admin: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct UiAuthLogoutResponse {
-    status: String,
 }
 
 fn env_flag_default(name: &str, default_value: bool) -> bool {
@@ -425,27 +399,23 @@ async fn require_platform_admin_access(
 }
 
 fn require_ui_run_owner(auth: &AuthContext, run: &RunRow) -> Result<(), (StatusCode, String)> {
-    if auth.is_dev_mode || auth.is_platform_admin || !auth.is_ui_jwt() {
-        return Ok(());
-    }
-
-    let user_id = auth_user_id(auth).ok_or_else(|| {
-        (
+    match enforce_ui_run_owner(
+        auth.is_dev_mode,
+        auth.is_platform_admin,
+        auth.is_ui_jwt(),
+        auth_user_id(auth).as_deref(),
+        run.created_by_user_id.as_deref(),
+    ) {
+        Ok(()) => Ok(()),
+        Err(UiRunOwnerPolicyError::MissingUserIdentity) => Err((
             StatusCode::FORBIDDEN,
             "Unable to resolve user identity for run authorization.".to_string(),
-        )
-    })?;
-
-    if let Some(owner_user_id) = run.created_by_user_id.as_deref() {
-        if owner_user_id != user_id {
-            return Err((
-                StatusCode::FORBIDDEN,
-                "Access denied: this user cannot access that run.".to_string(),
-            ));
-        }
+        )),
+        Err(UiRunOwnerPolicyError::OwnerMismatch) => Err((
+            StatusCode::FORBIDDEN,
+            "Access denied: this user cannot access that run.".to_string(),
+        )),
     }
-
-    Ok(())
 }
 
 async fn require_ui_project_owner(
@@ -705,8 +675,13 @@ fn build_cookie(
     http_only: bool,
     secure: bool,
     same_site: &str,
+    domain: Option<&str>,
 ) -> String {
     let mut cookie = format!("{name}={value}; Path=/; Max-Age={ttl_seconds}; SameSite={same_site}");
+    if let Some(domain) = domain {
+        cookie.push_str("; Domain=");
+        cookie.push_str(domain);
+    }
     if http_only {
         cookie.push_str("; HttpOnly");
     }
@@ -716,10 +691,14 @@ fn build_cookie(
     cookie
 }
 
-fn build_clear_cookie(name: &str, secure: bool, same_site: &str) -> String {
+fn build_clear_cookie(name: &str, secure: bool, same_site: &str, domain: Option<&str>) -> String {
     let mut cookie = format!(
         "{name}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite={same_site}"
     );
+    if let Some(domain) = domain {
+        cookie.push_str("; Domain=");
+        cookie.push_str(domain);
+    }
     if secure {
         cookie.push_str("; Secure");
     }
@@ -805,6 +784,7 @@ async fn http_ui_auth_login(
 
     let secure_cookie = state.key_store.ui_cookie_secure();
     let same_site = state.key_store.ui_cookie_same_site();
+    let cookie_domain = state.key_store.ui_cookie_domain();
     let ttl = state.key_store.ui_session_ttl_seconds();
 
     let session_cookie = build_cookie(
@@ -814,6 +794,7 @@ async fn http_ui_auth_login(
         true,
         secure_cookie,
         same_site,
+        cookie_domain,
     );
     let csrf_cookie = build_cookie(
         state.key_store.ui_csrf_cookie_name(),
@@ -822,6 +803,7 @@ async fn http_ui_auth_login(
         false,
         secure_cookie,
         same_site,
+        cookie_domain,
     );
 
     let mut response_headers = HeaderMap::new();
@@ -886,6 +868,7 @@ async fn http_ui_auth_logout(
     let csrf_cookie_name = state.key_store.ui_csrf_cookie_name().to_string();
     let same_site = state.key_store.ui_cookie_same_site().to_string();
     let secure_cookie = state.key_store.ui_cookie_secure();
+    let cookie_domain = state.key_store.ui_cookie_domain();
 
     let session_token = extract_cookie(&headers, &session_cookie_name);
     let csrf_token = header_string(&headers, "x-csrf-token");
@@ -905,8 +888,14 @@ async fn http_ui_auth_logout(
             })?;
     }
 
-    let clear_session_cookie = build_clear_cookie(&session_cookie_name, secure_cookie, &same_site);
-    let clear_csrf_cookie = build_clear_cookie(&csrf_cookie_name, secure_cookie, &same_site);
+    let clear_session_cookie = build_clear_cookie(
+        &session_cookie_name,
+        secure_cookie,
+        &same_site,
+        cookie_domain,
+    );
+    let clear_csrf_cookie =
+        build_clear_cookie(&csrf_cookie_name, secure_cookie, &same_site, cookie_domain);
 
     let mut response_headers = HeaderMap::new();
     response_headers.append(
@@ -4230,6 +4219,92 @@ fn extract_client_ip(headers: &HeaderMap) -> String {
     "unknown".to_string()
 }
 
+const DEFAULT_ALLOWED_UI_ORIGINS: [&str; 2] = ["http://localhost:3000", "http://127.0.0.1:3000"];
+
+fn parse_allowed_origin(origin: &str) -> Result<HeaderValue, String> {
+    let parsed: Uri = origin.parse().map_err(|_| {
+        format!("Invalid origin '{origin}' in MLRUNX_UI_ALLOWED_ORIGINS (failed URI parse).")
+    })?;
+    let scheme = parsed.scheme_str().ok_or_else(|| {
+        format!("Invalid origin '{origin}' in MLRUNX_UI_ALLOWED_ORIGINS (missing scheme).")
+    })?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err(format!(
+            "Invalid origin '{origin}' in MLRUNX_UI_ALLOWED_ORIGINS (scheme must be http or https)."
+        ));
+    }
+    let authority = parsed.authority().ok_or_else(|| {
+        format!("Invalid origin '{origin}' in MLRUNX_UI_ALLOWED_ORIGINS (missing host).")
+    })?;
+    if let Some(path_and_query) = parsed.path_and_query() {
+        if path_and_query.path() != "/" || path_and_query.query().is_some() {
+            return Err(format!(
+                "Invalid origin '{origin}' in MLRUNX_UI_ALLOWED_ORIGINS (must not include path/query)."
+            ));
+        }
+    }
+    let normalized = format!("{scheme}://{authority}");
+    HeaderValue::from_str(&normalized).map_err(|_| {
+        format!("Invalid origin '{origin}' in MLRUNX_UI_ALLOWED_ORIGINS (invalid header value).")
+    })
+}
+
+fn parse_allowed_origins(raw: Option<&str>) -> Result<Vec<HeaderValue>, String> {
+    let mut origins = Vec::new();
+
+    if let Some(raw) = raw {
+        for origin in raw
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            origins.push(parse_allowed_origin(origin)?);
+        }
+    }
+
+    if origins.is_empty() {
+        for origin in DEFAULT_ALLOWED_UI_ORIGINS {
+            origins.push(parse_allowed_origin(origin)?);
+        }
+    }
+
+    Ok(origins)
+}
+
+fn load_allowed_origins_from_env() -> Result<Vec<HeaderValue>, String> {
+    parse_allowed_origins(std::env::var("MLRUNX_UI_ALLOWED_ORIGINS").ok().as_deref())
+}
+
+fn validate_runtime_security_configuration(key_store: &ApiKeyStore) -> Result<(), String> {
+    let _ = load_allowed_origins_from_env()?;
+
+    if let Some(domain) = key_store.ui_cookie_domain() {
+        if domain.contains(';') || domain.chars().any(char::is_whitespace) {
+            return Err(
+                "MLRUNX_UI_COOKIE_DOMAIN must not contain semicolons or whitespace.".to_string(),
+            );
+        }
+    }
+
+    if key_store.is_ui_jwt_enabled()
+        && key_store.ui_cookie_same_site().eq_ignore_ascii_case("none")
+        && !key_store.ui_cookie_secure()
+    {
+        return Err(
+            "MLRUNX_UI_COOKIE_SAMESITE=None requires MLRUNX_UI_COOKIE_SECURE=true.".to_string(),
+        );
+    }
+
+    if key_store.is_ui_jwt_enabled() && is_production_environment() && !key_store.ui_cookie_secure()
+    {
+        return Err(
+            "UI JWT/session auth in production requires MLRUNX_UI_COOKIE_SECURE=true.".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
 // =============================================================================
 // Server Setup
 // =============================================================================
@@ -4240,21 +4315,8 @@ fn build_http_router(state: AppState) -> Router {
 
     // Always apply restrictive CORS — never fall back to permissive(), even when
     // auth is disabled, to prevent cross-origin attacks from arbitrary websites.
-    let mut allowed_origins: Vec<HeaderValue> = std::env::var("MLRUNX_UI_ALLOWED_ORIGINS")
-        .ok()
-        .map(|raw| {
-            raw.split(',')
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .filter_map(|origin| HeaderValue::from_str(origin).ok())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if allowed_origins.is_empty() {
-        allowed_origins.push(HeaderValue::from_static("http://localhost:3000"));
-        allowed_origins.push(HeaderValue::from_static("http://127.0.0.1:3000"));
-    }
+    let allowed_origins =
+        load_allowed_origins_from_env().expect("Invalid MLRUNX_UI_ALLOWED_ORIGINS configuration");
 
     let cors = CorsLayer::new()
         .allow_credentials(ui_jwt_enabled)
@@ -4482,6 +4544,9 @@ async fn main() {
     key_store.init_from_env().await;
 
     if let Err(err) = key_store.validate_startup_configuration() {
+        panic!("Refusing to start: {err}");
+    }
+    if let Err(err) = validate_runtime_security_configuration(key_store.as_ref()) {
         panic!("Refusing to start: {err}");
     }
 
@@ -4847,6 +4912,55 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_build_cookie_includes_optional_domain() {
+        let cookie = build_cookie(
+            "mlrunx_ui_session",
+            "abc123",
+            900,
+            true,
+            true,
+            "Lax",
+            Some("mlrunx.example.com"),
+        );
+
+        assert!(cookie.contains("Domain=mlrunx.example.com"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("Secure"));
+    }
+
+    #[test]
+    fn test_build_clear_cookie_includes_optional_domain() {
+        let cookie =
+            build_clear_cookie("mlrunx_ui_session", true, "Lax", Some("mlrunx.example.com"));
+        assert!(cookie.contains("Max-Age=0"));
+        assert!(cookie.contains("Domain=mlrunx.example.com"));
+    }
+
+    #[test]
+    fn test_parse_allowed_origins_validates_and_normalizes() {
+        let origins =
+            parse_allowed_origins(Some("https://mlrunx.example.com/, http://localhost:3000"))
+                .expect("expected valid origins");
+        let rendered: Vec<String> = origins
+            .iter()
+            .map(|value| value.to_str().expect("invalid header value").to_string())
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![
+                "https://mlrunx.example.com".to_string(),
+                "http://localhost:3000".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_allowed_origins_rejects_path_or_query() {
+        assert!(parse_allowed_origins(Some("https://mlrunx.example.com/ui")).is_err());
+        assert!(parse_allowed_origins(Some("https://mlrunx.example.com?x=1")).is_err());
     }
 
     #[tokio::test]

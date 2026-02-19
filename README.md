@@ -274,6 +274,10 @@ UI session auth notes:
 - Browser auth uses `HttpOnly` session cookies + CSRF token cookies.
 - Session expiry is sliding (renewed on authenticated requests).
 - `MLRUNX_UI_SESSION_TTL_SECONDS` defaults to `43200` (12 hours).
+- Production `hybrid` mode requires `MLRUNX_UI_COOKIE_SECURE=true`.
+- If you set `MLRUNX_UI_COOKIE_SAMESITE=None`, you must also set `MLRUNX_UI_COOKIE_SECURE=true`.
+- `MLRUNX_UI_ALLOWED_ORIGINS` entries must be origins only (`https://host[:port]`, no path/query).
+- `MLRUNX_UI_COOKIE_DOMAIN` is optional and useful when sharing auth cookies across subdomains.
 
 ### Development Setup
 

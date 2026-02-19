@@ -45,6 +45,7 @@ cp infra/docker/.env.prod.example infra/docker/.env.prod
   - `MLRUNX_JWT_PUBLIC_KEY_PEM` (or `MLRUNX_JWT_SECRET` only for `HS256`)
   - `MLRUNX_JWT_ISSUER` (for Supabase: `https://<project-ref>.supabase.co/auth/v1`)
   - `MLRUNX_JWT_AUDIENCE` (for Supabase: `authenticated`)
+  - `MLRUNX_UI_COOKIE_DOMAIN` (optional, only when sharing cookies across subdomains)
   - Optional: `MLRUNX_UI_KEY_MAX_TTL_SECONDS` (default `7776000`, 90 days)
 - If `MLRUNX_AUTH_MODE=api_key`:
   - Set `MLRUNX_UI_JWT_AUTH_ENABLED=false`
@@ -63,6 +64,11 @@ docker compose \
 5. Verify:
 - UI: `https://mlrunx.yourdomain.com`
 - API health: `https://mlrunx.yourdomain.com/health`
+
+Cookie/session stability notes:
+- In production with `MLRUNX_AUTH_MODE=hybrid`, set `MLRUNX_UI_COOKIE_SECURE=true` (required).
+- `MLRUNX_UI_COOKIE_SAMESITE=None` requires `MLRUNX_UI_COOKIE_SECURE=true`.
+- `MLRUNX_UI_ALLOWED_ORIGINS` values must be valid origins only (scheme + host + optional port, no paths).
 
 ## Troubleshooting
 

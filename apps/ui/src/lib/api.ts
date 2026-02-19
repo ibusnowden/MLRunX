@@ -326,6 +326,7 @@ function isMutatingMethod(method: string | undefined): boolean {
 interface FetchApiOptions {
   skipApiKey?: boolean;
   preferUiSession?: boolean;
+  forceApiKey?: boolean;
 }
 
 async function fetchApi<T>(
@@ -340,18 +341,16 @@ async function fetchApi<T>(
   };
 
   const apiKey = getApiKey();
-  const useSessionAuth =
-    Boolean(fetchOptions.preferUiSession) && Boolean(readCookie(UI_CSRF_COOKIE_NAME));
+  const csrfToken = readCookie(UI_CSRF_COOKIE_NAME);
+  const hasSessionCookie = Boolean(csrfToken);
+  const useSessionAuth = hasSessionCookie && !fetchOptions.forceApiKey;
 
   if (!fetchOptions.skipApiKey && !useSessionAuth && apiKey) {
     (headers as Record<string, string>)['X-API-Key'] = apiKey;
   }
 
-  if (isMutatingMethod(options.method)) {
-    const csrfToken = readCookie(UI_CSRF_COOKIE_NAME);
-    if (csrfToken) {
-      (headers as Record<string, string>)['X-CSRF-Token'] = csrfToken;
-    }
+  if (isMutatingMethod(options.method) && useSessionAuth && csrfToken) {
+    (headers as Record<string, string>)['X-CSRF-Token'] = csrfToken;
   }
 
   const includeCredentials = fetchOptions.skipApiKey || !apiKey || useSessionAuth;

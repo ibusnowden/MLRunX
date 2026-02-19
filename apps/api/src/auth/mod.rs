@@ -101,6 +101,7 @@ struct UiJwtConfig {
     session_ttl_seconds: u64,
     cookie_secure: bool,
     cookie_same_site: String,
+    cookie_domain: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +165,9 @@ impl UiJwtConfig {
                     }
                 },
             );
+        let cookie_domain = std::env::var("MLRUNX_UI_COOKIE_DOMAIN")
+            .ok()
+            .and_then(|v| normalize_cookie_domain(&v));
 
         let secret = std::env::var("MLRUNX_JWT_SECRET")
             .ok()
@@ -218,7 +222,17 @@ impl UiJwtConfig {
             session_ttl_seconds,
             cookie_secure: env_flag("MLRUNX_UI_COOKIE_SECURE"),
             cookie_same_site,
+            cookie_domain,
         }
+    }
+}
+
+fn normalize_cookie_domain(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -558,6 +572,7 @@ impl ApiKeyStore {
                 session_ttl_seconds: 900,
                 cookie_secure: false,
                 cookie_same_site: "Lax".to_string(),
+                cookie_domain: None,
             },
             runtime_auth_mode: RuntimeAuthMode::Hybrid,
             auth_hmac_secret,
@@ -594,6 +609,7 @@ impl ApiKeyStore {
                 session_ttl_seconds: 900,
                 cookie_secure: false,
                 cookie_same_site: "Lax".to_string(),
+                cookie_domain: None,
             },
             runtime_auth_mode: RuntimeAuthMode::Hybrid,
             auth_hmac_secret,
@@ -630,6 +646,10 @@ impl ApiKeyStore {
 
     pub fn ui_cookie_same_site(&self) -> &str {
         &self.ui_jwt.cookie_same_site
+    }
+
+    pub fn ui_cookie_domain(&self) -> Option<&str> {
+        self.ui_jwt.cookie_domain.as_deref()
     }
 
     pub fn validate_startup_configuration(&self) -> Result<(), String> {
@@ -2278,6 +2298,16 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
         assert_eq!(UiJwtAlgorithm::parse("rs256"), Some(UiJwtAlgorithm::Rs256));
         assert_eq!(UiJwtAlgorithm::parse("Es256"), Some(UiJwtAlgorithm::Es256));
         assert_eq!(UiJwtAlgorithm::parse("hs512"), None);
+    }
+
+    #[test]
+    fn test_normalize_cookie_domain() {
+        assert_eq!(normalize_cookie_domain(""), None);
+        assert_eq!(normalize_cookie_domain("   "), None);
+        assert_eq!(
+            normalize_cookie_domain(" mlrunx.example.com "),
+            Some("mlrunx.example.com".to_string())
+        );
     }
 
     #[test]
