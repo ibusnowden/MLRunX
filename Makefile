@@ -161,7 +161,7 @@ lint-rust:
 lint-python:
 	@echo "Linting Python..."
 	uv run ruff check sdks/
-	uv run mypy sdks/
+	uv run mypy sdks/python/src sdks/integrations/src
 
 lint-ui:
 	@echo "Linting UI..."

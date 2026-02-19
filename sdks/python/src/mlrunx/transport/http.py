@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -88,7 +88,14 @@ class HttpTransport(Transport):
             )
 
         try:
-            return response.json()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise TransportError(
+                    "Invalid JSON response from server: expected object payload",
+                    status_code=response.status_code,
+                    retryable=False,
+                )
+            return cast(dict[str, Any], payload)
         except ValueError as e:
             # Do not silently treat malformed responses as success.
             raise TransportError(

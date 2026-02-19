@@ -1,8 +1,9 @@
 """MLRunX init command - Initialize a project."""
 
 from pathlib import Path
+from typing import Any, cast
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 CONFIG_FILE = ".mlrunx.yaml"
 CONFIG_TEMPLATE = """\
@@ -113,7 +114,7 @@ def init_project(
     return True
 
 
-def load_config() -> dict | None:
+def load_config() -> dict[str, Any] | None:
     """Load MLRunX configuration from .mlrunx.yaml.
 
     Returns:
@@ -135,6 +136,9 @@ def load_config() -> dict | None:
 
     try:
         with open(config_path) as f:
-            return yaml.safe_load(f)
+            loaded = yaml.safe_load(f)
+            if isinstance(loaded, dict):
+                return cast(dict[str, Any], loaded)
+            return None
     except Exception:
         return None

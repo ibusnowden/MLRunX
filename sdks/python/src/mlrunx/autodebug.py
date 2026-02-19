@@ -13,9 +13,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 try:
-    import torch
+    import torch  # type: ignore[import-not-found]
 except ImportError:  # pragma: no cover - exercised in environments without torch
-    torch = None  # type: ignore[assignment]
+    torch = None
 
 
 def _safe_name(name: str) -> str:

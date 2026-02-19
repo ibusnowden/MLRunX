@@ -7,7 +7,7 @@ from .doctor import doctor
 from .init import init_project
 
 
-def main():
+def main() -> None:
     """Main entry point for the mlrunx CLI."""
     parser = argparse.ArgumentParser(
         prog="mlrunx",

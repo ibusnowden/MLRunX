@@ -39,7 +39,7 @@ def doctor(verbose: bool = False) -> bool:
     config_exists = config is not None
     print(f"{check_mark(config_exists)} Configuration file ({CONFIG_FILE})")
 
-    if config_exists and verbose:
+    if config_exists and verbose and config is not None:
         print(f"   Project: {config.get('project', 'N/A')}")
         print(f"   API URL: {config.get('api_url', 'N/A')}")
 
@@ -139,7 +139,7 @@ def check_health_endpoint(api_url: str) -> bool:
     try:
         req = urllib.request.Request(f"{api_url}/health", method="GET")
         with urllib.request.urlopen(req, timeout=5) as response:
-            return response.status == 200
+            return int(getattr(response, "status", 0)) == 200
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError):
         return False
 

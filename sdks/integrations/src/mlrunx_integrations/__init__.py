@@ -32,11 +32,11 @@ class MLRunXLogger:
         self.project = project
         # TODO: Implement Lightning logger interface
 
-    def log_metrics(self, metrics: dict, step: int | None = None) -> None:
+    def log_metrics(self, metrics: dict[str, float | int], step: int | None = None) -> None:
         """Log metrics to MLRunX."""
         pass  # TODO: Implement
 
-    def log_hyperparams(self, params: dict) -> None:
+    def log_hyperparams(self, params: dict[str, object]) -> None:
         """Log hyperparameters to MLRunX."""
         pass  # TODO: Implement
 

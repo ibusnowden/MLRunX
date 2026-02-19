@@ -29,6 +29,10 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+exclude = [
+    "sdks/python/examples",
+    "sdks/python/src/mlrunx/proto",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
@@ -42,6 +46,10 @@ python_version = "3.10"
 strict = true
 warn_return_any = true
 warn_unused_ignores = true
+exclude = [
+    "^sdks/python/examples/",
+    "^sdks/python/src/mlrunx/proto/",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["sdks/python/tests", "sdks/integrations/tests", "tests"]

@@ -32,6 +32,8 @@ Example usage:
 
 __version__ = "0.1.3"
 
+from typing import Any
+
 from mlrunx.autodebug import AutoDebugHelper
 from mlrunx.config import Config, configure, get_config
 from mlrunx.run import Run
@@ -57,7 +59,7 @@ def init(
     name: str | None = None,
     run_id: str | None = None,
     tags: dict[str, str] | None = None,
-    config: dict | None = None,
+    config: dict[str, Any] | None = None,
 ) -> Run:
     """Initialize a new run.
 
@@ -127,7 +129,7 @@ def log(data: dict[str, float | int], step: int | None = None) -> None:
     _active_run.log(data, step=step)
 
 
-def log_params(params: dict) -> None:
+def log_params(params: dict[str, Any]) -> None:
     """Log parameters to the active run (convenience function).
 
     Args:

@@ -44,6 +44,10 @@ packages = ["src/mlrunx"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+exclude = [
+    "examples",
+    "src/mlrunx/proto",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
