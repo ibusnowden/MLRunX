@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "apps/api",
+    "crates/api-http-types",
+    "crates/api-policy",
     "crates/proto",
     "services/ingest",
     "services/processor",
@@ -33,6 +35,8 @@ prost-types = "0.13"
 
 # Internal crates
 mlrunx-proto = { path = "crates/proto" }
+mlrunx-api-policy = { path = "crates/api-policy" }
+mlrunx-api-http-types = { path = "crates/api-http-types" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

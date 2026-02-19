@@ -1265,6 +1265,8 @@ dependencies = [
  "hmac",
  "http-body-util",
  "jsonwebtoken",
+ "mlrunx-api-http-types",
+ "mlrunx-api-policy",
  "mlrunx-proto",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -1288,6 +1290,17 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
 ]
+
+[[package]]
+name = "mlrunx-api-http-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "mlrunx-api-policy"
+version = "0.1.0"
 
 [[package]]
 name = "mlrunx-ingest"

@@ -23,6 +23,10 @@ MLRunX is run-centric.
   - Non-blocking client logging with batching + local spool for offline resilience.
 - `crates/proto`:
   - Shared protobuf contracts used by ingest/query surfaces.
+- `crates/api-policy`:
+  - Shared authorization policy checks reused by API handlers.
+- `crates/api-http-types`:
+  - Shared HTTP request/response structs for API surface boundaries.
 
 ## Data Ownership (v0.1)
 
@@ -47,6 +51,13 @@ MLRunX is run-centric.
 ## Evolution Path
 
 The repo also contains scaffolded scale-out building blocks (Postgres/ClickHouse/MinIO and service splits in `services/`), but current production behavior remains API + SQLite first.
+
+## Internal Boundaries
+
+- `apps/api` should primarily assemble routes, middleware, and storage wiring.
+- Authorization decision logic belongs in `crates/api-policy`.
+- Shared HTTP payload schemas belong in `crates/api-http-types`.
+- Handler modules should avoid re-implementing policy checks inline.
 
 ## Change Guide
 

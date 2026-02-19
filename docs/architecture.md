@@ -4,6 +4,13 @@
 
 MLRunX is designed as a monolith-first architecture, running as a single binary that serves both HTTP and gRPC protocols. This approach simplifies deployment and debugging while maintaining clear internal boundaries for future microservice decomposition.
 
+### Code Boundaries (Current)
+
+- `apps/api`: server bootstrap, router assembly, middleware wiring, handler orchestration.
+- `crates/api-policy`: reusable authorization policy checks.
+- `crates/api-http-types`: shared HTTP request/response payload types.
+- `crates/proto`: shared protobuf contracts for gRPC/ingest interfaces.
+
 ## Components
 
 ```
