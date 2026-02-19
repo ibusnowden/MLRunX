@@ -64,34 +64,42 @@ def main() -> None:
     # Log device/system info
     run.log_params(get_device_info())
 
-    # Training loop
-    num_steps = 1000
-    print(f"\nTraining for {num_steps} steps...")
+    status = "finished"
+    try:
+        # Training loop
+        num_steps = 1000
+        print(f"\nTraining for {num_steps} steps...")
 
-    start_time = time.perf_counter()
-    for step in range(num_steps):
-        # Simulate training
-        loss, accuracy = simulate_training_step(step)
+        start_time = time.perf_counter()
+        for step in range(num_steps):
+            # Simulate training
+            loss, accuracy = simulate_training_step(step)
 
-        # Log metrics (non-blocking!)
-        metrics = {"loss": loss, "accuracy": accuracy}
-        # Add system metrics (GPU, CPU, memory)
-        metrics.update(get_system_metrics())
-        run.log(metrics, step=step)
+            # Log metrics (non-blocking!)
+            metrics = {"loss": loss, "accuracy": accuracy}
+            # Add system metrics (GPU, CPU, memory)
+            metrics.update(get_system_metrics())
+            run.log(metrics, step=step)
 
-        # Print progress
-        if step % 100 == 0:
-            print(f"  Step {step}: loss={loss:.4f}, accuracy={accuracy:.4f}")
+            # Print progress
+            if step % 100 == 0:
+                print(f"  Step {step}: loss={loss:.4f}, accuracy={accuracy:.4f}")
 
-    elapsed = time.perf_counter() - start_time
-    print(f"\nTraining completed in {elapsed:.2f}s")
+        elapsed = time.perf_counter() - start_time
+        print(f"\nTraining completed in {elapsed:.2f}s")
 
-    # Log final summary
-    run.log_params({"final_loss": loss, "final_accuracy": accuracy})
-    run.log_tags({"status": "completed"})
-
-    # Finish the run (flushes all pending data)
-    run.finish()
+        # Log final summary
+        run.log_params({"final_loss": loss, "final_accuracy": accuracy})
+        run.log_tags({"status": "completed"})
+    except KeyboardInterrupt:
+        status = "killed"
+        raise
+    except Exception:
+        status = "failed"
+        raise
+    finally:
+        # Always flush pending events, including Ctrl+C interruptions.
+        run.finish(status=status)
 
     print("Run finished!")
 

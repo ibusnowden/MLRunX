@@ -66,10 +66,20 @@
 
 ## Why MLRunX?
 
+- **Run-centric by design**: every training execution is a first-class `run` with searchable metadata, metrics, params, and events
 - **Performance-first**: Rust API gateway with sub-second responses, designed to scale to 10k+ runs
 - **AI-native**: Built for RL/LLM training workflows with multi-run comparison and system metric overlays
 - **Local-first**: Single binary + SQLite, no external databases required. Privacy-first, no vendor lock-in
 - **Open**: MIT licensed, fully open-source
+
+## Run Model
+
+MLRunX is built around a single core object: a **run**.
+
+- Initialize with `mlrunx.init(...)` to create or resume one training execution.
+- Log structured data with lightweight SDK calls: metrics, params, tags, events, artifacts.
+- Query and compare runs by project, status, ownership, and metadata filters.
+- Visualize run timelines and charts in real time as data is ingested.
 
 ## Architecture (v0.1)
 
@@ -135,7 +145,8 @@ MinIO, Redis, and an OTEL collector for when these backends are wired in.
 | Standalone Docker image | Shipped |
 | GitHub Actions CI/CD (build, test, release) | Shipped |
 | Python SDK (async batching + offline spool) | Beta |
-| Framework integrations (Lightning, HF, Optuna) | Scaffolded |
+| Framework integrations (Lightning, HF, Optuna callbacks) | Scaffolded |
+| Hyperparameter sweeps + model registry | Planned |
 | ClickHouse / Postgres / MinIO backends | Scaffolded |
 | Distributed ingest + processor services | Scaffolded |
 
@@ -256,8 +267,13 @@ MLRUNX_AUTH_DISABLED=true cargo run --bin mlrunx-api
 curl -X POST http://localhost:3001/api/v1/keys \
   -H "X-API-Key: $ADMIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name": "team-alpha", "project_id": "my-project", "scope": "write"}'
+  -d '{"name": "team-alpha", "project_id": "my-project", "scopes": ["read","write"]}'
 ```
+
+UI session auth notes:
+- Browser auth uses `HttpOnly` session cookies + CSRF token cookies.
+- Session expiry is sliding (renewed on authenticated requests).
+- `MLRUNX_UI_SESSION_TTL_SECONDS` defaults to `43200` (12 hours).
 
 ### Development Setup
 
@@ -290,15 +306,23 @@ run = mlrunx.init(
     name="training-run-1",
 )
 
-# Log metrics (async, batched automatically)
-for step in range(1000):
-    run.log({"loss": loss, "accuracy": acc}, step=step)
+status = "finished"
+try:
+    # Log metrics (async, batched automatically)
+    for step in range(1000):
+        run.log({"loss": loss, "accuracy": acc}, step=step)
 
-# Log artifacts
-run.log_artifact("model.pt", type="model")
-
-# Finish
-run.finish()
+    # Log artifacts/outputs as needed
+    run.log_artifact("model.pt", artifact_type="model")
+except KeyboardInterrupt:
+    status = "killed"
+    raise
+except Exception:
+    status = "failed"
+    raise
+finally:
+    # Ensure buffered data is flushed on normal exit or interruption.
+    run.finish(status=status)
 ```
 
 ## Integrations (Scaffolded)
