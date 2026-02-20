@@ -26,24 +26,6 @@ const ModelsIcon = () => (
   </svg>
 );
 
-const ProfileIcon = () => (
-  <svg className="h-[18px] w-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M15.75 5.25a3 3 0 11-6 0 3 3 0 016 0zm-10.154 13.573A7.49 7.49 0 0112 15a7.49 7.49 0 016.404 3.823" />
-  </svg>
-);
-
-const ApiKeyIcon = () => (
-  <svg className="h-[18px] w-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M15.75 5.25a3 3 0 014.24 4.24l-5.92 5.92a4.5 4.5 0 01-6.36 0l-.2-.2a4.5 4.5 0 010-6.36l1.44-1.43m2.31 11.18l2.25-2.25M13.5 15l2.25-2.25" />
-  </svg>
-);
-
-const ProjectsIcon = () => (
-  <svg className="h-[18px] w-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M3.75 7.5A2.25 2.25 0 016 5.25h4.19a2.25 2.25 0 011.59.66l.81.84a2.25 2.25 0 001.59.66H18A2.25 2.25 0 0120.25 9.5v7A2.25 2.25 0 0118 18.75H6a2.25 2.25 0 01-2.25-2.25v-9z" />
-  </svg>
-);
-
 const SettingsIcon = () => (
   <svg className="h-[18px] w-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -108,16 +90,12 @@ const MAIN_ITEMS: NavItem[] = [
 ];
 
 const ACCOUNT_ITEMS: NavItem[] = [
-  { href: '/settings#profile', label: 'Profile', icon: ProfileIcon },
-  { href: '/settings#projects', label: 'Projects', icon: ProjectsIcon },
-  { href: '/settings#api-keys', label: 'API Keys', icon: ApiKeyIcon },
-  { href: '/settings#settings', label: 'Settings', icon: SettingsIcon },
+  { href: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
 const ADMIN_ITEM: NavItem = { href: '/admin', label: 'Admin', icon: AdminIcon };
 
 function isActivePath(pathname: string, href: string): boolean {
-  if (href.startsWith('/settings#')) return pathname === '/settings';
   if (href === '/') return pathname === '/';
   return pathname.startsWith(href);
 }
