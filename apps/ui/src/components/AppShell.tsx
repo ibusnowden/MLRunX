@@ -23,7 +23,7 @@ function getPageTitle(pathname: string): string {
   if (pathname === '/onboarding') return 'Onboarding';
   if (pathname.startsWith('/runs/')) return 'Run Details';
   if (pathname === '/compare') return 'Compare';
-  if (pathname === '/settings') return 'Access Console';
+  if (pathname === '/settings') return 'Settings';
   if (pathname === '/admin') return 'Platform Admin';
   if (pathname === '/login') return 'Login';
   if (pathname === '/signup') return 'Sign Up';
