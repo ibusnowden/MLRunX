@@ -20,6 +20,9 @@
     "react-dom": "19.2.3",
     "uplot": "^1.6.32"
   },
+  "overrides": {
+    "minimatch": "^10.2.1"
+  },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@testing-library/dom": "^10.0.0",
