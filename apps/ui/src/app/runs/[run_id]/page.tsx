@@ -258,33 +258,6 @@ function getMetricStats(series: MetricSeries | undefined): MetricStats {
   };
 }
 
-function selectFeaturedMetrics(names: string[]): string[] {
-  if (names.length === 0) return [];
-
-  const preferred: string[] = [];
-  const addIfFound = (predicate: (name: string) => boolean) => {
-    const found = names.find(predicate);
-    if (found && !preferred.includes(found)) {
-      preferred.push(found);
-    }
-  };
-
-  addIfFound((name) => TRAIN_LOSS_CANDIDATES.includes(name.toLowerCase()));
-  addIfFound((name) => VAL_LOSS_CANDIDATES.includes(name.toLowerCase()));
-  addIfFound((name) => name.toLowerCase().includes('loss'));
-  addIfFound((name) => name.toLowerCase().includes('lr') || name.toLowerCase().includes('learning_rate'));
-  addIfFound((name) => name.toLowerCase().includes('seq') || name.toLowerCase().includes('length'));
-
-  for (const name of names) {
-    if (preferred.length >= 3) break;
-    if (!preferred.includes(name)) {
-      preferred.push(name);
-    }
-  }
-
-  return preferred.slice(0, 3);
-}
-
 function alignSeriesForChart(seriesList: MetricSeries[]): ChartData {
   if (seriesList.length === 0) {
     return { xData: [], series: [] };
@@ -646,20 +619,12 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     { intervalMs: 4000, enabled: run?.status === 'running', runOnMount: false }
   );
 
-  const featuredMetricNames = useMemo(
-    () => selectFeaturedMetrics(availableMetrics),
-    [availableMetrics]
-  );
-
-  const featuredMetricSeries = useMemo(() => {
-    return featuredMetricNames
-      .map((name) => metrics.find((series) => series.name === name))
-      .filter((series): series is MetricSeries => Boolean(series));
-  }, [featuredMetricNames, metrics]);
-
-  const chartData = useMemo<ChartData>(() => {
-    return alignSeriesForChart(featuredMetricSeries);
-  }, [featuredMetricSeries]);
+  const perMetricCharts = useMemo(() => {
+    return metrics.map((series) => ({
+      name: series.name,
+      ...alignSeriesForChart([series]),
+    }));
+  }, [metrics]);
 
   const totalSteps = useMemo(() => {
     if (!run) return 0;
@@ -904,56 +869,56 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <section className="rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
-            <div className="flex items-center justify-between border-b border-border px-5 py-4">
-              <div className="flex items-center gap-2.5">
-                <div className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-accent-subtle text-accent">
-                  <CompareIcon />
-                </div>
-                <div>
-                  <h2 className="text-xl font-semibold text-text-primary">Training Loss</h2>
-                  <p className="text-xs text-text-muted">
-                    {featuredMetricSeries.length > 0 ? `${featuredMetricSeries.length} metrics` : 'No metric series'}
-                  </p>
-                </div>
-              </div>
-            </div>
-            <div className="p-4">
-              {metricsError && (
-                <div className="mb-3 rounded-lg border border-[color:rgba(248,113,113,0.25)] bg-danger-subtle px-3 py-2 text-sm text-danger">
-                  {metricsError}
-                </div>
-              )}
-              {metricsLoading ? (
-                <div className="h-[430px] rounded-xl border border-border bg-background">
-                  <LoadingSpinner />
-                </div>
-              ) : chartData.xData.length === 0 || chartData.series.length === 0 ? (
-                <div className="flex h-[430px] items-center justify-center rounded-xl border border-border bg-background text-sm text-text-muted">
-                  {run.metrics_count > 0
-                    ? 'Metrics are still syncing for this run.'
-                    : 'No metrics recorded for this run.'}
-                </div>
-              ) : (
-                <div className="overflow-hidden rounded-xl border border-border">
-                  <UPlotChart
-                    xData={chartData.xData}
-                    series={chartData.series}
-                    xLabel="Step"
-                    yLabel="Loss"
-                    height={430}
-                    interactive={true}
-                    darkTheme={isDark}
-                    showLegend={true}
-                    smoothing={0.06}
-                    areaFill={true}
-                  />
-                </div>
-              )}
-            </div>
-          </section>
+        {metricsError && (
+          <div className="mb-4 rounded-lg border border-[color:rgba(248,113,113,0.25)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+            {metricsError}
+          </div>
+        )}
 
+        {metricsLoading ? (
+          <div className="mb-4 rounded-2xl border border-border bg-surface p-4">
+            <div className="h-[280px] rounded-xl border border-border bg-background">
+              <LoadingSpinner />
+            </div>
+          </div>
+        ) : perMetricCharts.length === 0 ? (
+          <div className="mb-4 flex h-[280px] items-center justify-center rounded-2xl border border-border bg-surface text-sm text-text-muted">
+            {run.metrics_count > 0
+              ? 'Metrics are still syncing for this run.'
+              : 'No metrics recorded for this run.'}
+          </div>
+        ) : (
+          <div className="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+            {perMetricCharts.map((chart) => (
+              <section key={chart.name} className="rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
+                <div className="flex items-center gap-2.5 border-b border-border px-5 py-3">
+                  <div className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-accent-subtle text-accent">
+                    <CompareIcon />
+                  </div>
+                  <h2 className="text-lg font-semibold text-text-primary">{chart.name}</h2>
+                </div>
+                <div className="p-4">
+                  <div className="overflow-hidden rounded-xl border border-border">
+                    <UPlotChart
+                      xData={chart.xData}
+                      series={chart.series}
+                      xLabel="Step"
+                      yLabel={chart.name}
+                      height={280}
+                      interactive={true}
+                      darkTheme={isDark}
+                      showLegend={true}
+                      smoothing={0.06}
+                      areaFill={true}
+                    />
+                  </div>
+                </div>
+              </section>
+            ))}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <div className="flex flex-col gap-4">
             <section className="rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
               <div className="border-b border-border px-5 py-4">
