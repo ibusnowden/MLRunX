@@ -52,6 +52,7 @@ class MLRunTestClient:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
+        self._project_ids_by_name: dict[str, str] = {}
 
     def health_check(self) -> bool:
         """Check if API is healthy."""
@@ -69,7 +70,13 @@ class MLRunTestClient:
         tags: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Initialize a new run."""
-        payload = {"project": project}
+        project_id = self._project_ids_by_name.get(project)
+        if project_id is None:
+            project_resp = self.create_project(name=project)
+            project_id = project_resp["project_id"]
+            self._project_ids_by_name[project] = project_id
+
+        payload = {"project": project, "project_id": project_id}
         if name:
             payload["name"] = name
         if run_id:
@@ -79,6 +86,24 @@ class MLRunTestClient:
 
         r = self.session.post(
             f"{self.base_url}/api/v1/runs",
+            json=payload,
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def create_project(
+        self,
+        name: str,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a project and return the response payload."""
+        payload: dict[str, Any] = {"name": name}
+        if description:
+            payload["description"] = description
+
+        r = self.session.post(
+            f"{self.base_url}/api/v1/projects",
             json=payload,
             timeout=TIMEOUT,
         )

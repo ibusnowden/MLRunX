@@ -365,13 +365,13 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
 
   useEffect(() => {
     const params = new URLSearchParams();
-    if (searchQuery.trim()) params.set('q', searchQuery.trim());
+    if (debouncedQuery.trim()) params.set('q', debouncedQuery.trim());
     if (page > 0) params.set('page', String(page + 1));
     const queryString = params.toString();
     if (queryString !== searchParams.toString()) {
       router.replace(queryString ? `/?${queryString}` : '/', { scroll: false });
     }
-  }, [page, router, searchParams, searchQuery]);
+  }, [debouncedQuery, page, router, searchParams]);
 
   useEffect(() => {
     const nextQuery = searchParams.get('q') ?? '';
@@ -381,13 +381,10 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
         ? nextPageParam - 1
         : 0;
 
-    if (nextQuery !== searchQuery) {
-      setSearchQuery(nextQuery);
-    }
-    if (nextPage !== page) {
-      setPage(nextPage);
-    }
-  }, [page, searchParams, searchQuery]);
+    setSearchQuery((current) => (current === nextQuery ? current : nextQuery));
+    setDebouncedQuery((current) => (current === nextQuery ? current : nextQuery));
+    setPage((current) => (current === nextPage ? current : nextPage));
+  }, [searchParams]);
 
   const fetchRuns = useCallback(
     async ({ silent = false }: { silent?: boolean } = {}) => {
@@ -438,6 +435,17 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
       });
     }
   }, [onStatsChange, runs, total]);
+
+  useEffect(() => {
+    const visibleRunIds = new Set(runs.map((run) => run.run_id));
+    setRunDetailsById((current) => {
+      const filteredEntries = Object.entries(current).filter(([runId]) => visibleRunIds.has(runId));
+      if (filteredEntries.length === Object.keys(current).length) {
+        return current;
+      }
+      return Object.fromEntries(filteredEntries);
+    });
+  }, [runs]);
 
   useEffect(() => {
     const missingRunIds = runs

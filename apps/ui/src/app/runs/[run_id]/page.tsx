@@ -5,6 +5,7 @@ import { use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, MetricSeries, RunDetail, RunEvent } from '@/lib/api';
 import { formatDuration, formatFixed } from '@/lib/format';
+import { groupMetrics } from '@/lib/metricGroups';
 import { UPlotChart, type ChartSeries } from '@/components/charts/UPlotChart';
 import { useTheme } from '@/components/ThemeProvider';
 import { useAutoRefresh } from '@/lib/useAutoRefresh';
@@ -30,6 +31,24 @@ type MetricStats = {
   maxStep?: number;
 };
 
+type ConsoleTab = 'overview' | 'logs';
+
+type MobileWorkspaceTab = 'charts' | 'console';
+
+type EventLevelFilter = 'all' | 'debug' | 'info' | 'warn' | 'error';
+
+type MetricChartView = {
+  name: string;
+  xData: number[];
+  series: ChartSeries[];
+};
+
+type MetricChartGroup = {
+  groupKey: string;
+  title: string;
+  charts: MetricChartView[];
+};
+
 const METRIC_FETCH_MAX_POINTS = 1200;
 const RUN_EVENTS_FETCH_LIMIT = 200;
 
@@ -41,6 +60,14 @@ const THROUGHPUT_CANDIDATES = [
   'throughput/tokens_per_sec',
   'train/tokens_per_sec',
   'tps',
+];
+
+const EVENT_LEVEL_FILTERS: Array<{ value: EventLevelFilter; label: string }> = [
+  { value: 'all', label: 'All' },
+  { value: 'info', label: 'Info' },
+  { value: 'warn', label: 'Warn' },
+  { value: 'error', label: 'Error' },
+  { value: 'debug', label: 'Debug' },
 ];
 
 const STATUS_BADGE_STYLES: Record<string, string> = {
@@ -516,6 +543,10 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
   const [eventsError, setEventsError] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [activeMetricGroup, setActiveMetricGroup] = useState('all');
+  const [consoleTab, setConsoleTab] = useState<ConsoleTab>('overview');
+  const [mobileWorkspaceTab, setMobileWorkspaceTab] = useState<MobileWorkspaceTab>('charts');
+  const [eventLevelFilter, setEventLevelFilter] = useState<EventLevelFilter>('all');
   const eventsCursorRef = useRef<number | null>(null);
 
   const setTheme = (target: 'dark' | 'light') => {
@@ -619,12 +650,45 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     { intervalMs: 4000, enabled: run?.status === 'running', runOnMount: false }
   );
 
-  const perMetricCharts = useMemo(() => {
+  const perMetricCharts = useMemo<MetricChartView[]>(() => {
     return metrics.map((series) => ({
       name: series.name,
       ...alignSeriesForChart([series]),
     }));
   }, [metrics]);
+
+  const metricChartGroups = useMemo<MetricChartGroup[]>(() => {
+    if (perMetricCharts.length === 0) return [];
+    const chartByName = new Map(perMetricCharts.map((chart) => [chart.name, chart]));
+    return groupMetrics(perMetricCharts.map((chart) => chart.name))
+      .map((group) => ({
+        groupKey: group.groupKey,
+        title: group.title,
+        charts: group.metrics
+          .map((metricName) => chartByName.get(metricName))
+          .filter((chart): chart is MetricChartView => Boolean(chart)),
+      }))
+      .filter((group) => group.charts.length > 0);
+  }, [perMetricCharts]);
+
+  const activeMetricCharts = useMemo<MetricChartView[]>(() => {
+    if (activeMetricGroup === 'all') return perMetricCharts;
+    const selected = metricChartGroups.find((group) => group.groupKey === activeMetricGroup);
+    return selected?.charts ?? perMetricCharts;
+  }, [activeMetricGroup, metricChartGroups, perMetricCharts]);
+
+  const activeMetricGroupTitle = useMemo(() => {
+    if (activeMetricGroup === 'all') return 'All Metrics';
+    return metricChartGroups.find((group) => group.groupKey === activeMetricGroup)?.title ?? 'All Metrics';
+  }, [activeMetricGroup, metricChartGroups]);
+
+  useEffect(() => {
+    if (activeMetricGroup === 'all') return;
+    const exists = metricChartGroups.some((group) => group.groupKey === activeMetricGroup);
+    if (!exists) {
+      setActiveMetricGroup('all');
+    }
+  }, [activeMetricGroup, metricChartGroups]);
 
   const totalSteps = useMemo(() => {
     if (!run) return 0;
@@ -678,6 +742,11 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     return buildProgressSteps(run, runTags, totalSteps);
   }, [run, runTags, totalSteps]);
 
+  const filteredRunEvents = useMemo(() => {
+    if (eventLevelFilter === 'all') return runEvents;
+    return runEvents.filter((event) => normalizeEventLevel(event.level) === eventLevelFilter);
+  }, [runEvents, eventLevelFilter]);
+
   const lastEventRelative = useMemo(() => {
     if (!run) return '';
     if (runEvents.length === 0) return formatRelativeTime(run.updated_at);
@@ -727,7 +796,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
 
   return (
     <main className="min-h-screen bg-[var(--page-gradient)] px-5 py-8 sm:px-8">
-      <div className="mx-auto max-w-[1150px]">
+      <div className="mx-auto max-w-[1360px]">
         <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
           <Link
             href="/"
@@ -869,180 +938,321 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
           </div>
         </div>
 
-        {metricsError && (
-          <div className="mb-4 rounded-lg border border-[color:rgba(248,113,113,0.25)] bg-danger-subtle px-3 py-2 text-sm text-danger">
-            {metricsError}
+        <div className="mb-4 lg:hidden">
+          <div className="inline-flex rounded-lg border border-border bg-surface p-0.5">
+            <button
+              type="button"
+              onClick={() => setMobileWorkspaceTab('charts')}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+                mobileWorkspaceTab === 'charts'
+                  ? 'bg-accent-subtle text-accent'
+                  : 'text-text-muted hover:text-text-secondary'
+              }`}
+            >
+              Charts
+            </button>
+            <button
+              type="button"
+              onClick={() => setMobileWorkspaceTab('console')}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+                mobileWorkspaceTab === 'console'
+                  ? 'bg-accent-subtle text-accent'
+                  : 'text-text-muted hover:text-text-secondary'
+              }`}
+            >
+              Run Console
+            </button>
           </div>
-        )}
+        </div>
 
-        {metricsLoading ? (
-          <div className="mb-4 rounded-2xl border border-border bg-surface p-4">
-            <div className="h-[280px] rounded-xl border border-border bg-background">
-              <LoadingSpinner />
-            </div>
-          </div>
-        ) : perMetricCharts.length === 0 ? (
-          <div className="mb-4 flex h-[280px] items-center justify-center rounded-2xl border border-border bg-surface text-sm text-text-muted">
-            {run.metrics_count > 0
-              ? 'Metrics are still syncing for this run.'
-              : 'No metrics recorded for this run.'}
-          </div>
-        ) : (
-          <div className="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
-            {perMetricCharts.map((chart) => (
-              <section key={chart.name} className="rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
-                <div className="flex items-center gap-2.5 border-b border-border px-5 py-3">
-                  <div className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-accent-subtle text-accent">
-                    <CompareIcon />
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_370px]">
+          <section className={`${mobileWorkspaceTab === 'charts' ? 'block' : 'hidden'} lg:block`}>
+            {metricsError && (
+              <div className="mb-4 rounded-lg border border-[color:rgba(248,113,113,0.25)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                {metricsError}
+              </div>
+            )}
+
+            {metricsLoading ? (
+              <div className="mb-4 rounded-2xl border border-border bg-surface p-4">
+                <div className="h-[280px] rounded-xl border border-border bg-background">
+                  <LoadingSpinner />
+                </div>
+              </div>
+            ) : perMetricCharts.length === 0 ? (
+              <div className="mb-4 flex h-[280px] items-center justify-center rounded-2xl border border-border bg-surface text-sm text-text-muted">
+                {run.metrics_count > 0
+                  ? 'Metrics are still syncing for this run.'
+                  : 'No metrics recorded for this run.'}
+              </div>
+            ) : (
+              <>
+                <section className="mb-4 rounded-2xl border border-border bg-surface px-4 py-3">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <h2 className="text-sm font-semibold uppercase tracking-[0.06em] text-text-muted">
+                      Metric Groups
+                    </h2>
+                    <span className="text-sm text-text-secondary">
+                      {activeMetricGroupTitle} ({activeMetricCharts.length})
+                    </span>
                   </div>
-                  <h2 className="text-lg font-semibold text-text-primary">{chart.name}</h2>
-                </div>
-                <div className="p-4">
-                  <div className="overflow-hidden rounded-xl border border-border">
-                    <UPlotChart
-                      xData={chart.xData}
-                      series={chart.series}
-                      xLabel="Step"
-                      yLabel={chart.name}
-                      height={280}
-                      interactive={true}
-                      darkTheme={isDark}
-                      showLegend={true}
-                      smoothing={0.06}
-                      areaFill={true}
-                    />
-                  </div>
-                </div>
-              </section>
-            ))}
-          </div>
-        )}
-
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <div className="flex flex-col gap-4">
-            <section className="rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
-              <div className="border-b border-border px-5 py-4">
-                <h2 className="text-xl font-semibold text-text-primary">Training Configuration</h2>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3">
-                <div className="border-b border-border px-5 py-4 sm:border-b-0 sm:border-r">
-                  <div className="text-[11px] uppercase tracking-[0.08em] text-text-muted">GPU</div>
-                  <div className="mt-1.5 text-xl font-semibold text-text-primary">{configValues.gpu}</div>
-                </div>
-                <div className="border-b border-border px-5 py-4 sm:border-b-0 sm:border-r">
-                  <div className="text-[11px] uppercase tracking-[0.08em] text-text-muted">Quantization</div>
-                  <div className="mt-1.5 text-xl font-semibold text-text-primary">{configValues.quantization}</div>
-                </div>
-                <div className="px-5 py-4">
-                  <div className="text-[11px] uppercase tracking-[0.08em] text-text-muted">Framework</div>
-                  <div className="mt-1.5 text-xl font-semibold text-text-primary">{configValues.framework}</div>
-                </div>
-              </div>
-            </section>
-
-            <section className="rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
-              <div className="border-b border-border px-5 py-4">
-                <h2 className="text-xl font-semibold text-text-primary">Hyperparameters</h2>
-              </div>
-              <KeyValueGrid items={hyperparams} />
-            </section>
-          </div>
-
-          <section className="rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
-            <div className="border-b border-border px-5 py-4">
-              <h2 className="text-xl font-semibold text-text-primary">Training Progress</h2>
-            </div>
-            <div className="px-5 py-4">
-              <ol className="space-y-1">
-                {progressSteps.map((step, index) => (
-                  <li key={step.label} className="flex gap-3 py-1">
-                    <div className="flex w-5 flex-col items-center">
-                      <span
-                        className={`h-2.5 w-2.5 rounded-full border-2 ${
-                          step.state === 'done'
-                            ? 'border-[var(--badge-finished-text)] bg-[var(--badge-finished-text)]'
-                            : step.state === 'active'
-                              ? 'border-[var(--badge-running-text)] bg-[var(--badge-running-text)] shadow-[0_0_0_4px_rgba(96,165,250,0.15)]'
-                              : 'border-border bg-surface-secondary'
-                        }`}
-                      />
-                      {index < progressSteps.length - 1 && (
-                        <span
-                          className={`mt-1 h-7 w-[2px] ${
-                            step.state === 'done' ? 'bg-[var(--badge-finished-text)]' : 'bg-border'
-                          }`}
-                        />
-                      )}
-                    </div>
-                    <div>
-                      <div
-                        className={`text-lg ${
-                          step.state === 'active'
-                            ? 'font-semibold text-accent'
-                            : step.state === 'done'
-                              ? 'font-medium text-text-primary'
-                              : 'font-medium text-text-muted'
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setActiveMetricGroup('all')}
+                      className={`rounded-full border px-3 py-1.5 text-sm font-medium ${
+                        activeMetricGroup === 'all'
+                          ? 'border-accent bg-accent-subtle text-accent'
+                          : 'border-border bg-surface-secondary text-text-secondary hover:text-text-primary'
+                      }`}
+                    >
+                      All ({perMetricCharts.length})
+                    </button>
+                    {metricChartGroups.map((group) => (
+                      <button
+                        key={group.groupKey}
+                        type="button"
+                        onClick={() => setActiveMetricGroup(group.groupKey)}
+                        className={`rounded-full border px-3 py-1.5 text-sm font-medium ${
+                          activeMetricGroup === group.groupKey
+                            ? 'border-accent bg-accent-subtle text-accent'
+                            : 'border-border bg-surface-secondary text-text-secondary hover:text-text-primary'
                         }`}
                       >
-                        {step.label}
+                        {group.title} ({group.charts.length})
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                <div className="mb-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
+                  {activeMetricCharts.map((chart) => (
+                    <section key={chart.name} className="rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
+                      <div className="flex items-center gap-2.5 border-b border-border px-5 py-3">
+                        <div className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-accent-subtle text-accent">
+                          <CompareIcon />
+                        </div>
+                        <h2 className="text-lg font-semibold text-text-primary">{chart.name}</h2>
                       </div>
-                      <div className="font-mono text-xs text-text-muted">{step.detail}</div>
-                    </div>
-                  </li>
-                ))}
-              </ol>
-            </div>
+                      <div className="p-4">
+                        <div className="overflow-hidden rounded-xl border border-border">
+                          <UPlotChart
+                            xData={chart.xData}
+                            series={chart.series}
+                            xLabel="Step"
+                            yLabel={chart.name}
+                            height={280}
+                            interactive={true}
+                            darkTheme={isDark}
+                            showLegend={true}
+                            smoothing={0.06}
+                            areaFill={true}
+                          />
+                        </div>
+                      </div>
+                    </section>
+                  ))}
+                </div>
+              </>
+            )}
           </section>
 
-          <section className="rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
-            <div className="border-b border-border px-5 py-4">
-              <h2 className="text-xl font-semibold text-text-primary">Logs</h2>
-              <p className="mt-0.5 text-xs text-text-muted">Live run events from backend</p>
-            </div>
-            <div className="p-4">
-              <div className="max-h-[260px] overflow-y-auto rounded-xl border border-border bg-background px-4 py-3 font-mono text-xs">
-                {eventsLoading ? (
-                  <div className="py-6 text-center text-text-muted">Loading run events...</div>
-                ) : eventsError ? (
-                  <div className="py-6 text-center text-danger">{eventsError}</div>
-                ) : runEvents.length === 0 ? (
-                  <div className="py-6 text-center text-text-muted">
-                    No events recorded yet. Use{' '}
-                    <code className="font-semibold text-text-secondary">run.log_event(...)</code>{' '}
-                    to stream training logs.
+          <aside className={`${mobileWorkspaceTab === 'console' ? 'block' : 'hidden'} lg:block`}>
+            <div className="lg:sticky lg:top-6">
+              <section className="rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
+                <div className="border-b border-border px-5 py-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-xl font-semibold text-text-primary">Run Console</h2>
+                      <p className="mt-0.5 text-xs text-text-muted">Training configuration, progress, and logs in one panel</p>
+                    </div>
+                    <div className="inline-flex rounded-lg border border-border bg-surface-secondary p-0.5">
+                      <button
+                        type="button"
+                        onClick={() => setConsoleTab('overview')}
+                        className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+                          consoleTab === 'overview'
+                            ? 'bg-accent-subtle text-accent'
+                            : 'text-text-muted hover:text-text-secondary'
+                        }`}
+                      >
+                        Overview
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConsoleTab('logs')}
+                        className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+                          consoleTab === 'logs'
+                            ? 'bg-accent-subtle text-accent'
+                            : 'text-text-muted hover:text-text-secondary'
+                        }`}
+                      >
+                        Logs
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {consoleTab === 'overview' ? (
+                  <div className="space-y-4 p-4">
+                    <section className="overflow-hidden rounded-xl border border-border">
+                      <div className="border-b border-border px-4 py-3">
+                        <h3 className="text-base font-semibold text-text-primary">Training Progress</h3>
+                      </div>
+                      <div className="max-h-[340px] overflow-y-auto px-4 py-3">
+                        <ol className="space-y-1">
+                          {progressSteps.map((step, index) => (
+                            <li key={step.label} className="flex gap-3 py-1">
+                              <div className="flex w-5 flex-col items-center">
+                                <span
+                                  className={`h-2.5 w-2.5 rounded-full border-2 ${
+                                    step.state === 'done'
+                                      ? 'border-[var(--badge-finished-text)] bg-[var(--badge-finished-text)]'
+                                      : step.state === 'active'
+                                        ? 'border-[var(--badge-running-text)] bg-[var(--badge-running-text)] shadow-[0_0_0_4px_rgba(96,165,250,0.15)]'
+                                        : 'border-border bg-surface-secondary'
+                                  }`}
+                                />
+                                {index < progressSteps.length - 1 && (
+                                  <span
+                                    className={`mt-1 h-7 w-[2px] ${
+                                      step.state === 'done' ? 'bg-[var(--badge-finished-text)]' : 'bg-border'
+                                    }`}
+                                  />
+                                )}
+                              </div>
+                              <div>
+                                <div
+                                  className={`text-base ${
+                                    step.state === 'active'
+                                      ? 'font-semibold text-accent'
+                                      : step.state === 'done'
+                                        ? 'font-medium text-text-primary'
+                                        : 'font-medium text-text-muted'
+                                  }`}
+                                >
+                                  {step.label}
+                                </div>
+                                <div className="font-mono text-xs text-text-muted">{step.detail}</div>
+                              </div>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    </section>
+
+                    <section className="overflow-hidden rounded-xl border border-border">
+                      <div className="border-b border-border px-4 py-3">
+                        <h3 className="text-base font-semibold text-text-primary">Training Configuration</h3>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3">
+                        <div className="border-b border-border px-4 py-3 sm:border-b-0 sm:border-r">
+                          <div className="text-[11px] uppercase tracking-[0.08em] text-text-muted">GPU</div>
+                          <div className="mt-1.5 text-lg font-semibold text-text-primary">{configValues.gpu}</div>
+                        </div>
+                        <div className="border-b border-border px-4 py-3 sm:border-b-0 sm:border-r">
+                          <div className="text-[11px] uppercase tracking-[0.08em] text-text-muted">Quantization</div>
+                          <div className="mt-1.5 text-lg font-semibold text-text-primary">{configValues.quantization}</div>
+                        </div>
+                        <div className="px-4 py-3">
+                          <div className="text-[11px] uppercase tracking-[0.08em] text-text-muted">Framework</div>
+                          <div className="mt-1.5 text-lg font-semibold text-text-primary">{configValues.framework}</div>
+                        </div>
+                      </div>
+                    </section>
+
+                    <section className="overflow-hidden rounded-xl border border-border">
+                      <div className="border-b border-border px-4 py-3">
+                        <h3 className="text-base font-semibold text-text-primary">Hyperparameters</h3>
+                      </div>
+                      <KeyValueGrid items={hyperparams} />
+                    </section>
+
+                    <section className="rounded-xl border border-border bg-surface-secondary px-4 py-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <h3 className="text-sm font-semibold text-text-primary">Logs</h3>
+                          <p className="text-xs text-text-muted">Last event: {lastEventRelative || 'n/a'}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setConsoleTab('logs')}
+                          className="rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-secondary hover:text-text-primary"
+                        >
+                          Open Logs
+                        </button>
+                      </div>
+                    </section>
                   </div>
                 ) : (
-                  runEvents.map((event) => {
-                    const level = normalizeEventLevel(event.level);
-                    const levelClass =
-                      level === 'error'
-                        ? 'font-semibold text-danger'
-                        : level === 'warn'
-                          ? 'font-semibold text-warning'
-                          : level === 'debug'
-                            ? 'font-semibold text-text-secondary'
-                            : 'font-semibold text-accent';
-                    const stepSuffix =
-                      event.step !== null && event.step !== undefined
-                        ? ` (step ${event.step.toLocaleString()})`
-                        : '';
-                    const sourcePrefix = event.source ? `[${event.source}] ` : '';
+                  <div className="p-4">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs text-text-muted">Live run events from backend</p>
+                      <span className="text-xs text-text-muted">Last event: {lastEventRelative || 'n/a'}</span>
+                    </div>
+                    <div className="mb-3 flex flex-wrap gap-2">
+                      {EVENT_LEVEL_FILTERS.map((filter) => (
+                        <button
+                          key={filter.value}
+                          type="button"
+                          onClick={() => setEventLevelFilter(filter.value)}
+                          className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${
+                            eventLevelFilter === filter.value
+                              ? 'border-accent bg-accent-subtle text-accent'
+                              : 'border-border bg-surface-secondary text-text-secondary hover:text-text-primary'
+                          }`}
+                        >
+                          {filter.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="max-h-[620px] overflow-y-auto rounded-xl border border-border bg-background px-4 py-3 font-mono text-xs">
+                      {eventsLoading ? (
+                        <div className="py-6 text-center text-text-muted">Loading run events...</div>
+                      ) : eventsError ? (
+                        <div className="py-6 text-center text-danger">{eventsError}</div>
+                      ) : runEvents.length === 0 ? (
+                        <div className="py-6 text-center text-text-muted">
+                          No events recorded yet. Use{' '}
+                          <code className="font-semibold text-text-secondary">run.log_event(...)</code>{' '}
+                          to stream training logs.
+                        </div>
+                      ) : filteredRunEvents.length === 0 ? (
+                        <div className="py-6 text-center text-text-muted">
+                          No events match the selected level.
+                        </div>
+                      ) : (
+                        filteredRunEvents.map((event) => {
+                          const level = normalizeEventLevel(event.level);
+                          const levelClass =
+                            level === 'error'
+                              ? 'font-semibold text-danger'
+                              : level === 'warn'
+                                ? 'font-semibold text-warning'
+                                : level === 'debug'
+                                  ? 'font-semibold text-text-secondary'
+                                  : 'font-semibold text-accent';
+                          const stepSuffix =
+                            event.step !== null && event.step !== undefined
+                              ? ` (step ${event.step.toLocaleString()})`
+                              : '';
+                          const sourcePrefix = event.source ? `[${event.source}] ` : '';
 
-                    return (
-                      <div key={event.id} className="mb-1 flex gap-3 leading-6 last:mb-0">
-                        <span className="text-text-muted">{formatEventTime(event)}</span>
-                        <span className={levelClass}>{level.toUpperCase()}</span>
-                        <span className="text-text-secondary">{`${sourcePrefix}${event.message}${stepSuffix}`}</span>
-                      </div>
-                    );
-                  })
+                          return (
+                            <div key={event.id} className="mb-1 flex gap-3 leading-6 last:mb-0">
+                              <span className="text-text-muted">{formatEventTime(event)}</span>
+                              <span className={levelClass}>{level.toUpperCase()}</span>
+                              <span className="text-text-secondary">{`${sourcePrefix}${event.message}${stepSuffix}`}</span>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
                 )}
-              </div>
-              <div className="mt-2 text-xs text-text-muted">
-                Last event: {lastEventRelative || 'n/a'}
-              </div>
+              </section>
             </div>
-          </section>
+          </aside>
         </div>
       </div>
     </main>
