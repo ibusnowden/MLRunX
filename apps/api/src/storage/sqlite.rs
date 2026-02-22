@@ -1325,7 +1325,11 @@ impl SqliteStore {
     pub async fn delete_run(&self, run_id: &str) -> Result<(), SqliteError> {
         let conn = self.conn.lock().await;
 
-        // Delete related data first (no ON DELETE CASCADE in schema)
+        // Clear FK references from audit_events and share_tokens first
+        conn.execute("UPDATE audit_events SET run_id = NULL WHERE run_id = ?1", params![run_id])?;
+        conn.execute("DELETE FROM share_tokens WHERE run_id = ?1", params![run_id])?;
+
+        // Delete related data (no ON DELETE CASCADE in schema)
         conn.execute("DELETE FROM metrics WHERE run_id = ?1", params![run_id])?;
         conn.execute("DELETE FROM run_events WHERE run_id = ?1", params![run_id])?;
         conn.execute("DELETE FROM tags WHERE run_id = ?1", params![run_id])?;
