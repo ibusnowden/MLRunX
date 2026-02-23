@@ -64,21 +64,30 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-      minio:
-        image: minio/minio:latest
-        ports:
-          - 9001:9000
-        env:
-          MINIO_ROOT_USER: mlrunx
-          MINIO_ROOT_PASSWORD: mlrunx_dev_secret
-        options: >-
-          --health-cmd "mc ready local"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     steps:
       - uses: actions/checkout@v4
+
+      - name: Start MinIO
+        run: |
+          set -euo pipefail
+          docker run -d \
+            --name mlrunx-nightly-minio \
+            -p 9001:9000 \
+            -e MINIO_ROOT_USER=mlrunx \
+            -e MINIO_ROOT_PASSWORD=mlrunx_dev_secret \
+            minio/minio:latest \
+            server /data --console-address ":9001"
+
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:9001/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "MinIO failed to become ready in 60s"
+          docker logs mlrunx-nightly-minio || true
+          exit 1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -114,6 +123,10 @@ jobs:
           MINIO_ENDPOINT: localhost:9001
           MINIO_ACCESS_KEY: mlrunx
           MINIO_SECRET_KEY: mlrunx_dev_secret
+
+      - name: Stop MinIO
+        if: always()
+        run: docker rm -f mlrunx-nightly-minio || true
 
   # ===========================================================================
   # Performance Benchmarks
