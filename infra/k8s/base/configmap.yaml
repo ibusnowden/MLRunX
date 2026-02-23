@@ -31,6 +31,7 @@ data:
   API_GRPC_PORT: "50051"
   RUST_LOG: "info,mlrunx_api=debug"
   INGEST_MODE: "direct"
+  MLRUNX_TRUST_PROXY_HEADERS: "false"
 
   # Privacy settings (all disabled by default)
   MLRUNX_TELEMETRY_DISABLED: "true"
@@ -59,3 +60,4 @@ stringData:
   MINIO_ACCESS_KEY: "mlrunx"
   MINIO_SECRET_KEY: "mlrunx_dev_secret"
   MLRUNX_API_KEY: ""  # Generate: openssl rand -hex 32
+  MLRUNX_AUTH_HMAC_SECRET: ""  # Generate: openssl rand -hex 32

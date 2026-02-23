@@ -133,6 +133,10 @@ fn env_flag_default(name: &str, default_value: bool) -> bool {
     })
 }
 
+fn trust_proxy_headers() -> bool {
+    env_flag_default("MLRUNX_TRUST_PROXY_HEADERS", false)
+}
+
 /// Convert a storage error into a safe HTTP 500 response.
 /// Logs the full error server-side but returns a generic message to the client.
 fn internal_error(e: impl std::fmt::Display) -> (StatusCode, String) {
@@ -643,7 +647,7 @@ fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn infer_client_ip(headers: &HeaderMap) -> Option<String> {
+fn trusted_forwarded_client_ip(headers: &HeaderMap) -> Option<String> {
     if let Some(forwarded) = header_string(headers, "x-forwarded-for") {
         let first = forwarded
             .split(',')
@@ -655,6 +659,26 @@ fn infer_client_ip(headers: &HeaderMap) -> Option<String> {
         }
     }
     header_string(headers, "x-real-ip")
+}
+
+fn client_ip_from_socket_extensions(extensions: &axum::http::Extensions) -> Option<String> {
+    extensions
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip().to_string())
+        .or_else(|| {
+            extensions
+                .get::<SocketAddr>()
+                .map(|addr| addr.ip().to_string())
+        })
+}
+
+fn infer_client_ip(headers: &HeaderMap, socket_addr: Option<SocketAddr>) -> Option<String> {
+    if trust_proxy_headers() {
+        if let Some(forwarded_ip) = trusted_forwarded_client_ip(headers) {
+            return Some(forwarded_ip);
+        }
+    }
+    socket_addr.map(|addr| addr.ip().to_string())
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -712,7 +736,7 @@ async fn http_ui_auth_login(
     Json(req): Json<UiAuthLoginRequest>,
 ) -> Result<(HeaderMap, Json<UiAuthLoginResponse>), (StatusCode, String)> {
     let user_agent = header_string(&headers, "user-agent");
-    let client_ip = infer_client_ip(&headers);
+    let client_ip = infer_client_ip(&headers, None);
 
     if let Some(retry_after) = state
         .key_store
@@ -2796,12 +2820,16 @@ fn filter_keys_to_ui_memberships(auth: &AuthContext, keys: Vec<auth::ApiKey>) ->
     let Some(allowed_projects) = auth.allowed_project_ids() else {
         return Vec::new();
     };
+    let Some(user_id) = auth_user_id(auth) else {
+        return Vec::new();
+    };
 
     keys.into_iter()
         .filter(|key| {
             key.project_id
                 .as_ref()
                 .is_some_and(|project_id| allowed_projects.contains(project_id))
+                && key.created_by_user_id.as_deref() == Some(user_id.as_str())
         })
         .collect()
 }
@@ -3220,6 +3248,14 @@ struct SharedRunResponse {
     available_metrics: Vec<String>,
 }
 
+fn share_token_hash(key_store: &ApiKeyStore, token: &str) -> String {
+    key_store.hmac_fingerprint(token)
+}
+
+fn share_token_resource_id(token_hash: &str) -> String {
+    format!("share_token:{}", &token_hash[..token_hash.len().min(16)])
+}
+
 /// Create a share token for a run.
 async fn http_create_share_token(
     State(state): State<AppState>,
@@ -3253,6 +3289,8 @@ async fn http_create_share_token(
 
     // Generate a short, URL-safe token
     let token = generate_share_token();
+    let token_hash = share_token_hash(state.key_store.as_ref(), &token);
+    let token_resource_id = share_token_resource_id(&token_hash);
 
     // Calculate expiry
     let expires_at = req.expires_in_days.map(|days| {
@@ -3263,7 +3301,7 @@ async fn http_create_share_token(
     state
         .sqlite_store
         .create_share_token(
-            &token,
+            &token_hash,
             &run_id,
             Some(&auth.api_key.key_prefix),
             expires_at.as_deref(),
@@ -3280,7 +3318,7 @@ async fn http_create_share_token(
         Some(&run_id),
         "share_token.create",
         "share_token",
-        Some(&token),
+        Some(&token_resource_id),
         "success",
         serde_json::json!({
             "expires_at": expires_at.clone(),
@@ -3301,10 +3339,11 @@ async fn http_get_shared_run(
     State(state): State<AppState>,
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Result<Json<SharedRunResponse>, (StatusCode, String)> {
+    let token_hash = share_token_hash(state.key_store.as_ref(), &token);
     // Validate the share token
     let share = state
         .sqlite_store
-        .validate_share_token(&token)
+        .validate_share_token(&token_hash, Some(&token))
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
@@ -3353,10 +3392,11 @@ async fn http_get_shared_metrics(
     axum::extract::Path(token): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<MetricsQuery>,
 ) -> Result<Json<services::MetricsQueryResponse>, (StatusCode, String)> {
+    let token_hash = share_token_hash(state.key_store.as_ref(), &token);
     // Validate the share token
     let share = state
         .sqlite_store
-        .validate_share_token(&token)
+        .validate_share_token(&token_hash, Some(&token))
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
@@ -3420,6 +3460,9 @@ async fn http_revoke_share_token(
     Extension(auth): Extension<AuthContext>,
     axum::extract::Path((run_id, token)): axum::extract::Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token_hash = share_token_hash(state.key_store.as_ref(), &token);
+    let token_resource_id = share_token_resource_id(&token_hash);
+
     // Verify the caller can access the run
     let run = state
         .sqlite_store
@@ -3437,7 +3480,7 @@ async fn http_revoke_share_token(
         Some(&run_id),
         "share_token.revoke",
         "share_token",
-        Some(&token),
+        Some(&token_resource_id),
     )
     .await?;
     require_ui_run_owner(&auth, &run)?;
@@ -3445,7 +3488,7 @@ async fn http_revoke_share_token(
 
     state
         .sqlite_store
-        .revoke_share_token(&token)
+        .revoke_share_token(&token_hash, Some(&token))
         .await
         .map_err(|e| match e {
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
@@ -3461,14 +3504,14 @@ async fn http_revoke_share_token(
         Some(&run_id),
         "share_token.revoke",
         "share_token",
-        Some(&token),
+        Some(&token_resource_id),
         "success",
         serde_json::json!({}),
     )
     .await;
 
     Ok(Json(
-        serde_json::json!({ "status": "ok", "revoked": token }),
+        serde_json::json!({ "status": "ok", "revoked": token_resource_id }),
     ))
 }
 
@@ -4195,28 +4238,13 @@ impl HttpRateLimiter {
     }
 }
 
-fn extract_client_ip(headers: &HeaderMap) -> String {
-    // Check X-Forwarded-For first (behind reverse proxy)
-    if let Some(xff) = headers.get("x-forwarded-for") {
-        if let Ok(xff_str) = xff.to_str() {
-            if let Some(first_ip) = xff_str.split(',').next() {
-                let ip = first_ip.trim();
-                if !ip.is_empty() {
-                    return ip.to_string();
-                }
-            }
+fn extract_client_ip(req: &axum::extract::Request) -> String {
+    if trust_proxy_headers() {
+        if let Some(forwarded_ip) = trusted_forwarded_client_ip(req.headers()) {
+            return forwarded_ip;
         }
     }
-    // Fallback to X-Real-IP
-    if let Some(xri) = headers.get("x-real-ip") {
-        if let Ok(ip) = xri.to_str() {
-            let ip = ip.trim();
-            if !ip.is_empty() {
-                return ip.to_string();
-            }
-        }
-    }
-    "unknown".to_string()
+    client_ip_from_socket_extensions(req.extensions()).unwrap_or_else(|| "unknown".to_string())
 }
 
 const DEFAULT_ALLOWED_UI_ORIGINS: [&str; 2] = ["http://localhost:3000", "http://127.0.0.1:3000"];
@@ -4441,7 +4469,7 @@ fn build_http_router(state: AppState) -> Router {
         move |req: axum::extract::Request, next: axum::middleware::Next| {
             let rl = rate_limiter_clone.clone();
             async move {
-                let client_ip = extract_client_ip(req.headers());
+                let client_ip = extract_client_ip(&req);
                 if let Err(retry_after) = rl.check(&client_ip).await {
                     let mut response = axum::response::Response::new(axum::body::Body::from(
                         "Too many requests".to_string(),
@@ -4551,12 +4579,6 @@ async fn main() {
     }
 
     assert!(
-        !(key_store.using_insecure_default_hmac_secret() && is_production_environment()),
-        "Refusing to start: MLRUNX_AUTH_HMAC_SECRET is not configured in production. \
-    Set MLRUNX_AUTH_HMAC_SECRET (or MLRUNX_JWT_SECRET) and restart."
-    );
-
-    assert!(
         !(key_store.is_auth_disabled() && is_production_environment()),
         "Refusing to start: authentication is disabled in production. \
     Set MLRUNX_AUTH_MODE=api_key or MLRUNX_AUTH_MODE=hybrid and restart."
@@ -4604,7 +4626,12 @@ async fn main() {
     // Start HTTP server (main thread)
     let http_listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
     let http_handle = tokio::spawn(async move {
-        if let Err(e) = axum::serve(http_listener, http_app).await {
+        if let Err(e) = axum::serve(
+            http_listener,
+            http_app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        {
             warn!("HTTP server error: {}", e);
         }
     });
@@ -5446,6 +5473,93 @@ mod tests {
             revoked.and_then(|k| k["is_revoked"].as_bool()),
             Some(true),
             "Created key should be marked revoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ui_session_cannot_list_or_revoke_foreign_user_key_in_same_project() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let foreign_user_id = harness
+            .sqlite_store
+            .get_or_create_user_identity(
+                "jwt",
+                "foreign-key-owner",
+                Some("foreign-key-owner@example.com"),
+                Some("Foreign Key Owner"),
+            )
+            .await
+            .expect("Failed to create foreign user");
+        let (_, foreign_key) = harness
+            .key_store
+            .create_key_with_owner(
+                Some(harness.primary_project_id.clone()),
+                Some("foreign-owned".to_string()),
+                vec!["read".to_string()],
+                Some(3600),
+                Some(foreign_user_id),
+            )
+            .await;
+
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let list_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/keys")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .body(Body::empty())
+                    .expect("Failed to build list keys request"),
+            )
+            .await
+            .expect("List keys request failed");
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_payload: serde_json::Value =
+            serde_json::from_str(&response_text(list_response).await)
+                .expect("List keys response should be JSON");
+        let keys = list_payload["keys"]
+            .as_array()
+            .expect("keys should be an array");
+        assert!(
+            keys.iter().all(|k| {
+                k["key_id"]
+                    .as_str()
+                    .map_or(true, |key_id| key_id != foreign_key.id.as_str())
+            }),
+            "Foreign-owned key in the same project must not be listed to this UI session"
+        );
+
+        let revoke_uri = format!("/api/v1/keys/{}", foreign_key.id);
+        let revoke_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(revoke_uri.as_str())
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::empty())
+                    .expect("Failed to build revoke key request"),
+            )
+            .await
+            .expect("Revoke key request failed");
+        assert_eq!(revoke_response.status(), StatusCode::NOT_FOUND);
+
+        let stored_foreign = harness
+            .sqlite_store
+            .list_api_keys(Some(&harness.primary_project_id))
+            .await
+            .expect("Failed to list keys")
+            .into_iter()
+            .find(|row| row.id == foreign_key.id)
+            .expect("Expected foreign key to exist");
+        assert!(
+            stored_foreign.revoked_at.is_none(),
+            "Foreign-owned key must remain active after unauthorized revoke attempt"
         );
     }
 

@@ -12,6 +12,15 @@ export const API_URL_STORAGE_KEY = 'mlrunx_api_url';
 export const UI_CSRF_COOKIE_NAME = 'mlrunx_ui_csrf';
 export const DEFAULT_API_URL = DEFAULT_API_BASE_URL;
 
+function envFlagEnabled(value: string | undefined): boolean {
+  if (!value) return false;
+  return value === '1' || value.toLowerCase() === 'true' || value.toLowerCase() === 'yes';
+}
+
+function localApiKeyStorageEnabled(): boolean {
+  return envFlagEnabled(process.env.NEXT_PUBLIC_MLRUNX_ALLOW_LOCAL_API_KEY_STORAGE);
+}
+
 export interface Run {
   run_id: string;
   project_id: string;
@@ -266,7 +275,7 @@ function removeStorage(key: string) {
 
 export function getStoredApiConfig(): StoredApiConfig {
   const storedBaseUrl = readStorage(API_URL_STORAGE_KEY);
-  const storedApiKey = readStorage(API_KEY_STORAGE_KEY);
+  const storedApiKey = localApiKeyStorageEnabled() ? readStorage(API_KEY_STORAGE_KEY) : null;
   return {
     apiBaseUrl: normalizeApiBaseUrl(storedBaseUrl || DEFAULT_API_BASE_URL),
     apiKey: storedApiKey || '',
@@ -278,6 +287,10 @@ export function saveStoredApiConfig(config: Partial<StoredApiConfig>) {
     writeStorage(API_URL_STORAGE_KEY, normalizeApiBaseUrl(config.apiBaseUrl));
   }
   if (config.apiKey !== undefined) {
+    if (!localApiKeyStorageEnabled()) {
+      removeStorage(API_KEY_STORAGE_KEY);
+      return;
+    }
     const trimmedKey = config.apiKey.trim();
     if (trimmedKey) {
       writeStorage(API_KEY_STORAGE_KEY, trimmedKey);
@@ -302,6 +315,9 @@ function getApiBaseUrl(): string {
 
 function getApiKey(): string | undefined {
   if (typeof window !== 'undefined') {
+    if (!localApiKeyStorageEnabled()) {
+      return undefined;
+    }
     return readStorage(API_KEY_STORAGE_KEY) || undefined;
   }
   return process.env.MLRUNX_API_KEY;

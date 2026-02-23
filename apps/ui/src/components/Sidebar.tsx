@@ -176,7 +176,7 @@ export function Sidebar() {
     void api.getUiSession()
       .then((session) => {
         if (active) {
-          setIsAdmin(session.is_platform_admin || session.is_dev_mode);
+          setIsAdmin(session.is_platform_admin);
         }
       })
       .catch(() => {

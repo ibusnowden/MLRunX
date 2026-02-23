@@ -60,6 +60,7 @@ function ensureLocalStorageMock(): void {
 
 describe('api key management client', () => {
   beforeEach(() => {
+    process.env.NEXT_PUBLIC_MLRUNX_ALLOW_LOCAL_API_KEY_STORAGE = 'true';
     ensureLocalStorageMock();
     window.localStorage.clear();
     document.cookie = `${UI_CSRF_COOKIE_NAME}=; Max-Age=0; Path=/`;
@@ -67,6 +68,7 @@ describe('api key management client', () => {
   });
 
   afterEach(() => {
+    delete process.env.NEXT_PUBLIC_MLRUNX_ALLOW_LOCAL_API_KEY_STORAGE;
     vi.restoreAllMocks();
   });
 
@@ -89,6 +91,26 @@ describe('api key management client', () => {
     expect(options.credentials).toBe('include');
     expect(headers['Content-Type']).toBe('application/json');
     expect(headers['X-API-Key']).toBeUndefined();
+  });
+
+  it('does not send X-API-Key from localStorage when browser key storage is disabled', async () => {
+    delete process.env.NEXT_PUBLIC_MLRUNX_ALLOW_LOCAL_API_KEY_STORAGE;
+    window.localStorage.setItem(API_URL_STORAGE_KEY, 'https://mlrunx.ibra-niang.com');
+    window.localStorage.setItem(API_KEY_STORAGE_KEY, 'mlrunx_local_key');
+
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse({ run_id: 'run-1', events: [], next_after_id: null, has_more: false }));
+
+    await api.getRunEvents('run-1', { limit: 20 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = headersToRecord(options.headers);
+
+    expect(url).toBe('https://mlrunx.ibra-niang.com/api/v1/runs/run-1/events?limit=20');
+    expect(headers['X-API-Key']).toBeUndefined();
+    expect(options.credentials).toBe('include');
   });
 
   it('creates API key with csrf token for mutating requests', async () => {

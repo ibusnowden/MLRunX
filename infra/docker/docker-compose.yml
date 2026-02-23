@@ -164,6 +164,8 @@ services:
       MLRUNX_AUTH_MODE: ${MLRUNX_AUTH_MODE:-api_key}
       MLRUNX_AUTH_DISABLED: ${MLRUNX_AUTH_DISABLED:-false}
       MLRUNX_API_KEY: ${MLRUNX_API_KEY:-}
+      MLRUNX_AUTH_HMAC_SECRET: ${MLRUNX_AUTH_HMAC_SECRET:-mlrunx_local_hmac_secret_change_me}
+      MLRUNX_TRUST_PROXY_HEADERS: ${MLRUNX_TRUST_PROXY_HEADERS:-false}
       DATABASE_URL: postgres://mlrunx:${POSTGRES_PASSWORD:-mlrunx_dev}@postgres:5432/mlrunx
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_USER: mlrunx

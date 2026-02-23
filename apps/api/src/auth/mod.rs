@@ -3,6 +3,7 @@
 //! Provides API key authentication middleware and key management.
 
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -11,7 +12,7 @@ use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
 use axum::{
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     http::{Method, StatusCode, request::Parts},
     middleware::Next,
     response::Response,
@@ -37,6 +38,8 @@ pub struct ApiKey {
     pub key_prefix: String,
     /// Project this key is scoped to (None = global admin)
     pub project_id: Option<String>,
+    /// Owning user for UI-created keys (None for legacy/bootstrap/global keys).
+    pub created_by_user_id: Option<String>,
     /// Human-readable name
     pub name: Option<String>,
     /// Permitted scopes
@@ -653,6 +656,14 @@ impl ApiKeyStore {
     }
 
     pub fn validate_startup_configuration(&self) -> Result<(), String> {
+        if self.using_insecure_default_hmac_secret() {
+            return Err(
+                "MLRUNX_AUTH_HMAC_SECRET is required; insecure fallback secrets are not allowed. \
+Set MLRUNX_AUTH_HMAC_SECRET (or MLRUNX_JWT_SECRET for shared HMAC/JWT secret) and restart."
+                    .to_string(),
+            );
+        }
+
         if self.ui_jwt.enabled {
             if self
                 .ui_jwt
@@ -675,6 +686,31 @@ impl ApiKeyStore {
                 return Err(
                     "MLRUNX_JWT_AUDIENCE is required when UI JWT auth is enabled.".to_string(),
                 );
+            }
+
+            let verifier_configured = match self.ui_jwt.algorithm {
+                UiJwtAlgorithm::Hs256 => self
+                    .ui_jwt
+                    .secret
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|value| !value.is_empty()),
+                UiJwtAlgorithm::Rs256 | UiJwtAlgorithm::Es256 => self
+                    .ui_jwt
+                    .public_key_pem
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|value| !value.is_empty()),
+            };
+            if !verifier_configured {
+                let missing = match self.ui_jwt.algorithm {
+                    UiJwtAlgorithm::Hs256 => "MLRUNX_JWT_SECRET",
+                    UiJwtAlgorithm::Rs256 | UiJwtAlgorithm::Es256 => "MLRUNX_JWT_PUBLIC_KEY_PEM",
+                };
+                return Err(format!(
+                    "{missing} is required when UI JWT auth is enabled with {}.",
+                    self.ui_jwt.algorithm.env_value()
+                ));
             }
         }
         Ok(())
@@ -853,6 +889,11 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
         hmac_sha256_hex(&self.auth_hmac_secret, value.as_bytes())
     }
 
+    /// Derive a deterministic HMAC fingerprint for sensitive token identifiers.
+    pub fn hmac_fingerprint(&self, value: &str) -> String {
+        self.hash_with_hmac(value)
+    }
+
     /// Create an API key from a raw key string.
     fn create_key_from_raw(
         raw_key: &str,
@@ -872,6 +913,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
             key_hash,
             key_prefix,
             project_id,
+            created_by_user_id: None,
             name,
             scopes,
             created_at: std::time::SystemTime::now(),
@@ -1001,7 +1043,8 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
         let raw_key = generate_api_key();
         let expires_at =
             expires_in_seconds.map(|secs| SystemTime::now() + Duration::from_secs(secs));
-        let key = Self::create_key_from_raw(&raw_key, project_id, name, scopes, expires_at);
+        let mut key = Self::create_key_from_raw(&raw_key, project_id, name, scopes, expires_at);
+        key.created_by_user_id = created_by_user_id.clone();
 
         if let Some(sqlite_store) = &self.sqlite_store {
             let scopes_json =
@@ -1525,6 +1568,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
             key_hash: format!("{mode_prefix}:{}", identity.user_id),
             key_prefix,
             project_id: None,
+            created_by_user_id: Some(identity.user_id.clone()),
             name: identity.user_name.clone(),
             scopes: identity.scopes.clone(),
             created_at: now,
@@ -1620,6 +1664,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
             key_hash: row.key_hash,
             key_prefix: row.key_prefix,
             project_id: row.project_id,
+            created_by_user_id: row.created_by_user_id,
             name: row.name,
             scopes,
             created_at: parse_sqlite_datetime(&row.created_at).unwrap_or_else(SystemTime::now),
@@ -1784,6 +1829,7 @@ impl AuthContext {
                 key_hash: "dev".to_string(),
                 key_prefix: "dev".to_string(),
                 project_id: None,
+                created_by_user_id: None,
                 name: Some("Dev Mode".to_string()),
                 scopes: vec!["admin".to_string()],
                 created_at: std::time::SystemTime::now(),
@@ -1994,7 +2040,11 @@ fn extract_cookie(parts: &Parts, cookie_name: &str) -> Option<String> {
     })
 }
 
-fn extract_client_ip(parts: &Parts) -> Option<String> {
+fn trust_proxy_headers() -> bool {
+    env_flag("MLRUNX_TRUST_PROXY_HEADERS")
+}
+
+fn extract_forwarded_client_ip(parts: &Parts) -> Option<String> {
     let forwarded = parts
         .headers
         .get("x-forwarded-for")
@@ -2018,6 +2068,28 @@ fn extract_client_ip(parts: &Parts) -> Option<String> {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn extract_socket_client_ip(parts: &Parts) -> Option<String> {
+    parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip().to_string())
+        .or_else(|| {
+            parts
+                .extensions
+                .get::<SocketAddr>()
+                .map(|addr| addr.ip().to_string())
+        })
+}
+
+fn extract_client_ip(parts: &Parts) -> Option<String> {
+    if trust_proxy_headers() {
+        if let Some(forwarded_ip) = extract_forwarded_client_ip(parts) {
+            return Some(forwarded_ip);
+        }
+    }
+    extract_socket_client_ip(parts)
 }
 
 fn extract_user_agent(parts: &Parts) -> Option<String> {
@@ -2632,6 +2704,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
                 key_hash: "jwt:user".to_string(),
                 key_prefix: "jwt_user".to_string(),
                 project_id: None,
+                created_by_user_id: None,
                 name: Some("JWT User".to_string()),
                 scopes: vec!["read".to_string()],
                 created_at: SystemTime::now(),
@@ -2660,6 +2733,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
             key_hash: "hash".to_string(),
             key_prefix: "mlrunx_te".to_string(),
             project_id: Some("project-123".to_string()),
+            created_by_user_id: None,
             name: Some("test".to_string()),
             scopes: vec!["ingest".to_string(), "query".to_string()],
             created_at: std::time::SystemTime::now(),
@@ -2678,6 +2752,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
             key_hash: "hash".to_string(),
             key_prefix: "mlrunx_ad".to_string(),
             project_id: None,
+            created_by_user_id: None,
             name: Some("admin".to_string()),
             scopes: vec!["admin".to_string()],
             created_at: std::time::SystemTime::now(),
@@ -2698,6 +2773,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
             key_hash: "hash".to_string(),
             key_prefix: "mlrunx_te".to_string(),
             project_id: Some("project-123".to_string()),
+            created_by_user_id: None,
             name: None,
             scopes: vec!["ingest".to_string()],
             created_at: std::time::SystemTime::now(),
@@ -2715,6 +2791,7 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
             key_hash: "hash".to_string(),
             key_prefix: "mlrunx_ad".to_string(),
             project_id: None,
+            created_by_user_id: None,
             name: None,
             scopes: vec!["admin".to_string()],
             created_at: std::time::SystemTime::now(),

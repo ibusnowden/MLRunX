@@ -1961,7 +1961,7 @@ impl SqliteStore {
     /// Create a share token for a run.
     pub async fn create_share_token(
         &self,
-        token: &str,
+        token_hash: &str,
         run_id: &str,
         created_by_key_prefix: Option<&str>,
         expires_at: Option<&str>,
@@ -1970,22 +1970,28 @@ impl SqliteStore {
 
         conn.execute(
             "INSERT INTO share_tokens (token, run_id, created_by_key_prefix, expires_at) VALUES (?1, ?2, ?3, ?4)",
-            params![token, run_id, created_by_key_prefix, expires_at],
+            params![token_hash, run_id, created_by_key_prefix, expires_at],
         )?;
 
         debug!(run_id = %run_id, "Created share token");
         Ok(())
     }
 
-    /// Validate a share token and return the associated `run_id` if valid.
-    pub async fn validate_share_token(&self, token: &str) -> Result<ShareTokenRow, SqliteError> {
+    /// Validate a share token hash and return the associated `run_id` if valid.
+    /// `legacy_raw_token` allows backward-compatible lookup for plaintext tokens issued before
+    /// token hashing-at-rest was enabled.
+    pub async fn validate_share_token(
+        &self,
+        token_hash: &str,
+        legacy_raw_token: Option<&str>,
+    ) -> Result<ShareTokenRow, SqliteError> {
         let conn = self.conn.lock().await;
 
-        let row = conn
-            .query_row(
+        let row = if let Some(legacy) = legacy_raw_token {
+            conn.query_row(
                 r"SELECT token, run_id, created_by_key_prefix, created_at, expires_at, revoked_at
-               FROM share_tokens WHERE token = ?1",
-                params![token],
+               FROM share_tokens WHERE token = ?1 OR token = ?2",
+                params![token_hash, legacy],
                 |row| {
                     Ok(ShareTokenRow {
                         token: row.get(0)?,
@@ -1997,12 +2003,29 @@ impl SqliteStore {
                     })
                 },
             )
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => {
-                    SqliteError::NotFound("Invalid or expired share link.".to_string())
-                }
-                _ => SqliteError::Database(e),
-            })?;
+        } else {
+            conn.query_row(
+                r"SELECT token, run_id, created_by_key_prefix, created_at, expires_at, revoked_at
+               FROM share_tokens WHERE token = ?1",
+                params![token_hash],
+                |row| {
+                    Ok(ShareTokenRow {
+                        token: row.get(0)?,
+                        run_id: row.get(1)?,
+                        created_by_key_prefix: row.get(2)?,
+                        created_at: row.get(3)?,
+                        expires_at: row.get(4)?,
+                        revoked_at: row.get(5)?,
+                    })
+                },
+            )
+        }
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => {
+                SqliteError::NotFound("Invalid or expired share link.".to_string())
+            }
+            _ => SqliteError::Database(e),
+        })?;
 
         // Check if revoked
         if row.revoked_at.is_some() {
@@ -2047,14 +2070,26 @@ impl SqliteStore {
         Ok(tokens?)
     }
 
-    /// Revoke a share token.
-    pub async fn revoke_share_token(&self, token: &str) -> Result<(), SqliteError> {
+    /// Revoke a share token by hashed token value.
+    /// `legacy_raw_token` supports revoking older plaintext rows.
+    pub async fn revoke_share_token(
+        &self,
+        token_hash: &str,
+        legacy_raw_token: Option<&str>,
+    ) -> Result<(), SqliteError> {
         let conn = self.conn.lock().await;
 
-        let changes = conn.execute(
-            "UPDATE share_tokens SET revoked_at = datetime('now') WHERE token = ?1 AND revoked_at IS NULL",
-            params![token],
-        )?;
+        let changes = if let Some(legacy) = legacy_raw_token {
+            conn.execute(
+                "UPDATE share_tokens SET revoked_at = datetime('now') WHERE (token = ?1 OR token = ?2) AND revoked_at IS NULL",
+                params![token_hash, legacy],
+            )?
+        } else {
+            conn.execute(
+                "UPDATE share_tokens SET revoked_at = datetime('now') WHERE token = ?1 AND revoked_at IS NULL",
+                params![token_hash],
+            )?
+        };
 
         if changes == 0 {
             return Err(SqliteError::NotFound(
