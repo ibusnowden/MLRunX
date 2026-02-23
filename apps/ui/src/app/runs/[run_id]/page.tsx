@@ -1046,7 +1046,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
                             darkTheme={isDark}
                             showLegend={true}
                             smoothing={0.06}
-                            areaFill={true}
+                            areaFill={false}
                           />
                         </div>
                       </div>

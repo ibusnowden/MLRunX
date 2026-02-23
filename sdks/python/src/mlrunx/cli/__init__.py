@@ -3,6 +3,8 @@
 import argparse
 import sys
 
+from mlrunx import __version__
+
 from .doctor import doctor
 from .init import init_project
 
@@ -16,7 +18,7 @@ def main() -> None:
     parser.add_argument(
         "--version",
         action="version",
-        version="mlrunx 0.1.0",
+        version=f"mlrunx {__version__}",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")

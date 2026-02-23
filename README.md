@@ -41,26 +41,19 @@
 
 ## Preview
 
-> Compare reward curves across RL training runs -- REINFORCE, GSPO, GRPO, PPO, RLOO, CISPO and more.
+> Run detail dashboard with grouped metrics and a unified training console (configuration, progress, hyperparameters, and logs).
 
 <p align="center">
-  <img src="docs/screenshots/compare-light.png" alt="Compare view — light mode" width="100%" />
+  <img src="docs/screenshots/run-detail-light.png" alt="Run details — light mode" width="100%" />
 </p>
-<p align="center"><em>Expanded compare chart — Light mode</em></p>
+<p align="center"><em>Run details page — Light mode</em></p>
 
 <br/>
 
 <p align="center">
-  <img src="docs/screenshots/compare-dark.png" alt="Compare view — dark mode" width="100%" />
+  <img src="docs/screenshots/run-detail-dark.png" alt="Run details — dark mode" width="100%" />
 </p>
-<p align="center"><em>Full compare dashboard with run selector and statistics — Dark mode</em></p>
-
-<br/>
-
-<p align="center">
-  <img src="docs/screenshots/compare-expanded-dark.png" alt="Expanded compare chart — dark mode" width="100%" />
-</p>
-<p align="center"><em>Expanded compare chart — Dark mode</em></p>
+<p align="center"><em>Run details page — Dark mode</em></p>
 
 ---
 
