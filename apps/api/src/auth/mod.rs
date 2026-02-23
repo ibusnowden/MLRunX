@@ -3,7 +3,7 @@
 //! Provides API key authentication middleware and key management.
 
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -264,6 +264,35 @@ fn env_flag_value(value: &str) -> bool {
     value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
 }
 
+const DEFAULT_BOOTSTRAP_KEY_TTL_SECONDS: u64 = 900;
+const MAX_BOOTSTRAP_KEY_TTL_SECONDS: u64 = 86_400;
+
+fn bootstrap_key_ttl_seconds_from_env() -> u64 {
+    std::env::var("MLRUNX_BOOTSTRAP_KEY_TTL_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .map(|v| v.min(MAX_BOOTSTRAP_KEY_TTL_SECONDS))
+        .unwrap_or(DEFAULT_BOOTSTRAP_KEY_TTL_SECONDS)
+}
+
+fn trusted_proxy_rules_from_env() -> Result<Vec<TrustedProxyRule>, String> {
+    let raw = std::env::var("MLRUNX_TRUSTED_PROXY_CIDRS").unwrap_or_default();
+    let mut rules = Vec::new();
+
+    for entry in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let rule = TrustedProxyRule::parse(entry)
+            .map_err(|err| format!("Invalid MLRUNX_TRUSTED_PROXY_CIDRS entry '{entry}': {err}"))?;
+        rules.push(rule);
+    }
+
+    Ok(rules)
+}
+
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Clone)]
@@ -332,6 +361,107 @@ impl AuthRateLimitEntry {
 struct AuthRateLimiter {
     config: AuthRateLimitConfig,
     entries: Mutex<HashMap<String, AuthRateLimitEntry>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrustedProxyRule {
+    V4 { network: u32, prefix_len: u8 },
+    V6 { network: u128, prefix_len: u8 },
+}
+
+impl TrustedProxyRule {
+    fn parse(raw: &str) -> Result<Self, String> {
+        let value = raw.trim();
+        if value.is_empty() {
+            return Err("empty trusted proxy entry".to_string());
+        }
+
+        let (ip, prefix_len) = if let Some((ip_raw, prefix_raw)) = value.split_once('/') {
+            let ip = ip_raw
+                .trim()
+                .parse::<IpAddr>()
+                .map_err(|_| format!("invalid IP '{ip_raw}'"))?;
+            let prefix_len = prefix_raw
+                .trim()
+                .parse::<u8>()
+                .map_err(|_| format!("invalid prefix length '{prefix_raw}'"))?;
+            (ip, prefix_len)
+        } else {
+            let ip = value
+                .parse::<IpAddr>()
+                .map_err(|_| format!("invalid IP '{value}'"))?;
+            let full_len = match ip {
+                IpAddr::V4(_) => 32,
+                IpAddr::V6(_) => 128,
+            };
+            (ip, full_len)
+        };
+
+        match ip {
+            IpAddr::V4(ipv4) => {
+                if prefix_len > 32 {
+                    return Err(format!("invalid IPv4 prefix length '{prefix_len}'"));
+                }
+                let mask = if prefix_len == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - u32::from(prefix_len))
+                };
+                Ok(Self::V4 {
+                    network: u32::from(ipv4) & mask,
+                    prefix_len,
+                })
+            }
+            IpAddr::V6(ipv6) => {
+                if prefix_len > 128 {
+                    return Err(format!("invalid IPv6 prefix length '{prefix_len}'"));
+                }
+                let mask = if prefix_len == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - u32::from(prefix_len))
+                };
+                Ok(Self::V6 {
+                    network: u128::from(ipv6) & mask,
+                    prefix_len,
+                })
+            }
+        }
+    }
+
+    fn matches(self, ip: IpAddr) -> bool {
+        match (self, ip) {
+            (
+                Self::V4 {
+                    network,
+                    prefix_len,
+                },
+                IpAddr::V4(value),
+            ) => {
+                let mask = if prefix_len == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - u32::from(prefix_len))
+                };
+                (u32::from(value) & mask) == network
+            }
+            (
+                Self::V6 {
+                    network,
+                    prefix_len,
+                },
+                IpAddr::V6(value),
+            ) => {
+                let mask = if prefix_len == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - u32::from(prefix_len))
+                };
+                (u128::from(value) & mask) == network
+            }
+            _ => false,
+        }
+    }
 }
 
 impl AuthRateLimiter {
@@ -492,6 +622,7 @@ pub struct ApiKeyStore {
     /// Shared HMAC secret for deterministic API key fingerprints + UI session token hashes.
     auth_hmac_secret: Vec<u8>,
     auth_hmac_secret_source: HmacSecretSource,
+    bootstrap_key_ttl_seconds: u64,
     auth_rate_limiter: AuthRateLimiter,
     /// Email of the designated platform admin (from `MLRUNX_ADMIN_EMAIL` env var).
     admin_email: Option<String>,
@@ -504,6 +635,7 @@ impl ApiKeyStore {
     pub fn new() -> Self {
         let runtime_auth_mode = RuntimeAuthMode::from_env();
         let (auth_hmac_secret, auth_hmac_secret_source) = load_auth_hmac_secret();
+        let bootstrap_key_ttl_seconds = bootstrap_key_ttl_seconds_from_env();
         let auth_rate_limiter = AuthRateLimiter::new(AuthRateLimitConfig::from_env());
         Self {
             keys: RwLock::new(HashMap::new()),
@@ -512,6 +644,7 @@ impl ApiKeyStore {
             runtime_auth_mode,
             auth_hmac_secret,
             auth_hmac_secret_source,
+            bootstrap_key_ttl_seconds,
             auth_rate_limiter,
             admin_email: load_admin_email(),
             auth_disabled: std::sync::atomic::AtomicBool::new(runtime_auth_mode.auth_disabled()),
@@ -522,6 +655,7 @@ impl ApiKeyStore {
     pub fn new_with_sqlite(sqlite_store: Arc<SqliteStore>) -> Self {
         let runtime_auth_mode = RuntimeAuthMode::from_env();
         let (auth_hmac_secret, auth_hmac_secret_source) = load_auth_hmac_secret();
+        let bootstrap_key_ttl_seconds = bootstrap_key_ttl_seconds_from_env();
         let auth_rate_limiter = AuthRateLimiter::new(AuthRateLimitConfig::from_env());
         Self {
             keys: RwLock::new(HashMap::new()),
@@ -530,6 +664,7 @@ impl ApiKeyStore {
             runtime_auth_mode,
             auth_hmac_secret,
             auth_hmac_secret_source,
+            bootstrap_key_ttl_seconds,
             auth_rate_limiter,
             admin_email: load_admin_email(),
             auth_disabled: std::sync::atomic::AtomicBool::new(runtime_auth_mode.auth_disabled()),
@@ -539,6 +674,7 @@ impl ApiKeyStore {
     /// Create a new API key store with auth disabled (for testing).
     pub fn new_dev_mode() -> Self {
         let (auth_hmac_secret, auth_hmac_secret_source) = load_auth_hmac_secret();
+        let bootstrap_key_ttl_seconds = bootstrap_key_ttl_seconds_from_env();
         let auth_rate_limiter = AuthRateLimiter::new(AuthRateLimitConfig::from_env());
         Self {
             keys: RwLock::new(HashMap::new()),
@@ -547,6 +683,7 @@ impl ApiKeyStore {
             runtime_auth_mode: RuntimeAuthMode::Disabled,
             auth_hmac_secret,
             auth_hmac_secret_source,
+            bootstrap_key_ttl_seconds,
             auth_rate_limiter,
             admin_email: load_admin_email(),
             auth_disabled: std::sync::atomic::AtomicBool::new(true),
@@ -556,6 +693,7 @@ impl ApiKeyStore {
     #[cfg(test)]
     pub fn new_with_sqlite_and_ui_jwt(sqlite_store: Arc<SqliteStore>, jwt_secret: &str) -> Self {
         let (auth_hmac_secret, auth_hmac_secret_source) = load_auth_hmac_secret();
+        let bootstrap_key_ttl_seconds = bootstrap_key_ttl_seconds_from_env();
         let auth_rate_limiter = AuthRateLimiter::new(AuthRateLimitConfig::from_env());
         Self {
             keys: RwLock::new(HashMap::new()),
@@ -580,6 +718,7 @@ impl ApiKeyStore {
             runtime_auth_mode: RuntimeAuthMode::Hybrid,
             auth_hmac_secret,
             auth_hmac_secret_source,
+            bootstrap_key_ttl_seconds,
             auth_rate_limiter,
             admin_email: load_admin_email(),
             auth_disabled: std::sync::atomic::AtomicBool::new(false),
@@ -593,6 +732,7 @@ impl ApiKeyStore {
         algorithm: UiJwtAlgorithm,
     ) -> Self {
         let (auth_hmac_secret, auth_hmac_secret_source) = load_auth_hmac_secret();
+        let bootstrap_key_ttl_seconds = bootstrap_key_ttl_seconds_from_env();
         let auth_rate_limiter = AuthRateLimiter::new(AuthRateLimitConfig::from_env());
         Self {
             keys: RwLock::new(HashMap::new()),
@@ -617,6 +757,7 @@ impl ApiKeyStore {
             runtime_auth_mode: RuntimeAuthMode::Hybrid,
             auth_hmac_secret,
             auth_hmac_secret_source,
+            bootstrap_key_ttl_seconds,
             auth_rate_limiter,
             admin_email: load_admin_email(),
             auth_disabled: std::sync::atomic::AtomicBool::new(false),
@@ -643,6 +784,10 @@ impl ApiKeyStore {
         self.ui_jwt.session_ttl_seconds
     }
 
+    pub const fn bootstrap_key_ttl_seconds(&self) -> u64 {
+        self.bootstrap_key_ttl_seconds
+    }
+
     pub const fn ui_cookie_secure(&self) -> bool {
         self.ui_jwt.cookie_secure
     }
@@ -662,6 +807,16 @@ impl ApiKeyStore {
 Set MLRUNX_AUTH_HMAC_SECRET (or MLRUNX_JWT_SECRET for shared HMAC/JWT secret) and restart."
                     .to_string(),
             );
+        }
+
+        if env_flag("MLRUNX_TRUST_PROXY_HEADERS") {
+            let trusted_proxy_rules = trusted_proxy_rules_from_env()?;
+            if trusted_proxy_rules.is_empty() {
+                return Err(
+                    "MLRUNX_TRUST_PROXY_HEADERS=true requires MLRUNX_TRUSTED_PROXY_CIDRS to include at least one trusted proxy IP/CIDR."
+                        .to_string(),
+                );
+            }
         }
 
         if self.ui_jwt.enabled {
@@ -852,16 +1007,22 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
         // Check for bootstrap key
         if let Ok(bootstrap_key) = std::env::var("MLRUNX_API_KEY") {
             if !bootstrap_key.is_empty() {
+                let expires_at =
+                    Some(SystemTime::now() + Duration::from_secs(self.bootstrap_key_ttl_seconds));
                 let key = Self::create_key_from_raw(
                     &bootstrap_key,
                     None, // Global admin key
                     Some("bootstrap".to_string()),
                     vec!["admin".to_string()],
-                    None, // Bootstrap keys don't expire
+                    expires_at,
                 );
                 let mut key = key;
                 key.id = "bootstrap".to_string();
                 let key_fingerprint = self.hash_with_hmac(&bootstrap_key);
+                let expires_at_str = key.expires_at.map(|t| {
+                    let dt = chrono::DateTime::<chrono::Utc>::from(t);
+                    dt.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string()
+                });
 
                 if let Some(sqlite_store) = &self.sqlite_store {
                     if let Err(err) = sqlite_store
@@ -870,6 +1031,7 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
                             &key.key_hash,
                             Some(&key_fingerprint),
                             &key.key_prefix,
+                            expires_at_str.as_deref(),
                         )
                         .await
                     {
@@ -879,7 +1041,10 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
 
                 let mut keys = self.keys.write().await;
                 keys.insert(key.key_hash.clone(), key);
-                info!("Loaded bootstrap API key from environment");
+                info!(
+                    ttl_seconds = self.bootstrap_key_ttl_seconds,
+                    "Loaded expiring bootstrap API key from environment"
+                );
             }
         }
     }
@@ -1100,49 +1265,42 @@ Set MLRUNX_AUTH_HMAC_SECRET in all non-local environments."
 
         // Generate a new bootstrap key.
         let raw_key = generate_api_key();
+        let expires_at =
+            Some(SystemTime::now() + Duration::from_secs(self.bootstrap_key_ttl_seconds));
         let mut new_key = Self::create_key_from_raw(
             &raw_key,
             None,
             Some("bootstrap".to_string()),
             vec!["admin".to_string()],
-            None,
+            expires_at,
         );
         new_key.id = "bootstrap".to_string();
         let key_fingerprint = self.hash_with_hmac(&raw_key);
+        let expires_at_str = new_key.expires_at.map(|t| {
+            let dt = chrono::DateTime::<chrono::Utc>::from(t);
+            dt.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string()
+        });
 
         if let Some(sqlite_store) = &self.sqlite_store {
-            let scopes_json = serde_json::to_string(&new_key.scopes)
-                .unwrap_or_else(|_| r#"["admin"]"#.to_string());
             sqlite_store
                 .upsert_bootstrap_api_key(
                     &new_key.id,
                     &new_key.key_hash,
                     Some(&key_fingerprint),
                     &new_key.key_prefix,
+                    expires_at_str.as_deref(),
                 )
                 .await
                 .map_err(|e| format!("Failed to persist rotated bootstrap key: {e}"))?;
-
-            // Also update scopes in case upsert doesn't handle them.
-            let _ = sqlite_store
-                .insert_api_key(
-                    &new_key.id,
-                    &new_key.key_hash,
-                    Some(&key_fingerprint),
-                    &new_key.key_prefix,
-                    None,
-                    None,
-                    Some("bootstrap"),
-                    &scopes_json,
-                    None,
-                )
-                .await;
         }
 
         let mut keys = self.keys.write().await;
         keys.insert(new_key.key_hash.clone(), new_key);
 
-        info!("Bootstrap API key rotated successfully");
+        info!(
+            ttl_seconds = self.bootstrap_key_ttl_seconds,
+            "Bootstrap API key rotated successfully"
+        );
         Ok(raw_key)
     }
 
@@ -2083,8 +2241,40 @@ fn extract_socket_client_ip(parts: &Parts) -> Option<String> {
         })
 }
 
+fn extract_socket_client_ip_addr(parts: &Parts) -> Option<IpAddr> {
+    parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip())
+        .or_else(|| {
+            parts
+                .extensions
+                .get::<SocketAddr>()
+                .map(std::net::SocketAddr::ip)
+        })
+}
+
+fn should_trust_forwarded_headers(parts: &Parts) -> bool {
+    if !trust_proxy_headers() {
+        return false;
+    }
+
+    let Some(peer_ip) = extract_socket_client_ip_addr(parts) else {
+        return false;
+    };
+
+    let Ok(trusted_rules) = trusted_proxy_rules_from_env() else {
+        return false;
+    };
+    if trusted_rules.is_empty() {
+        return false;
+    }
+
+    trusted_rules.into_iter().any(|rule| rule.matches(peer_ip))
+}
+
 fn extract_client_ip(parts: &Parts) -> Option<String> {
-    if trust_proxy_headers() {
+    if should_trust_forwarded_headers(parts) {
         if let Some(forwarded_ip) = extract_forwarded_client_ip(parts) {
             return Some(forwarded_ip);
         }

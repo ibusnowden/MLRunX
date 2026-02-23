@@ -32,6 +32,11 @@ data:
   RUST_LOG: "info,mlrunx_api=debug"
   INGEST_MODE: "direct"
   MLRUNX_TRUST_PROXY_HEADERS: "false"
+  MLRUNX_TRUSTED_PROXY_CIDRS: ""
+  MLRUNX_SHARE_LINKS_ENABLED: "false"
+  MLRUNX_SHARE_LINK_MAX_TTL_DAYS: "1"
+  MLRUNX_BOOTSTRAP_KEY_TTL_SECONDS: "900"
+  MLRUNX_ALLOW_INSECURE_LOCAL_DEV: "false"
 
   # Privacy settings (all disabled by default)
   MLRUNX_TELEMETRY_DISABLED: "true"

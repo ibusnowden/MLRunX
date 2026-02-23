@@ -32,7 +32,7 @@ mod config;
 mod services;
 mod storage;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::{
@@ -135,6 +135,128 @@ fn env_flag_default(name: &str, default_value: bool) -> bool {
 
 fn trust_proxy_headers() -> bool {
     env_flag_default("MLRUNX_TRUST_PROXY_HEADERS", false)
+}
+
+fn allow_insecure_local_dev() -> bool {
+    env_flag_default("MLRUNX_ALLOW_INSECURE_LOCAL_DEV", false)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrustedProxyRule {
+    V4 { network: u32, prefix_len: u8 },
+    V6 { network: u128, prefix_len: u8 },
+}
+
+impl TrustedProxyRule {
+    fn parse(raw: &str) -> Result<Self, String> {
+        let value = raw.trim();
+        if value.is_empty() {
+            return Err("empty trusted proxy entry".to_string());
+        }
+
+        let (ip, prefix_len) = if let Some((ip_raw, prefix_raw)) = value.split_once('/') {
+            let ip = ip_raw
+                .trim()
+                .parse::<IpAddr>()
+                .map_err(|_| format!("invalid IP '{ip_raw}'"))?;
+            let prefix_len = prefix_raw
+                .trim()
+                .parse::<u8>()
+                .map_err(|_| format!("invalid prefix length '{prefix_raw}'"))?;
+            (ip, prefix_len)
+        } else {
+            let ip = value
+                .parse::<IpAddr>()
+                .map_err(|_| format!("invalid IP '{value}'"))?;
+            let full_len = match ip {
+                IpAddr::V4(_) => 32,
+                IpAddr::V6(_) => 128,
+            };
+            (ip, full_len)
+        };
+
+        match ip {
+            IpAddr::V4(ipv4) => {
+                if prefix_len > 32 {
+                    return Err(format!("invalid IPv4 prefix length '{prefix_len}'"));
+                }
+                let mask = if prefix_len == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - u32::from(prefix_len))
+                };
+                Ok(Self::V4 {
+                    network: u32::from(ipv4) & mask,
+                    prefix_len,
+                })
+            }
+            IpAddr::V6(ipv6) => {
+                if prefix_len > 128 {
+                    return Err(format!("invalid IPv6 prefix length '{prefix_len}'"));
+                }
+                let mask = if prefix_len == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - u32::from(prefix_len))
+                };
+                Ok(Self::V6 {
+                    network: u128::from(ipv6) & mask,
+                    prefix_len,
+                })
+            }
+        }
+    }
+
+    fn matches(self, ip: IpAddr) -> bool {
+        match (self, ip) {
+            (
+                Self::V4 {
+                    network,
+                    prefix_len,
+                },
+                IpAddr::V4(value),
+            ) => {
+                let mask = if prefix_len == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - u32::from(prefix_len))
+                };
+                (u32::from(value) & mask) == network
+            }
+            (
+                Self::V6 {
+                    network,
+                    prefix_len,
+                },
+                IpAddr::V6(value),
+            ) => {
+                let mask = if prefix_len == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - u32::from(prefix_len))
+                };
+                (u128::from(value) & mask) == network
+            }
+            _ => false,
+        }
+    }
+}
+
+fn trusted_proxy_rules_from_env() -> Result<Vec<TrustedProxyRule>, String> {
+    let raw = std::env::var("MLRUNX_TRUSTED_PROXY_CIDRS").unwrap_or_default();
+    let mut rules = Vec::new();
+
+    for entry in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let rule = TrustedProxyRule::parse(entry)
+            .map_err(|err| format!("Invalid MLRUNX_TRUSTED_PROXY_CIDRS entry '{entry}': {err}"))?;
+        rules.push(rule);
+    }
+
+    Ok(rules)
 }
 
 /// Convert a storage error into a safe HTTP 500 response.
@@ -672,13 +794,32 @@ fn client_ip_from_socket_extensions(extensions: &axum::http::Extensions) -> Opti
         })
 }
 
+fn should_trust_forwarded_headers(socket_ip: Option<IpAddr>) -> bool {
+    if !trust_proxy_headers() {
+        return false;
+    }
+
+    let Some(peer_ip) = socket_ip else {
+        return false;
+    };
+    let Ok(trusted_rules) = trusted_proxy_rules_from_env() else {
+        return false;
+    };
+    if trusted_rules.is_empty() {
+        return false;
+    }
+
+    trusted_rules.into_iter().any(|rule| rule.matches(peer_ip))
+}
+
 fn infer_client_ip(headers: &HeaderMap, socket_addr: Option<SocketAddr>) -> Option<String> {
-    if trust_proxy_headers() {
+    let socket_ip = socket_addr.map(|addr| addr.ip());
+    if should_trust_forwarded_headers(socket_ip) {
         if let Some(forwarded_ip) = trusted_forwarded_client_ip(headers) {
             return Some(forwarded_ip);
         }
     }
-    socket_addr.map(|addr| addr.ip().to_string())
+    socket_ip.map(|ip| ip.to_string())
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -733,10 +874,11 @@ fn build_clear_cookie(name: &str, secure: bool, same_site: &str, domain: Option<
 async fn http_ui_auth_login(
     State(state): State<AppState>,
     headers: HeaderMap,
+    connect_info: axum::extract::ConnectInfo<SocketAddr>,
     Json(req): Json<UiAuthLoginRequest>,
 ) -> Result<(HeaderMap, Json<UiAuthLoginResponse>), (StatusCode, String)> {
     let user_agent = header_string(&headers, "user-agent");
-    let client_ip = infer_client_ip(&headers, None);
+    let client_ip = infer_client_ip(&headers, Some(connect_info.0));
 
     if let Some(retry_after) = state
         .key_store
@@ -1786,7 +1928,8 @@ async fn http_admin_rotate_bootstrap_key(
     Ok(Json(serde_json::json!({
         "status": "rotated",
         "new_api_key": new_raw_key,
-        "message": "Bootstrap key rotated. Update MLRUNX_API_KEY in your environment and restart SDK clients."
+        "expires_in_seconds": state.key_store.bootstrap_key_ttl_seconds(),
+        "message": "Bootstrap key rotated with short TTL. Update MLRUNX_API_KEY immediately and restart SDK clients."
     })))
 }
 
@@ -3219,8 +3362,47 @@ async fn http_revoke_key(
 /// Request to create a share link.
 #[derive(Debug, Deserialize)]
 struct CreateShareRequest {
-    /// Number of days until the link expires (None = never)
+    /// Number of days until the link expires (required; bounded by policy).
     expires_in_days: Option<i64>,
+}
+
+const DEFAULT_SHARE_LINK_MAX_TTL_DAYS: i64 = 1;
+
+fn share_links_enabled() -> bool {
+    env_flag_default("MLRUNX_SHARE_LINKS_ENABLED", false)
+}
+
+fn share_link_max_ttl_days() -> i64 {
+    std::env::var("MLRUNX_SHARE_LINK_MAX_TTL_DAYS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_SHARE_LINK_MAX_TTL_DAYS)
+}
+
+fn resolve_share_expiry(expires_in_days: Option<i64>) -> Result<String, (StatusCode, String)> {
+    let Some(days) = expires_in_days else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "expires_in_days is required for share links.".to_string(),
+        ));
+    };
+    if days <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "expires_in_days must be greater than zero.".to_string(),
+        ));
+    }
+    let max_days = share_link_max_ttl_days();
+    if days > max_days {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("expires_in_days exceeds policy maximum of {max_days} days."),
+        ));
+    }
+
+    let expires = chrono::Utc::now() + chrono::Duration::days(days);
+    Ok(expires.format("%Y-%m-%d %H:%M:%S").to_string())
 }
 
 /// Response from creating a share link.
@@ -3263,6 +3445,12 @@ async fn http_create_share_token(
     axum::extract::Path(run_id): axum::extract::Path<String>,
     Json(req): Json<CreateShareRequest>,
 ) -> Result<Json<CreateShareResponse>, (StatusCode, String)> {
+    if !share_links_enabled() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Run share links are disabled by server policy.".to_string(),
+        ));
+    }
     validate_path_id(&run_id, "run_id")?;
     // Verify the caller can access the run
     let run = state
@@ -3292,11 +3480,8 @@ async fn http_create_share_token(
     let token_hash = share_token_hash(state.key_store.as_ref(), &token);
     let token_resource_id = share_token_resource_id(&token_hash);
 
-    // Calculate expiry
-    let expires_at = req.expires_in_days.map(|days| {
-        let expires = chrono::Utc::now() + chrono::Duration::days(days);
-        expires.format("%Y-%m-%d %H:%M:%S").to_string()
-    });
+    let expires_at = resolve_share_expiry(req.expires_in_days)?;
+    let expires_at_opt = Some(expires_at.clone());
 
     state
         .sqlite_store
@@ -3304,7 +3489,7 @@ async fn http_create_share_token(
             &token_hash,
             &run_id,
             Some(&auth.api_key.key_prefix),
-            expires_at.as_deref(),
+            Some(expires_at.as_str()),
         )
         .await
         .map_err(internal_error)?;
@@ -3321,7 +3506,7 @@ async fn http_create_share_token(
         Some(&token_resource_id),
         "success",
         serde_json::json!({
-            "expires_at": expires_at.clone(),
+            "expires_at": expires_at_opt.clone(),
         }),
     )
     .await;
@@ -3330,7 +3515,7 @@ async fn http_create_share_token(
         share_url: format!("/api/v1/shared/{token}"),
         token,
         run_id,
-        expires_at,
+        expires_at: expires_at_opt,
     }))
 }
 
@@ -3339,6 +3524,9 @@ async fn http_get_shared_run(
     State(state): State<AppState>,
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Result<Json<SharedRunResponse>, (StatusCode, String)> {
+    if !share_links_enabled() {
+        return Err((StatusCode::NOT_FOUND, "Not found".to_string()));
+    }
     let token_hash = share_token_hash(state.key_store.as_ref(), &token);
     // Validate the share token
     let share = state
@@ -3392,6 +3580,9 @@ async fn http_get_shared_metrics(
     axum::extract::Path(token): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<MetricsQuery>,
 ) -> Result<Json<services::MetricsQueryResponse>, (StatusCode, String)> {
+    if !share_links_enabled() {
+        return Err((StatusCode::NOT_FOUND, "Not found".to_string()));
+    }
     let token_hash = share_token_hash(state.key_store.as_ref(), &token);
     // Validate the share token
     let share = state
@@ -4239,7 +4430,13 @@ impl HttpRateLimiter {
 }
 
 fn extract_client_ip(req: &axum::extract::Request) -> String {
-    if trust_proxy_headers() {
+    let socket_ip = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip())
+        .or_else(|| req.extensions().get::<SocketAddr>().map(|addr| addr.ip()));
+
+    if should_trust_forwarded_headers(socket_ip) {
         if let Some(forwarded_ip) = trusted_forwarded_client_ip(req.headers()) {
             return forwarded_ip;
         }
@@ -4340,6 +4537,7 @@ fn validate_runtime_security_configuration(key_store: &ApiKeyStore) -> Result<()
 #[allow(clippy::too_many_lines)]
 fn build_http_router(state: AppState) -> Router {
     let ui_jwt_enabled = state.key_store.is_ui_jwt_enabled();
+    let share_links_enabled = share_links_enabled();
 
     // Always apply restrictive CORS — never fall back to permissive(), even when
     // auth is disabled, to prevent cross-origin attacks from arbitrary websites.
@@ -4415,13 +4613,16 @@ fn build_http_router(state: AppState) -> Router {
         .route("/api/v1/runs/compare", post(http_compare_runs))
         // Key management endpoints (admin only)
         .route("/api/v1/keys", post(http_create_key).get(http_list_keys))
-        .route("/api/v1/keys/{key_id}", delete(http_revoke_key))
-        // Share token management (requires auth)
-        .route("/api/v1/runs/{run_id}/share", post(http_create_share_token))
-        .route(
-            "/api/v1/runs/{run_id}/share/{token}",
-            delete(http_revoke_share_token),
-        );
+        .route("/api/v1/keys/{key_id}", delete(http_revoke_key));
+
+    if share_links_enabled {
+        protected_routes = protected_routes
+            .route("/api/v1/runs/{run_id}/share", post(http_create_share_token))
+            .route(
+                "/api/v1/runs/{run_id}/share/{token}",
+                delete(http_revoke_share_token),
+            );
+    }
 
     if ui_jwt_enabled {
         protected_routes = protected_routes
@@ -4437,13 +4638,16 @@ fn build_http_router(state: AppState) -> Router {
     // Public routes (no auth required)
     let mut public_routes = Router::new()
         .route("/", get(root))
-        .route("/health", get(health))
-        // Shared run endpoints (public, no auth — token is the credential)
-        .route("/api/v1/shared/{token}", get(http_get_shared_run))
-        .route(
-            "/api/v1/shared/{token}/metrics",
-            get(http_get_shared_metrics),
-        );
+        .route("/health", get(health));
+
+    if share_links_enabled {
+        public_routes = public_routes
+            .route("/api/v1/shared/{token}", get(http_get_shared_run))
+            .route(
+                "/api/v1/shared/{token}/metrics",
+                get(http_get_shared_metrics),
+            );
+    }
 
     if ui_jwt_enabled {
         public_routes = public_routes.route("/api/v1/ui-auth/login", post(http_ui_auth_login));
@@ -4578,13 +4782,24 @@ async fn main() {
         panic!("Refusing to start: {err}");
     }
 
-    assert!(
-        !(key_store.is_auth_disabled() && is_production_environment()),
-        "Refusing to start: authentication is disabled in production. \
-    Set MLRUNX_AUTH_MODE=api_key or MLRUNX_AUTH_MODE=hybrid and restart."
-    );
     if key_store.is_auth_disabled() {
-        warn!("Authentication is disabled; use only in development/test environments.");
+        assert!(
+            allow_insecure_local_dev(),
+            "Refusing to start: MLRUNX_AUTH_MODE=disabled requires MLRUNX_ALLOW_INSECURE_LOCAL_DEV=true."
+        );
+        assert!(
+            !is_production_environment(),
+            "Refusing to start: authentication cannot be disabled in production."
+        );
+        assert!(
+            server_config.http_addr.ip().is_loopback()
+                && server_config.grpc_addr.ip().is_loopback(),
+            "Refusing to start: disabled auth mode requires loopback-only bind addresses. \
+Set API_HOST=127.0.0.1 (or ::1) when MLRUNX_AUTH_MODE=disabled."
+        );
+        warn!(
+            "Authentication is disabled under local-dev override; this instance must remain local-only."
+        );
     }
 
     // Create shared state
@@ -4803,6 +5018,10 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/ui-auth/login")
                     .header("content-type", "application/json")
+                    .extension(axum::extract::ConnectInfo(SocketAddr::from((
+                        [127, 0, 0, 1],
+                        12345,
+                    ))))
                     .body(Body::from(serde_json::json!({ "jwt": jwt }).to_string()))
                     .expect("Failed to build login request"),
             )
@@ -4844,6 +5063,10 @@ mod tests {
                     .uri("/api/v1/ui-auth/login")
                     .header("authorization", format!("Bearer {jwt}"))
                     .header("content-type", "application/json")
+                    .extension(axum::extract::ConnectInfo(SocketAddr::from((
+                        [127, 0, 0, 1],
+                        12345,
+                    ))))
                     .body(Body::from("{}"))
                     .expect("Failed to build bearer login request"),
             )

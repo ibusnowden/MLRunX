@@ -1767,12 +1767,13 @@ impl SqliteStore {
         key_hash: &str,
         key_fingerprint: Option<&str>,
         key_prefix: &str,
+        expires_at: Option<&str>,
     ) -> Result<(), SqliteError> {
         let conn = self.conn.lock().await;
 
         conn.execute(
-            r#"INSERT INTO api_keys (id, key_hash, key_fingerprint, key_prefix, project_id, name, scopes, revoked_at)
-               VALUES (?1, ?2, ?3, ?4, NULL, 'bootstrap', '["admin"]', NULL)
+            r#"INSERT INTO api_keys (id, key_hash, key_fingerprint, key_prefix, project_id, name, scopes, revoked_at, expires_at)
+               VALUES (?1, ?2, ?3, ?4, NULL, 'bootstrap', '["admin"]', NULL, ?5)
                ON CONFLICT(key_fingerprint) DO UPDATE SET
                    id = excluded.id,
                    key_hash = excluded.key_hash,
@@ -1780,8 +1781,9 @@ impl SqliteStore {
                    project_id = NULL,
                    scopes = '["admin"]',
                    revoked_at = NULL,
+                   expires_at = excluded.expires_at,
                    updated_at = datetime('now')"#,
-            params![id, key_hash, key_fingerprint, key_prefix],
+            params![id, key_hash, key_fingerprint, key_prefix, expires_at],
         )?;
 
         Ok(())
