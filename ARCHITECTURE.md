@@ -52,6 +52,50 @@ MLRunX is run-centric.
 
 The repo also contains scaffolded scale-out building blocks (Postgres/ClickHouse/MinIO and service splits in `services/`), but current production behavior remains API + SQLite first.
 
+## Experiment Tracking Contract (v1)
+
+MLRunX is a pure experiment tracking system.
+
+- In scope:
+  - Run lifecycle and metadata.
+  - Metrics, params, tags, and run events.
+  - Query/list/compare workflows.
+  - Multi-tenant isolation and auditability.
+- Out of scope:
+  - Workflow orchestration graphs.
+  - Scheduler/job control APIs.
+  - Training execution control planes.
+
+Canonical run model:
+- `run_id`, `project_id`, `name`, `status`
+- `tags`, `parameters`, `metrics`, `events`
+- `created_at`, `updated_at`, `duration_seconds`
+
+Canonical event taxonomy:
+- `metric`: `{name, value, step, timestamp}`
+- `param`: `{name, value}`
+- `tag`: `{key, value}`
+- `event`: `{level, source, message, step?, timestamp?}`
+
+SDK surface boundary (v1):
+- `mlrunx.init(...)`
+- `run.log(...)`
+- `run["parameters"] = {...}` / `run["tags"] = {...}`
+- `run.log_image(...)`
+- `run.log_chart(...)`
+- `run.finish(...)`
+
+Current query contract boundary:
+- List: `GET /api/v1/runs` with `project`, `status`, `q`, `tags`, `limit`, `offset`.
+- Compare: `POST /api/v1/runs/compare` with `run_ids`, `metric_names`, `max_points`, `alignment`.
+
+Limits and safety:
+- Ingest batch payload target <= 1 MB (`docs/spec/limits.md`).
+- Run event message server limit: 2000 chars.
+- Run event source limit: 64 chars.
+- Compare request maximum: 100 runs.
+- Access enforcement is project-scoped with RBAC and ownership checks.
+
 ## Internal Boundaries
 
 - `apps/api` should primarily assemble routes, middleware, and storage wiring.
