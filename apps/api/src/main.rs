@@ -62,8 +62,8 @@ use services::{
     MetricPayload, ParamPayload, TagPayload, compute_payload_hash, ingest::InMemoryStore,
 };
 use storage::{
-    AuditEventRow, AuthSessionAdminRow, CreateProjectInput, CreateRunInput, MetricRow,
-    ProjectRepository, ProjectRow, RunEventInput, RunEventRow, RunRepository, RunRow,
+    AuditEventRow, AuthSessionAdminRow, CreateProjectInput, CreateRunInput, MetadataFilter,
+    MetricRow, ProjectRepository, ProjectRow, RunEventInput, RunEventRow, RunRepository, RunRow,
     RunStatus as PostgresRunStatus, SqliteStore, UserProjectMembershipRow, UserRow,
 };
 
@@ -288,6 +288,204 @@ fn validate_path_id(id: &str, name: &str) -> Result<(), (StatusCode, String)> {
         ));
     }
     Ok(())
+}
+
+const ALLOWED_METADATA_NAMESPACES: &[&str] = &["parameters", "tags", "system", "dataset", "model"];
+const METADATA_MAX_KEY_LEN: usize = 256;
+const METADATA_MAX_DEPTH: usize = 4;
+const METADATA_MAX_SEGMENT_LEN: usize = 64;
+const PARAM_VALUE_MAX_LEN: usize = 4096;
+
+fn canonicalize_metadata_key(raw_key: &str, default_namespace: &str) -> Result<String, String> {
+    let trimmed = raw_key.trim();
+    if trimmed.is_empty() {
+        return Err("metadata key cannot be empty".to_string());
+    }
+
+    let canonical = if trimmed.contains('.') {
+        trimmed.to_string()
+    } else {
+        format!("{default_namespace}.{trimmed}")
+    };
+
+    if canonical.len() > METADATA_MAX_KEY_LEN {
+        return Err(format!(
+            "metadata key '{trimmed}' exceeds max length {METADATA_MAX_KEY_LEN}"
+        ));
+    }
+
+    let segments: Vec<&str> = canonical.split('.').collect();
+    if segments.len() > METADATA_MAX_DEPTH {
+        return Err(format!(
+            "metadata key '{canonical}' exceeds max depth {METADATA_MAX_DEPTH}"
+        ));
+    }
+
+    let namespace = segments.first().copied().unwrap_or_default();
+    if !ALLOWED_METADATA_NAMESPACES.contains(&namespace) {
+        return Err(format!(
+            "metadata key '{canonical}' uses unsupported namespace '{namespace}'"
+        ));
+    }
+
+    for segment in segments {
+        if segment.is_empty() {
+            return Err(format!(
+                "metadata key '{canonical}' contains empty path segments"
+            ));
+        }
+        if segment.len() > METADATA_MAX_SEGMENT_LEN {
+            return Err(format!(
+                "metadata key segment '{segment}' exceeds max length {METADATA_MAX_SEGMENT_LEN}"
+            ));
+        }
+        if !segment
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            return Err(format!(
+                "metadata key '{canonical}' contains invalid characters; allowed: a-z, A-Z, 0-9, _, - and ."
+            ));
+        }
+    }
+
+    Ok(canonical)
+}
+
+fn canonical_and_legacy_metadata_key(
+    raw_key: &str,
+    default_namespace: &str,
+) -> Result<(String, Option<String>), String> {
+    let canonical = canonicalize_metadata_key(raw_key, default_namespace)?;
+    let trimmed = raw_key.trim();
+    let legacy = if trimmed.contains('.') {
+        None
+    } else {
+        Some(trimmed.to_string())
+    };
+    Ok((canonical, legacy))
+}
+
+fn validate_tag_value(raw_value: &str, max_len: usize) -> Result<(), String> {
+    if raw_value.len() > max_len {
+        return Err(format!("tag value exceeds max length {max_len} characters"));
+    }
+    Ok(())
+}
+
+fn validate_param_value(raw_value: &str) -> Result<(), String> {
+    if raw_value.len() > PARAM_VALUE_MAX_LEN {
+        return Err(format!(
+            "parameter value exceeds max length {PARAM_VALUE_MAX_LEN} characters"
+        ));
+    }
+    Ok(())
+}
+
+fn json_value_depth(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Array(items) => {
+            1 + items.iter().map(json_value_depth).max().unwrap_or(0)
+        }
+        serde_json::Value::Object(map) => 1 + map.values().map(json_value_depth).max().unwrap_or(0),
+        _ => 1,
+    }
+}
+
+fn stringify_config_param_value(value: &serde_json::Value) -> Result<String, String> {
+    let depth = json_value_depth(value);
+    if depth > METADATA_MAX_DEPTH {
+        return Err(format!(
+            "config value exceeds max depth {METADATA_MAX_DEPTH}"
+        ));
+    }
+
+    let encoded = match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Bool(_) | serde_json::Value::Number(_) | serde_json::Value::Null => {
+            value.to_string()
+        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => serde_json::to_string(value)
+            .map_err(|err| format!("failed to encode config value: {err}"))?,
+    };
+
+    validate_param_value(&encoded)?;
+    Ok(encoded)
+}
+
+fn parse_metadata_filters(
+    raw: Option<&str>,
+    default_namespace: &str,
+    query_name: &str,
+) -> Result<Vec<MetadataFilter>, (StatusCode, String)> {
+    let Some(value) = raw else {
+        return Ok(Vec::new());
+    };
+
+    let mut filters = Vec::new();
+    for token in value
+        .split(',')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+    {
+        let (raw_key, raw_value) = if let Some((left, right)) = token.split_once('=') {
+            (left.trim(), Some(right.trim().to_string()))
+        } else {
+            (token, None)
+        };
+
+        if raw_key.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Invalid {query_name} filter '{token}': missing key"),
+            ));
+        }
+
+        let (canonical_key, legacy_key) =
+            canonical_and_legacy_metadata_key(raw_key, default_namespace).map_err(|err| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid {query_name} filter '{token}': {err}"),
+                )
+            })?;
+
+        filters.push(MetadataFilter {
+            key: canonical_key,
+            legacy_key,
+            value: raw_value,
+        });
+    }
+
+    Ok(filters)
+}
+
+fn normalize_created_at_filter(
+    raw: &str,
+    field_name: &str,
+) -> Result<String, (StatusCode, String)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{field_name} cannot be empty"),
+        ));
+    }
+
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Ok(parsed
+            .with_timezone(&chrono::Utc)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string());
+    }
+
+    if let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
+        return Ok(parsed.format("%Y-%m-%d %H:%M:%S").to_string());
+    }
+
+    Err((
+        StatusCode::BAD_REQUEST,
+        format!("Invalid {field_name}: expected RFC3339 or 'YYYY-MM-DD HH:MM:SS' format"),
+    ))
 }
 
 const fn auth_mode_label(auth: &AuthContext) -> &'static str {
@@ -2014,6 +2212,52 @@ async fn http_init_run(
     )
     .await?;
 
+    let max_tag_value_len = state.cardinality_tracker.config().max_tag_value_length;
+    let mut validated_init_tags: Vec<(String, String)> = Vec::new();
+    if let Some(tags) = &req.tags {
+        for (raw_key, raw_value) in tags {
+            let canonical_key = canonicalize_metadata_key(raw_key, "tags").map_err(|err| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid initial tag '{raw_key}': {err}"),
+                )
+            })?;
+            validate_tag_value(raw_value, max_tag_value_len).map_err(|err| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid initial tag '{raw_key}': {err}"),
+                )
+            })?;
+            validated_init_tags.push((canonical_key, raw_value.clone()));
+        }
+    }
+
+    let mut validated_init_params: Vec<(String, String)> = Vec::new();
+    if let Some(config) = &req.config {
+        for (raw_key, raw_value) in config {
+            let canonical_key =
+                canonicalize_metadata_key(raw_key, "parameters").map_err(|err| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("Invalid config key '{raw_key}': {err}"),
+                    )
+                })?;
+            let value_text = stringify_config_param_value(raw_value).map_err(|err| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid config value for '{raw_key}': {err}"),
+                )
+            })?;
+            validated_init_params.push((canonical_key, value_text));
+        }
+    }
+    let normalized_init_tags: Option<std::collections::HashMap<String, String>> =
+        if validated_init_tags.is_empty() {
+            None
+        } else {
+            Some(validated_init_tags.iter().cloned().collect())
+        };
+
     let mut created_by_user_id = None;
     let mut created_by_key_id = None;
     if auth.is_ui_jwt() {
@@ -2053,12 +2297,18 @@ async fn http_init_run(
         .map_err(internal_error)?;
 
     // Set initial tags if provided
-    if let Some(tags) = &req.tags {
-        let tag_pairs: Vec<(String, String)> =
-            tags.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    if !validated_init_tags.is_empty() {
         state
             .sqlite_store
-            .set_tags(&run_id, &tag_pairs)
+            .set_tags(&run_id, &validated_init_tags)
+            .await
+            .map_err(internal_error)?;
+    }
+
+    if !validated_init_params.is_empty() {
+        state
+            .sqlite_store
+            .insert_params(&run_id, &validated_init_params)
             .await
             .map_err(internal_error)?;
     }
@@ -2079,8 +2329,13 @@ async fn http_init_run(
     {
         warn!(run_id = %run_id, error = %e, "Failed to persist run init event");
     }
-    maybe_shadow_write_run_to_postgres(&run_id, project_id, req.name.as_deref(), req.tags.as_ref())
-        .await;
+    maybe_shadow_write_run_to_postgres(
+        &run_id,
+        project_id,
+        req.name.as_deref(),
+        normalized_init_tags.as_ref(),
+    )
+    .await;
 
     info!(
         run_id = %run_id,
@@ -2102,6 +2357,8 @@ async fn http_init_run(
             "project_name": resolved_project_name,
             "project_id": project_id,
             "created_by_user_id": created_by_user_id,
+            "initial_tag_count": validated_init_tags.len(),
+            "initial_param_count": validated_init_params.len(),
             "source": "http_init_run",
         }),
     )
@@ -2256,6 +2513,43 @@ async fn http_ingest_batch(
     .await?;
     require_ui_run_owner(&auth, &run)?;
     require_api_key_run_owner_for_mutation(&auth, &run, "ingest to")?;
+
+    let max_tag_value_len = state.cardinality_tracker.config().max_tag_value_length;
+    let mut validated_params: Vec<(String, String)> = Vec::with_capacity(req.params.len());
+    for param in &req.params {
+        let canonical_name =
+            canonicalize_metadata_key(&param.name, "parameters").map_err(|err| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid param key '{}': {err}", param.name),
+                )
+            })?;
+        validate_param_value(&param.value).map_err(|err| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid param value for '{}': {err}", param.name),
+            )
+        })?;
+        validated_params.push((canonical_name, param.value.clone()));
+    }
+
+    let mut validated_tags: Vec<(String, String)> = Vec::with_capacity(req.tags.len());
+    for tag in &req.tags {
+        let canonical_key = canonicalize_metadata_key(&tag.key, "tags").map_err(|err| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid tag key '{}': {err}", tag.key),
+            )
+        })?;
+        validate_tag_value(&tag.value, max_tag_value_len).map_err(|err| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid tag value for '{}': {err}", tag.key),
+            )
+        })?;
+        validated_tags.push((canonical_key, tag.value.clone()));
+    }
+
     // Generate batch_id if not provided
     let batch_id = req
         .batch_id
@@ -2273,21 +2567,19 @@ async fn http_ingest_batch(
         })
         .collect();
 
-    let param_payloads: Vec<ParamPayload> = req
-        .params
+    let param_payloads: Vec<ParamPayload> = validated_params
         .iter()
-        .map(|p| ParamPayload {
-            name: p.name.clone(),
-            value: p.value.clone(),
+        .map(|(name, value)| ParamPayload {
+            name: name.clone(),
+            value: value.clone(),
         })
         .collect();
 
-    let tag_payloads: Vec<TagPayload> = req
-        .tags
+    let tag_payloads: Vec<TagPayload> = validated_tags
         .iter()
-        .map(|t| TagPayload {
-            key: t.key.clone(),
-            value: t.value.clone(),
+        .map(|(key, value)| TagPayload {
+            key: key.clone(),
+            value: value.clone(),
         })
         .collect();
 
@@ -2313,8 +2605,8 @@ async fn http_ingest_batch(
 
     // Check and record for idempotency
     let metric_count = req.metrics.len();
-    let param_count = req.params.len();
-    let tag_count = req.tags.len();
+    let param_count = validated_params.len();
+    let tag_count = validated_tags.len();
     let event_count = req.events.len();
 
     let project_id = run.project_id.clone();
@@ -2373,11 +2665,7 @@ async fn http_ingest_batch(
     }
 
     // Validate cardinality limits
-    let tags_for_validation: Vec<(String, String)> = req
-        .tags
-        .iter()
-        .map(|t| (t.key.clone(), t.value.clone()))
-        .collect();
+    let tags_for_validation: Vec<(String, String)> = validated_tags.clone();
     let metric_names: Vec<String> = req.metrics.iter().map(|m| m.name.clone()).collect();
 
     let validation = state
@@ -2487,14 +2775,9 @@ async fn http_ingest_batch(
 
     // Persist params to SQLite
     if param_count > 0 {
-        let param_pairs: Vec<(String, String)> = req
-            .params
-            .iter()
-            .map(|p| (p.name.clone(), p.value.clone()))
-            .collect();
         if let Err(e) = state
             .sqlite_store
-            .insert_params(&req.run_id, &param_pairs)
+            .insert_params(&req.run_id, &validated_params)
             .await
         {
             warn!(error = %e, "Failed to persist params to SQLite");
@@ -2572,6 +2855,38 @@ async fn http_ingest_batch(
                 warn!(run_id = %req.run_id, error = %e, "Failed to persist warning events");
             }
         }
+    }
+
+    if param_count > 0 || accepted_tag_count > 0 {
+        let updated_param_names: Vec<String> = validated_params
+            .iter()
+            .take(20)
+            .map(|(name, _)| name.clone())
+            .collect();
+        let updated_tag_keys: Vec<String> = accepted_tags
+            .iter()
+            .take(20)
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        emit_audit_event(
+            &state,
+            Some(&auth),
+            Some(&project_id),
+            Some(&req.run_id),
+            "run.metadata.update",
+            "run",
+            Some(&req.run_id),
+            "success",
+            serde_json::json!({
+                "param_count": param_count,
+                "tag_count": accepted_tag_count,
+                "updated_param_names": updated_param_names,
+                "updated_tag_keys": updated_tag_keys,
+                "source": "http_ingest_batch",
+            }),
+        )
+        .await;
     }
 
     let total = accepted_metric_count + param_count + accepted_tag_count + accepted_event_count;
@@ -3729,12 +4044,22 @@ fn base64_url_encode(data: &[u8]) -> String {
 struct ListRunsQuery {
     /// Filter by project ID
     project: Option<String>,
+    /// Filter by owner user ID
+    owner: Option<String>,
     /// Filter by run status
     status: Option<String>,
+    /// Filter by exact run name
+    name: Option<String>,
     /// Free-text search query
     q: Option<String>,
     /// Comma-separated tag filters (key or key=value)
     tags: Option<String>,
+    /// Comma-separated param filters (key or key=value)
+    params: Option<String>,
+    /// Include runs created at or after this timestamp
+    created_after: Option<String>,
+    /// Include runs created at or before this timestamp
+    created_before: Option<String>,
     /// Maximum number of runs to return
     limit: Option<usize>,
     /// Number of runs to skip
@@ -3787,6 +4112,19 @@ async fn http_list_runs(
 
     let limit = query.limit.unwrap_or(100).min(1000);
     let offset = query.offset.unwrap_or(0);
+    let tag_filters = parse_metadata_filters(query.tags.as_deref(), "tags", "tags")?;
+    let param_filters = parse_metadata_filters(query.params.as_deref(), "parameters", "params")?;
+
+    let created_after = query
+        .created_after
+        .as_deref()
+        .map(|raw| normalize_created_at_filter(raw, "created_after"))
+        .transpose()?;
+    let created_before = query
+        .created_before
+        .as_deref()
+        .map(|raw| normalize_created_at_filter(raw, "created_before"))
+        .transpose()?;
 
     // Enforce project scope:
     // - API key scoped callers: existing behavior.
@@ -3860,15 +4198,28 @@ async fn http_list_runs(
     };
 
     let owner_user_filter = if auth.is_ui_jwt() && !auth.is_platform_admin {
-        Some(auth_user_id(&auth).ok_or_else(|| {
+        let current_user_id = auth_user_id(&auth).ok_or_else(|| {
             (
                 StatusCode::FORBIDDEN,
                 "Unable to resolve user identity for run listing.".to_string(),
             )
-        })?)
+        })?;
+        if let Some(requested_owner) = query.owner.as_deref()
+            && requested_owner != current_user_id
+        {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Access denied: non-admin users can only query their own runs.".to_string(),
+            ));
+        }
+        Some(current_user_id)
     } else {
-        None
+        query.owner.clone()
     };
+
+    if let Some(owner) = owner_user_filter.as_deref() {
+        validate_path_id(owner, "owner")?;
+    }
 
     // Query from SQLite
     let (sqlite_runs, total) = state
@@ -3878,6 +4229,11 @@ async fn http_list_runs(
             owner_user_filter.as_deref(),
             query.status.as_deref(),
             query.q.as_deref(),
+            query.name.as_deref(),
+            created_after.as_deref(),
+            created_before.as_deref(),
+            &tag_filters,
+            &param_filters,
             limit,
             offset,
         )
@@ -5291,6 +5647,261 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response_text(response).await;
         assert!(body.contains("project_id is required"));
+    }
+
+    #[tokio::test]
+    async fn test_ingest_rejects_invalid_metadata_key() {
+        let app = test_app().await;
+
+        let create_project_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "invalid-metadata-project"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create project request"),
+            )
+            .await
+            .expect("Create project request failed");
+        assert_eq!(create_project_response.status(), StatusCode::OK);
+        let create_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_project_response).await)
+                .expect("Create project response must be JSON");
+        let project_id = create_payload["project_id"]
+            .as_str()
+            .expect("project_id should exist")
+            .to_string();
+
+        let run_id = "run-invalid-metadata-123";
+        let init_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": project_id,
+                            "run_id": run_id,
+                            "name": "invalid-metadata-run"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build init request"),
+            )
+            .await
+            .expect("Init request failed");
+        assert_eq!(init_response.status(), StatusCode::OK);
+
+        let ingest_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ingest/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "run_id": run_id,
+                            "metrics": [],
+                            "params": [{"name": "bad key", "value": "1"}],
+                            "tags": [],
+                            "events": []
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build ingest request"),
+            )
+            .await
+            .expect("Ingest request failed");
+        assert_eq!(ingest_response.status(), StatusCode::BAD_REQUEST);
+
+        let body = response_text(ingest_response).await;
+        assert!(body.contains("Invalid param key"));
+
+        let oversized_param = "x".repeat(PARAM_VALUE_MAX_LEN + 1);
+        let oversized_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ingest/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "run_id": run_id,
+                            "metrics": [],
+                            "params": [{"name": "lr", "value": oversized_param}],
+                            "tags": [],
+                            "events": []
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build oversized ingest request"),
+            )
+            .await
+            .expect("Oversized ingest request failed");
+        assert_eq!(oversized_response.status(), StatusCode::BAD_REQUEST);
+        let oversized_body = response_text(oversized_response).await;
+        assert!(oversized_body.contains("Invalid param value"));
+    }
+
+    #[tokio::test]
+    async fn test_list_runs_supports_metadata_and_time_filters() {
+        let app = test_app().await;
+
+        let create_project_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "list-filter-project"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create project request"),
+            )
+            .await
+            .expect("Create project request failed");
+        assert_eq!(create_project_response.status(), StatusCode::OK);
+        let create_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_project_response).await)
+                .expect("Create project response must be JSON");
+        let project_id = create_payload["project_id"]
+            .as_str()
+            .expect("project_id should exist")
+            .to_string();
+
+        for run_id in ["run-filter-a", "run-filter-b"] {
+            let init_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/runs")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "project_id": project_id,
+                                "run_id": run_id,
+                                "name": run_id
+                            })
+                            .to_string(),
+                        ))
+                        .expect("Failed to build init request"),
+                )
+                .await
+                .expect("Init request failed");
+            assert_eq!(init_response.status(), StatusCode::OK);
+        }
+
+        let ingest_a = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ingest/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "run_id": "run-filter-a",
+                            "metrics": [],
+                            "params": [{"name": "lr", "value": "0.001"}],
+                            "tags": [{"key": "framework", "value": "pytorch"}],
+                            "events": []
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build ingest request for run A"),
+            )
+            .await
+            .expect("Ingest request A failed");
+        assert_eq!(ingest_a.status(), StatusCode::OK);
+
+        let ingest_b = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ingest/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "run_id": "run-filter-b",
+                            "metrics": [],
+                            "params": [{"name": "lr", "value": "0.100"}],
+                            "tags": [{"key": "framework", "value": "tensorflow"}],
+                            "events": []
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build ingest request for run B"),
+            )
+            .await
+            .expect("Ingest request B failed");
+        assert_eq!(ingest_b.status(), StatusCode::OK);
+
+        let filtered_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/runs?project={project_id}&tags=framework=pytorch&params=lr=0.001"
+                    ))
+                    .body(Body::empty())
+                    .expect("Failed to build filtered list request"),
+            )
+            .await
+            .expect("Filtered list request failed");
+        assert_eq!(filtered_response.status(), StatusCode::OK);
+        let filtered_payload: serde_json::Value =
+            serde_json::from_str(&response_text(filtered_response).await)
+                .expect("Filtered runs response should be JSON");
+        let filtered_runs = filtered_payload["runs"]
+            .as_array()
+            .expect("runs should be an array");
+        assert_eq!(filtered_runs.len(), 1);
+        assert_eq!(
+            filtered_runs[0]["run_id"].as_str(),
+            Some("run-filter-a"),
+            "compound tag+param filter should match only run-filter-a"
+        );
+
+        let future_window_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/runs?project={project_id}&created_after=2999-01-01T00:00:00Z"
+                    ))
+                    .body(Body::empty())
+                    .expect("Failed to build created_after list request"),
+            )
+            .await
+            .expect("created_after list request failed");
+        assert_eq!(future_window_response.status(), StatusCode::OK);
+        let future_payload: serde_json::Value =
+            serde_json::from_str(&response_text(future_window_response).await)
+                .expect("Future filter response should be JSON");
+        assert_eq!(
+            future_payload["total"].as_u64(),
+            Some(0),
+            "future created_after should return zero runs"
+        );
     }
 
     #[tokio::test]

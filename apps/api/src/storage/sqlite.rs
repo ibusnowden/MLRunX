@@ -146,6 +146,8 @@ impl SqliteStore {
             CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
             CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
             CREATE INDEX IF NOT EXISTS idx_runs_created ON runs(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_runs_name ON runs(name);
+            CREATE INDEX IF NOT EXISTS idx_runs_project_status_created ON runs(project_id, status, created_at DESC);
 
             -- Tags table (key-value pairs for runs)
             CREATE TABLE IF NOT EXISTS tags (
@@ -157,6 +159,8 @@ impl SqliteStore {
                 UNIQUE(run_id, key)
             );
             CREATE INDEX IF NOT EXISTS idx_tags_run ON tags(run_id);
+            CREATE INDEX IF NOT EXISTS idx_tags_key ON tags(key);
+            CREATE INDEX IF NOT EXISTS idx_tags_key_value_run ON tags(key, value, run_id);
 
             -- Metrics table (time series data)
             CREATE TABLE IF NOT EXISTS metrics (
@@ -197,6 +201,8 @@ impl SqliteStore {
                 UNIQUE(run_id, name)
             );
             CREATE INDEX IF NOT EXISTS idx_params_run ON params(run_id);
+            CREATE INDEX IF NOT EXISTS idx_params_name ON params(name);
+            CREATE INDEX IF NOT EXISTS idx_params_name_value_run ON params(name, value, run_id);
 
             -- Batches table (for idempotency tracking)
             CREATE TABLE IF NOT EXISTS batches (
@@ -1237,6 +1243,11 @@ impl SqliteStore {
         owner_user_id: Option<&str>,
         status: Option<&str>,
         query: Option<&str>,
+        name: Option<&str>,
+        created_after: Option<&str>,
+        created_before: Option<&str>,
+        tag_filters: &[MetadataFilter],
+        param_filters: &[MetadataFilter],
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<RunRow>, usize), SqliteError> {
@@ -1281,6 +1292,74 @@ impl SqliteStore {
             count_sql.push_str(" AND (r.name LIKE ? OR r.id LIKE ?)");
             params_vec.push(Box::new(pattern.clone()));
             params_vec.push(Box::new(pattern));
+        }
+
+        if let Some(exact_name) = name {
+            sql.push_str(" AND r.name = ?");
+            count_sql.push_str(" AND r.name = ?");
+            params_vec.push(Box::new(exact_name.to_string()));
+        }
+
+        if let Some(after) = created_after {
+            sql.push_str(" AND r.created_at >= ?");
+            count_sql.push_str(" AND r.created_at >= ?");
+            params_vec.push(Box::new(after.to_string()));
+        }
+
+        if let Some(before) = created_before {
+            sql.push_str(" AND r.created_at <= ?");
+            count_sql.push_str(" AND r.created_at <= ?");
+            params_vec.push(Box::new(before.to_string()));
+        }
+
+        for filter in tag_filters {
+            sql.push_str(" AND EXISTS (SELECT 1 FROM tags t WHERE t.run_id = r.id AND ");
+            count_sql.push_str(" AND EXISTS (SELECT 1 FROM tags t WHERE t.run_id = r.id AND ");
+
+            if let Some(legacy_key) = filter.legacy_key.as_deref() {
+                sql.push_str("(t.key = ? OR t.key = ?)");
+                count_sql.push_str("(t.key = ? OR t.key = ?)");
+                params_vec.push(Box::new(filter.key.clone()));
+                params_vec.push(Box::new(legacy_key.to_string()));
+            } else {
+                sql.push_str("t.key = ?");
+                count_sql.push_str("t.key = ?");
+                params_vec.push(Box::new(filter.key.clone()));
+            }
+
+            if let Some(value) = filter.value.as_deref() {
+                sql.push_str(" AND t.value = ?");
+                count_sql.push_str(" AND t.value = ?");
+                params_vec.push(Box::new(value.to_string()));
+            }
+
+            sql.push(')');
+            count_sql.push(')');
+        }
+
+        for filter in param_filters {
+            sql.push_str(" AND EXISTS (SELECT 1 FROM params p2 WHERE p2.run_id = r.id AND ");
+            count_sql.push_str(" AND EXISTS (SELECT 1 FROM params p2 WHERE p2.run_id = r.id AND ");
+
+            if let Some(legacy_key) = filter.legacy_key.as_deref() {
+                sql.push_str("(p2.name = ? OR p2.name = ?)");
+                count_sql.push_str("(p2.name = ? OR p2.name = ?)");
+                params_vec.push(Box::new(filter.key.clone()));
+                params_vec.push(Box::new(legacy_key.to_string()));
+            } else {
+                sql.push_str("p2.name = ?");
+                count_sql.push_str("p2.name = ?");
+                params_vec.push(Box::new(filter.key.clone()));
+            }
+
+            if let Some(value) = filter.value.as_deref() {
+                sql.push_str(" AND p2.value = ?");
+                count_sql.push_str(" AND p2.value = ?");
+                params_vec.push(Box::new(value.to_string()));
+            }
+
+            sql.push(')');
+            count_sql.push(')');
         }
 
         sql.push_str(" ORDER BY r.created_at DESC LIMIT ? OFFSET ?");
@@ -2120,6 +2199,14 @@ pub struct RunRow {
     pub duration_seconds: Option<f64>,
 }
 
+/// Query filter for run metadata (`tags` and `params`).
+#[derive(Debug, Clone)]
+pub struct MetadataFilter {
+    pub key: String,
+    pub legacy_key: Option<String>,
+    pub value: Option<String>,
+}
+
 /// A row from the projects table.
 #[derive(Debug, Clone)]
 pub struct ProjectRow {
@@ -2435,7 +2522,19 @@ mod tests {
             .unwrap();
 
         let (runs, total) = store
-            .list_runs(Some(&project_id), Some(&owner_a), None, None, 100, 0)
+            .list_runs(
+                Some(&project_id),
+                Some(&owner_a),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                &[],
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert_eq!(total, 1);
