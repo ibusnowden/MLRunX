@@ -4488,11 +4488,70 @@ struct CreateShareRequest {
 
 const DEFAULT_SHARE_LINK_MAX_TTL_DAYS: i64 = 1;
 
+#[cfg(test)]
+static SHARE_LINK_POLICY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(test)]
+static SHARE_LINK_POLICY_TEST_OVERRIDE: std::sync::Mutex<Option<(bool, i64)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+struct ShareLinkPolicyOverrideGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Option<(bool, i64)>,
+}
+
+#[cfg(test)]
+impl Drop for ShareLinkPolicyOverrideGuard {
+    fn drop(&mut self) {
+        let mut slot = SHARE_LINK_POLICY_TEST_OVERRIDE
+            .lock()
+            .expect("Failed to lock share-link policy override");
+        *slot = self.previous;
+    }
+}
+
+#[cfg(test)]
+fn set_share_link_policy_override_for_tests(
+    override_value: Option<(bool, i64)>,
+) -> ShareLinkPolicyOverrideGuard {
+    let lock = SHARE_LINK_POLICY_TEST_LOCK
+        .lock()
+        .expect("Failed to lock share-link policy test mutex");
+    let mut slot = SHARE_LINK_POLICY_TEST_OVERRIDE
+        .lock()
+        .expect("Failed to lock share-link policy override");
+    let previous = *slot;
+    *slot = override_value;
+    drop(slot);
+    ShareLinkPolicyOverrideGuard {
+        _lock: lock,
+        previous,
+    }
+}
+
 fn share_links_enabled() -> bool {
+    #[cfg(test)]
+    {
+        let slot = SHARE_LINK_POLICY_TEST_OVERRIDE
+            .lock()
+            .expect("Failed to lock share-link policy override");
+        if let Some((enabled, _)) = *slot {
+            return enabled;
+        }
+    }
     env_flag_default("MLRUNX_SHARE_LINKS_ENABLED", false)
 }
 
 fn share_link_max_ttl_days() -> i64 {
+    #[cfg(test)]
+    {
+        let slot = SHARE_LINK_POLICY_TEST_OVERRIDE
+            .lock()
+            .expect("Failed to lock share-link policy override");
+        if let Some((_, max_ttl_days)) = *slot {
+            return max_ttl_days.max(1);
+        }
+    }
     std::env::var("MLRUNX_SHARE_LINK_MAX_TTL_DAYS")
         .ok()
         .and_then(|value| value.parse::<i64>().ok())
@@ -9549,6 +9608,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_non_admin_ui_session_cannot_revoke_foreign_user_session() {
+        let harness = ui_session_harness_with_role("owner").await;
+
+        let foreign_subject = "foreign-session-subject";
+        let foreign_jwt = build_test_jwt(&harness.jwt_secret, foreign_subject);
+        let foreign_cookies = login_ui_session(&harness.app, &foreign_jwt).await;
+        let foreign_user_id = harness
+            .sqlite_store
+            .get_or_create_user_identity(
+                "jwt",
+                foreign_subject,
+                Some("foreign-session@example.com"),
+                Some("Foreign Session User"),
+            )
+            .await
+            .expect("Failed to resolve foreign user identity");
+
+        let foreign_session_id = harness
+            .sqlite_store
+            .list_auth_sessions_for_admin(Some(&foreign_user_id), false)
+            .await
+            .expect("Failed to list foreign sessions")
+            .into_iter()
+            .find(|session| session.revoked_at.is_none())
+            .map(|session| session.id)
+            .expect("Expected active foreign session");
+
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let revoke_uri = format!("/api/v1/admin/sessions/{foreign_session_id}/revoke");
+        let revoke_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(revoke_uri.as_str())
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::empty())
+                    .expect("Failed to build revoke foreign session request"),
+            )
+            .await
+            .expect("Revoke foreign session request failed");
+        assert_eq!(revoke_response.status(), StatusCode::FORBIDDEN);
+
+        let foreign_session_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/ui-auth/session")
+                    .header(header::COOKIE, &foreign_cookies.cookie_header)
+                    .body(Body::empty())
+                    .expect("Failed to build foreign session status request"),
+            )
+            .await
+            .expect("Foreign session status request failed");
+        assert_eq!(foreign_session_response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn test_platform_admin_can_disable_and_enable_user() {
         let harness = ui_session_harness_with_role("owner").await;
         let (global_admin_key, _) = harness
@@ -9743,6 +9866,226 @@ mod tests {
                 .any(|event| event["action"].as_str() == Some("admin.users.list")),
             "Expected admin.users.list audit entry"
         );
+    }
+
+    #[tokio::test]
+    async fn test_share_links_disabled_by_default() {
+        let _policy = set_share_link_policy_override_for_tests(Some((false, 1)));
+
+        let harness = ui_session_harness_with_role("owner").await;
+        harness
+            .sqlite_store
+            .create_run(
+                "run-share-disabled-default",
+                &harness.primary_project_id,
+                Some("share-disabled"),
+                None,
+                Some(&harness.user_id),
+            )
+            .await
+            .expect("Failed to create share-disabled run");
+
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let create_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs/run-share-disabled-default/share")
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "expires_in_days": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build share create request"),
+            )
+            .await
+            .expect("Share create request failed");
+
+        assert_eq!(create_response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_share_links_enforce_bounded_ttl_policy() {
+        let _policy = set_share_link_policy_override_for_tests(Some((true, 1)));
+
+        let harness = ui_session_harness_with_role("owner").await;
+        harness
+            .sqlite_store
+            .create_run(
+                "run-share-ttl-policy",
+                &harness.primary_project_id,
+                Some("share-ttl"),
+                None,
+                Some(&harness.user_id),
+            )
+            .await
+            .expect("Failed to create share policy run");
+
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let bad_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs/run-share-ttl-policy/share")
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "expires_in_days": 2
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build over-ttl share request"),
+            )
+            .await
+            .expect("Over-ttl share request failed");
+        assert_eq!(bad_response.status(), StatusCode::BAD_REQUEST);
+        let bad_body = response_text(bad_response).await;
+        assert!(
+            bad_body.contains("exceeds policy maximum of 1 days"),
+            "expected bounded TTL policy error, got: {bad_body}"
+        );
+
+        let ok_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs/run-share-ttl-policy/share")
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "expires_in_days": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build valid share request"),
+            )
+            .await
+            .expect("Valid share request failed");
+        assert_eq!(ok_response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_share_link_revoke_invalidates_token_and_hashes_at_rest() {
+        let _policy = set_share_link_policy_override_for_tests(Some((true, 1)));
+
+        let harness = ui_session_harness_with_role("owner").await;
+        harness
+            .sqlite_store
+            .create_run(
+                "run-share-revoke",
+                &harness.primary_project_id,
+                Some("share-revoke"),
+                None,
+                Some(&harness.user_id),
+            )
+            .await
+            .expect("Failed to create share revoke run");
+
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let create_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs/run-share-revoke/share")
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "expires_in_days": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build share create request"),
+            )
+            .await
+            .expect("Share create request failed");
+        assert_eq!(create_response.status(), StatusCode::OK);
+        let create_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_response).await)
+                .expect("Share create response should be JSON");
+        let token = create_payload["token"]
+            .as_str()
+            .expect("share token should exist")
+            .to_string();
+
+        let stored_tokens = harness
+            .sqlite_store
+            .list_share_tokens("run-share-revoke")
+            .await
+            .expect("Failed to list share tokens");
+        let expected_hash = harness.key_store.hmac_fingerprint(&token);
+        assert!(stored_tokens.iter().any(|row| row.token == expected_hash));
+        assert!(
+            stored_tokens.iter().all(|row| row.token != token),
+            "share token must not be stored in plaintext"
+        );
+
+        let shared_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/shared/{token}"))
+                    .body(Body::empty())
+                    .expect("Failed to build shared run request"),
+            )
+            .await
+            .expect("Shared run request failed");
+        assert_eq!(shared_response.status(), StatusCode::OK);
+
+        let revoke_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/runs/run-share-revoke/share/{token}"))
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::empty())
+                    .expect("Failed to build share revoke request"),
+            )
+            .await
+            .expect("Share revoke request failed");
+        assert_eq!(revoke_response.status(), StatusCode::OK);
+
+        let shared_after_revoke = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/shared/{token}"))
+                    .body(Body::empty())
+                    .expect("Failed to build shared run request"),
+            )
+            .await
+            .expect("Shared run request failed");
+        assert_eq!(shared_after_revoke.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

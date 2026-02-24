@@ -801,6 +801,23 @@ impl ApiKeyStore {
     }
 
     pub fn validate_startup_configuration(&self) -> Result<(), String> {
+        let trust_proxy_headers = env_flag("MLRUNX_TRUST_PROXY_HEADERS");
+        let trusted_proxy_rules = if trust_proxy_headers {
+            trusted_proxy_rules_from_env()?
+        } else {
+            Vec::new()
+        };
+        self.validate_startup_configuration_with_proxy_rules(
+            trust_proxy_headers,
+            &trusted_proxy_rules,
+        )
+    }
+
+    fn validate_startup_configuration_with_proxy_rules(
+        &self,
+        trust_proxy_headers: bool,
+        trusted_proxy_rules: &[TrustedProxyRule],
+    ) -> Result<(), String> {
         if self.using_insecure_default_hmac_secret() {
             return Err(
                 "MLRUNX_AUTH_HMAC_SECRET is required; insecure fallback secrets are not allowed. \
@@ -809,14 +826,11 @@ Set MLRUNX_AUTH_HMAC_SECRET (or MLRUNX_JWT_SECRET for shared HMAC/JWT secret) an
             );
         }
 
-        if env_flag("MLRUNX_TRUST_PROXY_HEADERS") {
-            let trusted_proxy_rules = trusted_proxy_rules_from_env()?;
-            if trusted_proxy_rules.is_empty() {
-                return Err(
-                    "MLRUNX_TRUST_PROXY_HEADERS=true requires MLRUNX_TRUSTED_PROXY_CIDRS to include at least one trusted proxy IP/CIDR."
-                        .to_string(),
-                );
-            }
+        if trust_proxy_headers && trusted_proxy_rules.is_empty() {
+            return Err(
+                "MLRUNX_TRUST_PROXY_HEADERS=true requires MLRUNX_TRUSTED_PROXY_CIDRS to include at least one trusted proxy IP/CIDR."
+                    .to_string(),
+            );
         }
 
         if self.ui_jwt.enabled {
@@ -2521,6 +2535,15 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEne1FhMABDSthBhFqlzi4rmm3wwEW
 CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
 -----END PUBLIC KEY-----"#;
 
+    fn startup_validation_store() -> ApiKeyStore {
+        let mut store = ApiKeyStore::new_dev_mode();
+        store.auth_hmac_secret_source = HmacSecretSource::ExplicitEnv;
+        store
+            .auth_disabled
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        store
+    }
+
     #[test]
     fn test_hash_api_key() {
         let key = "mlrunx_test123";
@@ -2581,6 +2604,64 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
             name: None,
         };
         assert_eq!(claims.subject(), "provider-user-123");
+    }
+
+    #[test]
+    fn test_validate_startup_configuration_requires_auth_hmac_secret() {
+        let mut store = startup_validation_store();
+        store.auth_hmac_secret_source = HmacSecretSource::InsecureDefault;
+        let error = store
+            .validate_startup_configuration_with_proxy_rules(false, &[])
+            .expect_err("startup validation should fail without auth secret");
+        assert!(error.contains("MLRUNX_AUTH_HMAC_SECRET is required"));
+    }
+
+    #[test]
+    fn test_validate_startup_configuration_requires_proxy_cidrs_when_trust_proxy_enabled() {
+        let store = startup_validation_store();
+        let error = store
+            .validate_startup_configuration_with_proxy_rules(true, &[])
+            .expect_err("startup validation should fail without trusted proxy CIDRs");
+        assert!(
+            error.contains("MLRUNX_TRUST_PROXY_HEADERS=true requires MLRUNX_TRUSTED_PROXY_CIDRS")
+        );
+    }
+
+    #[test]
+    fn test_validate_startup_configuration_allows_trust_proxy_with_explicit_cidrs() {
+        let store = startup_validation_store();
+        let trusted_proxy_rules = vec![
+            TrustedProxyRule::parse("127.0.0.1/32").expect("valid IPv4 CIDR"),
+            TrustedProxyRule::parse("::1/128").expect("valid IPv6 CIDR"),
+        ];
+        assert!(
+            store
+                .validate_startup_configuration_with_proxy_rules(true, &trusted_proxy_rules)
+                .is_ok(),
+            "startup validation should pass when trust proxy has explicit CIDRs"
+        );
+    }
+
+    #[test]
+    fn test_validate_startup_configuration_requires_jwt_issuer_and_audience_when_ui_jwt_enabled() {
+        let mut store = startup_validation_store();
+        store.runtime_auth_mode = RuntimeAuthMode::Hybrid;
+        store.ui_jwt.enabled = true;
+        store.ui_jwt.algorithm = UiJwtAlgorithm::Hs256;
+        store.ui_jwt.secret = Some("test-jwt-secret".to_string());
+        store.ui_jwt.issuer = None;
+        store.ui_jwt.audience = None;
+        let issuer_error = store
+            .validate_startup_configuration_with_proxy_rules(false, &[])
+            .expect_err("startup validation should fail when issuer is missing");
+        assert!(issuer_error.contains("MLRUNX_JWT_ISSUER is required"));
+
+        store.ui_jwt.issuer = Some("https://issuer.example".to_string());
+        store.ui_jwt.audience = None;
+        let audience_error = store
+            .validate_startup_configuration_with_proxy_rules(false, &[])
+            .expect_err("startup validation should fail when audience is missing");
+        assert!(audience_error.contains("MLRUNX_JWT_AUDIENCE is required"));
     }
 
     #[test]

@@ -185,7 +185,7 @@ jobs:
         run: |
           set -euo pipefail
           DB_PATH="/tmp/mlrunx-w1-${RANDOM}.db"
-          MLRUNX_AUTH_DISABLED=true MLRUNX_SQLITE_PATH="$DB_PATH" API_HOST=127.0.0.1 API_HTTP_PORT=3001 API_GRPC_PORT=50051 \
+          MLRUNX_AUTH_DISABLED=true MLRUNX_AUTH_HMAC_SECRET=nightly-bench-hmac-secret MLRUNX_ALLOW_INSECURE_LOCAL_DEV=true MLRUNX_SQLITE_PATH="$DB_PATH" API_HOST=127.0.0.1 API_HTTP_PORT=3001 API_GRPC_PORT=50051 \
             ./target/release/mlrunx-api > /tmp/mlrunx-api-w1.log 2>&1 &
           API_PID=$!
 
@@ -261,7 +261,7 @@ jobs:
         run: |
           set -euo pipefail
           DB_PATH="/tmp/mlrunx-w2-${RANDOM}.db"
-          MLRUNX_AUTH_DISABLED=true MLRUNX_SQLITE_PATH="$DB_PATH" API_HOST=127.0.0.1 API_HTTP_PORT=3001 API_GRPC_PORT=50051 \
+          MLRUNX_AUTH_DISABLED=true MLRUNX_AUTH_HMAC_SECRET=nightly-bench-hmac-secret MLRUNX_ALLOW_INSECURE_LOCAL_DEV=true MLRUNX_SQLITE_PATH="$DB_PATH" API_HOST=127.0.0.1 API_HTTP_PORT=3001 API_GRPC_PORT=50051 \
             ./target/release/mlrunx-api > /tmp/mlrunx-api-w2.log 2>&1 &
           API_PID=$!
 
@@ -340,7 +340,7 @@ jobs:
         run: |
           set -euo pipefail
           DB_PATH="/tmp/mlrunx-w3-${RANDOM}.db"
-          MLRUNX_AUTH_DISABLED=true MLRUNX_SQLITE_PATH="$DB_PATH" API_HOST=127.0.0.1 API_HTTP_PORT=3001 API_GRPC_PORT=50051 \
+          MLRUNX_AUTH_DISABLED=true MLRUNX_AUTH_HMAC_SECRET=nightly-bench-hmac-secret MLRUNX_ALLOW_INSECURE_LOCAL_DEV=true MLRUNX_SQLITE_PATH="$DB_PATH" API_HOST=127.0.0.1 API_HTTP_PORT=3001 API_GRPC_PORT=50051 \
             ./target/release/mlrunx-api > /tmp/mlrunx-api-w3.log 2>&1 &
           API_PID=$!
 

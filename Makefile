@@ -3,6 +3,7 @@
 .PHONY: test-contract test-integration ci
 .PHONY: infra-up infra-down infra-logs
 .PHONY: bench-w1 bench-w2 bench-w3 bench-w1-full bench-w2-full bench-w3-full
+.PHONY: bench-phase4-scale deploy-preflight
 .PHONY: version version-check release-tag
 
 # Default target
@@ -38,7 +39,8 @@ help:
 	@echo "  make ci           - Run full CI suite locally"
 	@echo ""
 	@echo "Benchmarks:"
-	@echo "  make bench-w1     - Run W1 benchmark (query at scale)"
+	@echo "  make bench-w1     - Run W1 benchmark checks (nightly scale)"
+	@echo "  make bench-phase4-scale - Run Phase 4 W1 checks (release: 10k runs)"
 	@echo "  make bench-w2     - Run W2 benchmark (high-freq ingest)"
 	@echo "  make bench-w3     - Run W3 benchmark (mixed dashboard)"
 	@echo ""
@@ -51,6 +53,7 @@ help:
 	@echo "  make infra-up     - Start infrastructure (docker-compose)"
 	@echo "  make infra-down   - Stop infrastructure"
 	@echo "  make infra-logs   - View infrastructure logs"
+	@echo "  make deploy-preflight - Run VM deploy preflight checks"
 	@echo ""
 	@echo "Cleanup:"
 	@echo "  make clean        - Clean build artifacts"
@@ -208,7 +211,7 @@ test-integration:
 	@TMP_DB="/tmp/mlrunx-integration-$$RANDOM.db"; \
 	LOG_FILE="/tmp/mlrunx-api-integration.log"; \
 	rm -f "$$TMP_DB" "$$TMP_DB-shm" "$$TMP_DB-wal"; \
-	MLRUNX_AUTH_DISABLED=true MLRUNX_SQLITE_PATH="$$TMP_DB" cargo run --bin mlrunx-api > "$$LOG_FILE" 2>&1 & \
+	MLRUNX_AUTH_DISABLED=true MLRUNX_AUTH_HMAC_SECRET=test-integration-hmac-secret MLRUNX_ALLOW_INSECURE_LOCAL_DEV=true MLRUNX_SQLITE_PATH="$$TMP_DB" cargo run --bin mlrunx-api > "$$LOG_FILE" 2>&1 & \
 	API_PID=$$!; \
 	cleanup() { \
 		kill "$$API_PID" >/dev/null 2>&1 || true; \
@@ -233,10 +236,7 @@ ci: lint test test-contract proto-breaking
 
 # Scaled-down benchmarks (nightly)
 bench-w1:
-	@echo "Running W1 benchmark (query at scale - scaled down)..."
-	@echo "Target: p95 < 200ms for 1,000 runs"
-	# Placeholder: actual benchmark implementation in BENCH-000
-	@echo "W1 benchmark not implemented yet"
+	./scripts/perf/run_w1_scale_check.sh --scale nightly
 
 bench-w2:
 	@echo "Running W2 benchmark (high-freq ingest - scaled down)..."
@@ -252,10 +252,9 @@ bench-w3:
 
 # Full-scale benchmarks (release)
 bench-w1-full:
-	@echo "Running W1 benchmark (query at scale - full)..."
-	@echo "Target: p95 < 200ms for 10,000 runs"
-	# Placeholder: actual benchmark implementation in BENCH-000
-	@echo "W1 full benchmark not implemented yet"
+	./scripts/perf/run_w1_scale_check.sh --scale release
+
+bench-phase4-scale: bench-w1-full
 
 bench-w2-full:
 	@echo "Running W2 benchmark (high-freq ingest - full)..."
@@ -286,6 +285,9 @@ infra-logs:
 
 infra-ps:
 	cd infra/docker && docker compose ps
+
+deploy-preflight:
+	./scripts/deploy/vm_preflight.sh --env-file infra/docker/.env.prod
 
 # =============================================================================
 # Cleanup targets
