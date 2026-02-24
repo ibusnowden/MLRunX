@@ -41,19 +41,19 @@ Acceptance tests
 - [ ] Integration: process restart with unsent spool, verify pending events are recovered and sent.
 
 ## Phase 2: Structured and Searchable Metadata Model
-- [ ] Define typed metadata namespaces:
-- [ ] `parameters.*`
-- [ ] `tags.*`
-- [ ] `system.*`
-- [ ] `dataset.*`
-- [ ] `model.*`
-- [ ] Add server-side validation for key naming, max depth, value types, and size limits.
-- [ ] Add indexed query paths for common filters (project, owner, status, name, tags, created_at).
-- [ ] Add audit metadata for create/update/delete actions that affect run discoverability.
+- [x] Define typed metadata namespaces:
+- [x] `parameters.*`
+- [x] `tags.*`
+- [x] `system.*`
+- [x] `dataset.*`
+- [x] `model.*`
+- [x] Add server-side validation for key naming, max depth, value types, and size limits.
+- [x] Add indexed query paths for common filters (project, owner, status, name, tags, created_at).
+- [x] Add audit metadata for create/update/delete actions that affect run discoverability.
 
 Acceptance tests
-- [ ] API contract tests reject malformed metadata and oversize payloads.
-- [ ] Query correctness tests for equality, range, and compound filters.
+- [x] API contract tests reject malformed metadata and oversize payloads.
+- [x] Query correctness tests for equality, range, and compound filters.
 - [ ] Performance target: list/filter queries remain within agreed p95 budget on seeded dataset.
 
 ## Phase 3: Rich Logging (Metrics, Arrays, Images, Charts)
