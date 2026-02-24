@@ -5,6 +5,13 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { api, ListRunsResponse, Run, RunDetail } from '@/lib/api';
 import { formatDuration, formatFixed } from '@/lib/format';
 import { useAutoRefresh } from '@/lib/useAutoRefresh';
+import {
+  deleteRunFilterPreset,
+  loadRunFilterPresets,
+  saveRunFilterPresets,
+  type RunFilterPreset,
+  upsertRunFilterPreset,
+} from '@/lib/presets';
 
 interface RunsTableProps {
   initialData?: ListRunsResponse;
@@ -107,6 +114,10 @@ function buildSearchQuery(text: string, tokens: SearchToken[]): string {
     .filter(Boolean);
   const parts = [...tokenStrings, text.trim()].filter(Boolean);
   return parts.join(' ').trim();
+}
+
+function normalizePresetQuery(value: string): string {
+  return value.trim().replace(/\s+/g, ' ');
 }
 
 function updateTokenValue(query: string, key: string, value: string): string {
@@ -314,6 +325,8 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [runDetailsById, setRunDetailsById] = useState<Record<string, RunDetail>>({});
+  const [savedFilterPresets, setSavedFilterPresets] = useState<RunFilterPreset[]>([]);
+  const [activeFilterPresetId, setActiveFilterPresetId] = useState<string>('');
 
   const statusMenuRef = useRef<HTMLDivElement | null>(null);
   const pageSize = 20;
@@ -355,6 +368,22 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
       tags: tagFilters.length > 0 ? tagFilters : undefined,
     };
   }, [parsedDebounced]);
+
+  useEffect(() => {
+    setSavedFilterPresets(loadRunFilterPresets());
+  }, []);
+
+  useEffect(() => {
+    const normalized = normalizePresetQuery(searchQuery);
+    if (!normalized) {
+      setActiveFilterPresetId('');
+      return;
+    }
+    const matchedPreset = savedFilterPresets.find(
+      (preset) => normalizePresetQuery(preset.query) === normalized
+    );
+    setActiveFilterPresetId(matchedPreset?.id || '');
+  }, [savedFilterPresets, searchQuery]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -512,6 +541,51 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
     }
   }, []);
 
+  const handleSaveFilterPreset = useCallback(() => {
+    const normalizedQuery = normalizePresetQuery(searchQuery);
+    if (!normalizedQuery) return;
+
+    const defaultName = normalizedQuery.slice(0, 36);
+    const requestedName = window.prompt('Save filter preset as:', defaultName);
+    if (requestedName === null) return;
+
+    const name = requestedName.trim();
+    if (!name) return;
+
+    try {
+      const result = upsertRunFilterPreset(savedFilterPresets, name, normalizedQuery);
+      setSavedFilterPresets(result.presets);
+      setActiveFilterPresetId(result.saved.id);
+      saveRunFilterPresets(result.presets);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save filter preset');
+    }
+  }, [savedFilterPresets, searchQuery]);
+
+  const handleApplyFilterPreset = useCallback(
+    (presetId: string) => {
+      if (!presetId) {
+        setActiveFilterPresetId('');
+        return;
+      }
+
+      const preset = savedFilterPresets.find((entry) => entry.id === presetId);
+      if (!preset) return;
+      setActiveFilterPresetId(preset.id);
+      setSearchQuery(preset.query);
+      setPage(0);
+    },
+    [savedFilterPresets]
+  );
+
+  const handleDeleteFilterPreset = useCallback(() => {
+    if (!activeFilterPresetId) return;
+    const nextPresets = deleteRunFilterPreset(savedFilterPresets, activeFilterPresetId);
+    setSavedFilterPresets(nextPresets);
+    setActiveFilterPresetId('');
+    saveRunFilterPresets(nextPresets);
+  }, [activeFilterPresetId, savedFilterPresets]);
+
   const totalPages = Math.ceil(total / pageSize);
   const isSearching = searchQuery.trim().length > 0;
   const runCountLabel = isSearching
@@ -584,6 +658,38 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
                 </div>
               )}
             </div>
+
+            <select
+              value={activeFilterPresetId}
+              onChange={(event) => handleApplyFilterPreset(event.target.value)}
+              className="h-11 rounded-xl border border-border bg-background px-3.5 text-sm font-medium text-text-secondary transition-all duration-200 hover:border-[color:rgba(255,255,255,0.12)] hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/40"
+            >
+              <option value="">Saved filters</option>
+              {savedFilterPresets.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.name}
+                </option>
+              ))}
+            </select>
+
+            <button
+              type="button"
+              onClick={handleSaveFilterPreset}
+              disabled={!normalizePresetQuery(searchQuery)}
+              className="inline-flex h-11 items-center gap-2 rounded-xl border border-border bg-background px-3.5 text-sm font-medium text-text-secondary transition-all duration-200 hover:-translate-y-0.5 hover:border-[color:rgba(255,255,255,0.12)] hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
+            >
+              Save Filter
+            </button>
+
+            {activeFilterPresetId && (
+              <button
+                type="button"
+                onClick={handleDeleteFilterPreset}
+                className="inline-flex h-11 items-center gap-2 rounded-xl border border-danger/30 bg-danger/10 px-3.5 text-sm font-medium text-danger transition-all duration-200 hover:-translate-y-0.5 hover:bg-danger/15"
+              >
+                Delete Preset
+              </button>
+            )}
 
             <button
               type="button"

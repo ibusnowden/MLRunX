@@ -1,11 +1,19 @@
 'use client';
 
-import { useState, useEffect, useCallback, Suspense } from 'react';
+import { useState, useEffect, useCallback, useMemo, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { api, Run } from '@/lib/api';
 import { ComparePanel } from '@/components/ComparePanel';
 import { formatDuration } from '@/lib/format';
 import { useAutoRefresh } from '@/lib/useAutoRefresh';
+import {
+  deleteComparePreset,
+  loadComparePresets,
+  normalizeRunIdSet,
+  saveComparePresets,
+  type ComparePreset,
+  upsertComparePreset,
+} from '@/lib/presets';
 
 function ComparePageContent() {
   const router = useRouter();
@@ -13,11 +21,16 @@ function ComparePageContent() {
 
   // Get run IDs from URL
   const runIdsParam = searchParams.get('runs') || '';
-  const selectedRunIds = runIdsParam ? runIdsParam.split(',') : [];
+  const selectedRunIds = useMemo(
+    () => (runIdsParam ? runIdsParam.split(',') : []),
+    [runIdsParam]
+  );
 
   // Available runs for selection
   const [runs, setRuns] = useState<Run[]>([]);
   const [loading, setLoading] = useState(true);
+  const [savedComparePresets, setSavedComparePresets] = useState<ComparePreset[]>([]);
+  const [activeComparePresetId, setActiveComparePresetId] = useState('');
 
   // Fetch available runs
   const fetchRuns = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
@@ -40,9 +53,45 @@ function ComparePageContent() {
     void fetchRuns();
   }, [fetchRuns]);
 
+  useEffect(() => {
+    setSavedComparePresets(loadComparePresets());
+  }, []);
+
+  useEffect(() => {
+    const normalizedSelection = normalizeRunIdSet(selectedRunIds);
+    if (normalizedSelection.length === 0) {
+      setActiveComparePresetId('');
+      return;
+    }
+
+    const matchedPreset = savedComparePresets.find((preset) => {
+      const normalizedPresetRuns = normalizeRunIdSet(preset.runIds);
+      return (
+        normalizedPresetRuns.length === normalizedSelection.length &&
+        normalizedPresetRuns.every((runId, index) => runId === normalizedSelection[index])
+      );
+    });
+    setActiveComparePresetId(matchedPreset?.id || '');
+  }, [savedComparePresets, selectedRunIds]);
+
   useAutoRefresh(
     () => fetchRuns({ silent: true }),
     { intervalMs: 30000, enabled: true, runOnMount: false }
+  );
+
+  const applyRunSelection = useCallback(
+    (runIds: string[]) => {
+      const normalizedSelection = normalizeRunIdSet(runIds);
+      const newParams = new URLSearchParams(searchParams);
+      if (normalizedSelection.length > 0) {
+        newParams.set('runs', normalizedSelection.join(','));
+      } else {
+        newParams.delete('runs');
+      }
+      const query = newParams.toString();
+      router.push(query ? `/compare?${query}` : '/compare');
+    },
+    [router, searchParams]
   );
 
   // Toggle run selection
@@ -50,20 +99,54 @@ function ComparePageContent() {
     const newSelection = selectedRunIds.includes(runId)
       ? selectedRunIds.filter((id) => id !== runId)
       : [...selectedRunIds, runId];
+    applyRunSelection(newSelection);
+  };
 
-    const newParams = new URLSearchParams(searchParams);
-    if (newSelection.length > 0) {
-      newParams.set('runs', newSelection.join(','));
-    } else {
-      newParams.delete('runs');
+  const handleSavePreset = () => {
+    const normalizedSelection = normalizeRunIdSet(selectedRunIds);
+    if (normalizedSelection.length === 0) return;
+
+    const defaultName = `Selection ${normalizedSelection.length}`;
+    const requestedName = window.prompt('Save compare preset as:', defaultName);
+    if (requestedName === null) return;
+    const name = requestedName.trim();
+    if (!name) return;
+
+    try {
+      const result = upsertComparePreset(savedComparePresets, name, normalizedSelection);
+      setSavedComparePresets(result.presets);
+      setActiveComparePresetId(result.saved.id);
+      saveComparePresets(result.presets);
+    } catch (err) {
+      console.error('Failed to save compare preset', err);
     }
-    router.push(`/compare?${newParams.toString()}`);
+  };
+
+  const handleApplyPreset = (presetId: string) => {
+    if (!presetId) {
+      setActiveComparePresetId('');
+      return;
+    }
+    const preset = savedComparePresets.find((entry) => entry.id === presetId);
+    if (!preset) return;
+    setActiveComparePresetId(preset.id);
+    applyRunSelection(preset.runIds);
+  };
+
+  const handleDeletePreset = () => {
+    if (!activeComparePresetId) return;
+    const nextPresets = deleteComparePreset(savedComparePresets, activeComparePresetId);
+    setSavedComparePresets(nextPresets);
+    setActiveComparePresetId('');
+    saveComparePresets(nextPresets);
   };
 
   // Clear selection
   const clearSelection = () => {
-    router.push('/compare');
+    applyRunSelection([]);
   };
+
+  const selectedPreset = savedComparePresets.find((preset) => preset.id === activeComparePresetId);
 
   return (
     <main className="min-h-screen">
@@ -84,6 +167,33 @@ function ComparePageContent() {
               >
                 Back to Runs
               </button>
+              <select
+                value={activeComparePresetId}
+                onChange={(event) => handleApplyPreset(event.target.value)}
+                className="px-3 sm:px-4 py-2 text-sm bg-surface-secondary rounded-lg text-text-primary font-medium hover:bg-surface-hover border border-border transition-colors focus:outline-none focus:ring-2 focus:ring-accent/40"
+              >
+                <option value="">Compare Presets</option>
+                {savedComparePresets.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.name} ({preset.runIds.length})
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={handleSavePreset}
+                disabled={selectedRunIds.length === 0}
+                className="px-3 sm:px-4 py-2 text-sm bg-surface-secondary rounded-lg text-text-primary font-medium hover:bg-surface-hover border border-border transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Save Preset
+              </button>
+              {selectedPreset && (
+                <button
+                  onClick={handleDeletePreset}
+                  className="px-3 sm:px-4 py-2 text-sm rounded-lg text-danger font-medium bg-danger/10 hover:bg-danger/15 border border-danger/30 transition-colors"
+                >
+                  Delete Preset
+                </button>
+              )}
               {selectedRunIds.length > 0 && (
                 <button
                   onClick={clearSelection}
