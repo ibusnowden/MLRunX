@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { api, MetricSeries, RunDetail, RunEvent } from '@/lib/api';
 import { formatDuration, formatFixed } from '@/lib/format';
 import { groupMetrics } from '@/lib/metricGroups';
@@ -31,9 +31,7 @@ type MetricStats = {
   maxStep?: number;
 };
 
-type ConsoleTab = 'overview' | 'logs';
-
-type MobileWorkspaceTab = 'charts' | 'console';
+type WorkspaceView = 'charts' | 'console';
 
 type EventLevelFilter = 'all' | 'debug' | 'info' | 'warn' | 'error';
 
@@ -400,6 +398,17 @@ function normalizeEventLevel(level: string): 'debug' | 'info' | 'warn' | 'error'
   return 'info';
 }
 
+function parseWorkspaceView(value: string | null): WorkspaceView {
+  return value === 'console' ? 'console' : 'charts';
+}
+
+function formatEventMessageLine(message: string): string {
+  return message
+    .replace(/\r?\n+/g, ' | ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function formatEventTime(event: RunEvent): string {
   if (event.timestamp && Number.isFinite(event.timestamp)) {
     return new Date(event.timestamp * 1000).toLocaleTimeString(undefined, {
@@ -529,6 +538,8 @@ function KeyValueGrid({
 export default function RunDetailPage({ params }: { params: Promise<{ run_id: string }> }) {
   const { run_id: runId } = use(params);
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const { isDark, toggleTheme } = useTheme();
 
   const [run, setRun] = useState<RunDetail | null>(null);
@@ -544,10 +555,20 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [activeMetricGroup, setActiveMetricGroup] = useState('all');
-  const [consoleTab, setConsoleTab] = useState<ConsoleTab>('overview');
-  const [mobileWorkspaceTab, setMobileWorkspaceTab] = useState<MobileWorkspaceTab>('charts');
   const [eventLevelFilter, setEventLevelFilter] = useState<EventLevelFilter>('all');
   const eventsCursorRef = useRef<number | null>(null);
+
+  const workspaceView = parseWorkspaceView(searchParams.get('view'));
+
+  const setWorkspaceView = useCallback(
+    (nextView: WorkspaceView) => {
+      const nextParams = new URLSearchParams(searchParams.toString());
+      nextParams.set('view', nextView);
+      const query = nextParams.toString();
+      router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+    },
+    [pathname, router, searchParams]
+  );
 
   const setTheme = (target: 'dark' | 'light') => {
     if ((target === 'dark') !== isDark) {
@@ -938,13 +959,13 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
           </div>
         </div>
 
-        <div className="mb-4 lg:hidden">
+        <div className="mb-4">
           <div className="inline-flex rounded-lg border border-border bg-surface p-0.5">
             <button
               type="button"
-              onClick={() => setMobileWorkspaceTab('charts')}
+              onClick={() => setWorkspaceView('charts')}
               className={`rounded-md px-3 py-1.5 text-sm font-medium ${
-                mobileWorkspaceTab === 'charts'
+                workspaceView === 'charts'
                   ? 'bg-accent-subtle text-accent'
                   : 'text-text-muted hover:text-text-secondary'
               }`}
@@ -953,9 +974,9 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
             </button>
             <button
               type="button"
-              onClick={() => setMobileWorkspaceTab('console')}
+              onClick={() => setWorkspaceView('console')}
               className={`rounded-md px-3 py-1.5 text-sm font-medium ${
-                mobileWorkspaceTab === 'console'
+                workspaceView === 'console'
                   ? 'bg-accent-subtle text-accent'
                   : 'text-text-muted hover:text-text-secondary'
               }`}
@@ -965,8 +986,8 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_370px]">
-          <section className={`${mobileWorkspaceTab === 'charts' ? 'block' : 'hidden'} lg:block`}>
+        {workspaceView === 'charts' ? (
+          <section>
             {metricsError && (
               <div className="mb-4 rounded-lg border border-[color:rgba(248,113,113,0.25)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                 {metricsError}
@@ -1056,204 +1077,158 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
               </>
             )}
           </section>
+        ) : (
+          <section className="rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
+            <div className="border-b border-border px-5 py-4">
+              <h2 className="text-xl font-semibold text-text-primary">Run Console</h2>
+              <p className="mt-0.5 text-xs text-text-muted">Training configuration, progress, hyperparameters, and logs in one page</p>
+            </div>
 
-          <aside className={`${mobileWorkspaceTab === 'console' ? 'block' : 'hidden'} lg:block`}>
-            <div className="lg:sticky lg:top-6">
-              <section className="rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
-                <div className="border-b border-border px-5 py-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <h2 className="text-xl font-semibold text-text-primary">Run Console</h2>
-                      <p className="mt-0.5 text-xs text-text-muted">Training configuration, progress, and logs in one panel</p>
-                    </div>
-                    <div className="inline-flex rounded-lg border border-border bg-surface-secondary p-0.5">
-                      <button
-                        type="button"
-                        onClick={() => setConsoleTab('overview')}
-                        className={`rounded-md px-3 py-1.5 text-sm font-medium ${
-                          consoleTab === 'overview'
-                            ? 'bg-accent-subtle text-accent'
-                            : 'text-text-muted hover:text-text-secondary'
-                        }`}
-                      >
-                        Overview
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setConsoleTab('logs')}
-                        className={`rounded-md px-3 py-1.5 text-sm font-medium ${
-                          consoleTab === 'logs'
-                            ? 'bg-accent-subtle text-accent'
-                            : 'text-text-muted hover:text-text-secondary'
-                        }`}
-                      >
-                        Logs
-                      </button>
-                    </div>
+            <div className="space-y-4 p-4">
+              <section className="overflow-hidden rounded-xl border border-border">
+                <div className="border-b border-border px-4 py-3">
+                  <h3 className="text-base font-semibold text-text-primary">Training Progress</h3>
+                </div>
+                <div className="max-h-[340px] overflow-y-auto px-4 py-3">
+                  <ol className="space-y-1">
+                    {progressSteps.map((step, index) => (
+                      <li key={step.label} className="flex gap-3 py-1">
+                        <div className="flex w-5 flex-col items-center">
+                          <span
+                            className={`h-2.5 w-2.5 rounded-full border-2 ${
+                              step.state === 'done'
+                                ? 'border-[var(--badge-finished-text)] bg-[var(--badge-finished-text)]'
+                                : step.state === 'active'
+                                  ? 'border-[var(--badge-running-text)] bg-[var(--badge-running-text)] shadow-[0_0_0_4px_rgba(96,165,250,0.15)]'
+                                  : 'border-border bg-surface-secondary'
+                            }`}
+                          />
+                          {index < progressSteps.length - 1 && (
+                            <span
+                              className={`mt-1 h-7 w-[2px] ${
+                                step.state === 'done' ? 'bg-[var(--badge-finished-text)]' : 'bg-border'
+                              }`}
+                            />
+                          )}
+                        </div>
+                        <div>
+                          <div
+                            className={`text-base ${
+                              step.state === 'active'
+                                ? 'font-semibold text-accent'
+                                : step.state === 'done'
+                                  ? 'font-medium text-text-primary'
+                                  : 'font-medium text-text-muted'
+                            }`}
+                          >
+                            {step.label}
+                          </div>
+                          <div className="font-mono text-xs text-text-muted">{step.detail}</div>
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              </section>
+
+              <section className="overflow-hidden rounded-xl border border-border">
+                <div className="border-b border-border px-4 py-3">
+                  <h3 className="text-base font-semibold text-text-primary">Training Configuration</h3>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3">
+                  <div className="border-b border-border px-4 py-3 sm:border-b-0 sm:border-r">
+                    <div className="text-[11px] uppercase tracking-[0.08em] text-text-muted">GPU</div>
+                    <div className="mt-1.5 text-lg font-semibold text-text-primary">{configValues.gpu}</div>
+                  </div>
+                  <div className="border-b border-border px-4 py-3 sm:border-b-0 sm:border-r">
+                    <div className="text-[11px] uppercase tracking-[0.08em] text-text-muted">Quantization</div>
+                    <div className="mt-1.5 text-lg font-semibold text-text-primary">{configValues.quantization}</div>
+                  </div>
+                  <div className="px-4 py-3">
+                    <div className="text-[11px] uppercase tracking-[0.08em] text-text-muted">Framework</div>
+                    <div className="mt-1.5 text-lg font-semibold text-text-primary">{configValues.framework}</div>
                   </div>
                 </div>
+              </section>
 
-                {consoleTab === 'overview' ? (
-                  <div className="space-y-4 p-4">
-                    <section className="overflow-hidden rounded-xl border border-border">
-                      <div className="border-b border-border px-4 py-3">
-                        <h3 className="text-base font-semibold text-text-primary">Training Progress</h3>
-                      </div>
-                      <div className="max-h-[340px] overflow-y-auto px-4 py-3">
-                        <ol className="space-y-1">
-                          {progressSteps.map((step, index) => (
-                            <li key={step.label} className="flex gap-3 py-1">
-                              <div className="flex w-5 flex-col items-center">
-                                <span
-                                  className={`h-2.5 w-2.5 rounded-full border-2 ${
-                                    step.state === 'done'
-                                      ? 'border-[var(--badge-finished-text)] bg-[var(--badge-finished-text)]'
-                                      : step.state === 'active'
-                                        ? 'border-[var(--badge-running-text)] bg-[var(--badge-running-text)] shadow-[0_0_0_4px_rgba(96,165,250,0.15)]'
-                                        : 'border-border bg-surface-secondary'
-                                  }`}
-                                />
-                                {index < progressSteps.length - 1 && (
-                                  <span
-                                    className={`mt-1 h-7 w-[2px] ${
-                                      step.state === 'done' ? 'bg-[var(--badge-finished-text)]' : 'bg-border'
-                                    }`}
-                                  />
-                                )}
-                              </div>
-                              <div>
-                                <div
-                                  className={`text-base ${
-                                    step.state === 'active'
-                                      ? 'font-semibold text-accent'
-                                      : step.state === 'done'
-                                        ? 'font-medium text-text-primary'
-                                        : 'font-medium text-text-muted'
-                                  }`}
-                                >
-                                  {step.label}
-                                </div>
-                                <div className="font-mono text-xs text-text-muted">{step.detail}</div>
-                              </div>
-                            </li>
-                          ))}
-                        </ol>
-                      </div>
-                    </section>
+              <section className="overflow-hidden rounded-xl border border-border">
+                <div className="border-b border-border px-4 py-3">
+                  <h3 className="text-base font-semibold text-text-primary">Hyperparameters</h3>
+                </div>
+                <KeyValueGrid items={hyperparams} />
+              </section>
 
-                    <section className="overflow-hidden rounded-xl border border-border">
-                      <div className="border-b border-border px-4 py-3">
-                        <h3 className="text-base font-semibold text-text-primary">Training Configuration</h3>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-3">
-                        <div className="border-b border-border px-4 py-3 sm:border-b-0 sm:border-r">
-                          <div className="text-[11px] uppercase tracking-[0.08em] text-text-muted">GPU</div>
-                          <div className="mt-1.5 text-lg font-semibold text-text-primary">{configValues.gpu}</div>
-                        </div>
-                        <div className="border-b border-border px-4 py-3 sm:border-b-0 sm:border-r">
-                          <div className="text-[11px] uppercase tracking-[0.08em] text-text-muted">Quantization</div>
-                          <div className="mt-1.5 text-lg font-semibold text-text-primary">{configValues.quantization}</div>
-                        </div>
-                        <div className="px-4 py-3">
-                          <div className="text-[11px] uppercase tracking-[0.08em] text-text-muted">Framework</div>
-                          <div className="mt-1.5 text-lg font-semibold text-text-primary">{configValues.framework}</div>
-                        </div>
-                      </div>
-                    </section>
-
-                    <section className="overflow-hidden rounded-xl border border-border">
-                      <div className="border-b border-border px-4 py-3">
-                        <h3 className="text-base font-semibold text-text-primary">Hyperparameters</h3>
-                      </div>
-                      <KeyValueGrid items={hyperparams} />
-                    </section>
-
-                    <section className="rounded-xl border border-border bg-surface-secondary px-4 py-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <h3 className="text-sm font-semibold text-text-primary">Logs</h3>
-                          <p className="text-xs text-text-muted">Last event: {lastEventRelative || 'n/a'}</p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setConsoleTab('logs')}
-                          className="rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-secondary hover:text-text-primary"
-                        >
-                          Open Logs
-                        </button>
-                      </div>
-                    </section>
+              <section className="overflow-hidden rounded-xl border border-border">
+                <div className="border-b border-border px-4 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-base font-semibold text-text-primary">Logs</h3>
+                    <span className="text-xs text-text-muted">Last event: {lastEventRelative || 'n/a'}</span>
                   </div>
-                ) : (
-                  <div className="p-4">
-                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                      <p className="text-xs text-text-muted">Live run events from backend</p>
-                      <span className="text-xs text-text-muted">Last event: {lastEventRelative || 'n/a'}</span>
-                    </div>
-                    <div className="mb-3 flex flex-wrap gap-2">
-                      {EVENT_LEVEL_FILTERS.map((filter) => (
-                        <button
-                          key={filter.value}
-                          type="button"
-                          onClick={() => setEventLevelFilter(filter.value)}
-                          className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${
-                            eventLevelFilter === filter.value
-                              ? 'border-accent bg-accent-subtle text-accent'
-                              : 'border-border bg-surface-secondary text-text-secondary hover:text-text-primary'
-                          }`}
-                        >
-                          {filter.label}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="max-h-[620px] overflow-y-auto rounded-xl border border-border bg-background px-4 py-3 font-mono text-xs">
-                      {eventsLoading ? (
-                        <div className="py-6 text-center text-text-muted">Loading run events...</div>
-                      ) : eventsError ? (
-                        <div className="py-6 text-center text-danger">{eventsError}</div>
-                      ) : runEvents.length === 0 ? (
-                        <div className="py-6 text-center text-text-muted">
-                          No events recorded yet. Use{' '}
-                          <code className="font-semibold text-text-secondary">run.log_event(...)</code>{' '}
-                          to stream training logs.
-                        </div>
-                      ) : filteredRunEvents.length === 0 ? (
-                        <div className="py-6 text-center text-text-muted">
-                          No events match the selected level.
-                        </div>
-                      ) : (
-                        filteredRunEvents.map((event) => {
-                          const level = normalizeEventLevel(event.level);
-                          const levelClass =
-                            level === 'error'
-                              ? 'font-semibold text-danger'
-                              : level === 'warn'
-                                ? 'font-semibold text-warning'
-                                : level === 'debug'
-                                  ? 'font-semibold text-text-secondary'
-                                  : 'font-semibold text-accent';
-                          const stepSuffix =
-                            event.step !== null && event.step !== undefined
-                              ? ` (step ${event.step.toLocaleString()})`
-                              : '';
-                          const sourcePrefix = event.source ? `[${event.source}] ` : '';
-
-                          return (
-                            <div key={event.id} className="mb-1 flex gap-3 leading-6 last:mb-0">
-                              <span className="text-text-muted">{formatEventTime(event)}</span>
-                              <span className={levelClass}>{level.toUpperCase()}</span>
-                              <span className="text-text-secondary">{`${sourcePrefix}${event.message}${stepSuffix}`}</span>
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
+                </div>
+                <div className="px-4 pb-3 pt-3">
+                  <div className="mb-3 flex flex-wrap gap-2">
+                    {EVENT_LEVEL_FILTERS.map((filter) => (
+                      <button
+                        key={filter.value}
+                        type="button"
+                        onClick={() => setEventLevelFilter(filter.value)}
+                        className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${
+                          eventLevelFilter === filter.value
+                            ? 'border-accent bg-accent-subtle text-accent'
+                            : 'border-border bg-surface-secondary text-text-secondary hover:text-text-primary'
+                        }`}
+                      >
+                        {filter.label}
+                      </button>
+                    ))}
                   </div>
-                )}
+                  <div className="max-h-[620px] overflow-auto rounded-xl border border-border bg-background px-4 py-3 font-mono text-xs">
+                    {eventsLoading ? (
+                      <div className="py-6 text-center text-text-muted">Loading run events...</div>
+                    ) : eventsError ? (
+                      <div className="py-6 text-center text-danger">{eventsError}</div>
+                    ) : runEvents.length === 0 ? (
+                      <div className="py-6 text-center text-text-muted">
+                        No events recorded yet. Use{' '}
+                        <code className="font-semibold text-text-secondary">run.log_event(...)</code>{' '}
+                        to stream training logs.
+                      </div>
+                    ) : filteredRunEvents.length === 0 ? (
+                      <div className="py-6 text-center text-text-muted">
+                        No events match the selected level.
+                      </div>
+                    ) : (
+                      filteredRunEvents.map((event) => {
+                        const level = normalizeEventLevel(event.level);
+                        const levelClass =
+                          level === 'error'
+                            ? 'font-semibold text-danger'
+                            : level === 'warn'
+                              ? 'font-semibold text-warning'
+                              : level === 'debug'
+                                ? 'font-semibold text-text-secondary'
+                                : 'font-semibold text-accent';
+                        const stepSuffix =
+                          event.step !== null && event.step !== undefined
+                            ? ` (step ${event.step.toLocaleString()})`
+                            : '';
+                        const sourcePrefix = event.source ? `[${event.source}] ` : '';
+
+                        return (
+                          <div key={event.id} className="mb-1 flex min-w-max gap-3 whitespace-nowrap leading-6 last:mb-0">
+                            <span className="shrink-0 text-text-muted">{formatEventTime(event)}</span>
+                            <span className={`shrink-0 ${levelClass}`}>{level.toUpperCase()}</span>
+                            <span className="text-text-secondary">{`${sourcePrefix}${formatEventMessageLine(event.message)}${stepSuffix}`}</span>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
               </section>
             </div>
-          </aside>
-        </div>
+          </section>
+        )}
       </div>
     </main>
   );
