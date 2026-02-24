@@ -5646,10 +5646,23 @@ struct CompareRunsRequest {
     /// Alignment mode: "step" (default) or "time"
     #[serde(default = "default_alignment")]
     alignment: String,
+    /// Max runs to include in this response page
+    #[serde(default = "default_compare_page_limit")]
+    limit: usize,
+    /// Number of deduplicated run IDs to skip
+    #[serde(default)]
+    offset: usize,
 }
 
 fn default_alignment() -> String {
     "step".to_string()
+}
+
+const MAX_COMPARE_RUN_IDS: usize = 5000;
+const MAX_COMPARE_PAGE_LIMIT: usize = 1000;
+
+const fn default_compare_page_limit() -> usize {
+    100
 }
 
 const fn default_chart_limit_per_run() -> usize {
@@ -5674,6 +5687,12 @@ struct CompareRunsResponse {
     common_metrics: Vec<String>,
     /// Alignment mode used
     alignment: String,
+    /// Total unique run IDs in the request
+    total: usize,
+    /// Page size after clamping
+    limit: usize,
+    /// Offset applied to the deduplicated run IDs
+    offset: usize,
 }
 
 /// Request body for comparing chart payloads across runs.
@@ -5713,18 +5732,44 @@ async fn http_compare_runs(
         ));
     }
 
-    if req.run_ids.len() > 100 {
+    if req.run_ids.len() > MAX_COMPARE_RUN_IDS {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Maximum 100 runs can be compared".to_string(),
+            format!("Maximum {MAX_COMPARE_RUN_IDS} runs can be compared"),
         ));
     }
+
+    if req.limit == 0 {
+        return Err((StatusCode::BAD_REQUEST, "limit must be >= 1".to_string()));
+    }
+
+    let page_limit = req.limit.min(MAX_COMPARE_PAGE_LIMIT);
+
+    let mut seen = std::collections::HashSet::new();
+    let unique_run_ids: Vec<String> = req
+        .run_ids
+        .iter()
+        .filter_map(|run_id| {
+            if seen.insert(run_id.clone()) {
+                Some(run_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let total = unique_run_ids.len();
+    let paged_run_ids: Vec<String> = unique_run_ids
+        .iter()
+        .skip(req.offset)
+        .take(page_limit)
+        .cloned()
+        .collect();
 
     // Collect data for each run
     let mut runs_data = Vec::new();
     let mut all_metric_sets: Vec<std::collections::HashSet<String>> = Vec::new();
 
-    for run_id in &req.run_ids {
+    for run_id in &paged_run_ids {
         let run = state
             .sqlite_store
             .get_run(run_id)
@@ -5815,6 +5860,9 @@ async fn http_compare_runs(
         runs: runs_data,
         common_metrics,
         alignment: req.alignment,
+        total,
+        limit: page_limit,
+        offset: req.offset,
     }))
 }
 
@@ -7962,6 +8010,148 @@ mod tests {
             .filter_map(serde_json::Value::as_str)
             .collect::<Vec<_>>();
         assert_eq!(common, vec!["loss_curve"]);
+    }
+
+    #[tokio::test]
+    async fn test_compare_runs_supports_paging_and_deduplicates_run_ids() {
+        let app = test_app().await;
+
+        let create_project_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "compare-runs-paging-project"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create project request"),
+            )
+            .await
+            .expect("Create project request failed");
+        assert_eq!(create_project_response.status(), StatusCode::OK);
+        let create_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_project_response).await)
+                .expect("Create project response must be JSON");
+        let project_id = create_payload["project_id"]
+            .as_str()
+            .expect("project_id should exist")
+            .to_string();
+
+        for (run_id, loss_value) in [
+            ("run-compare-a", 1.2_f64),
+            ("run-compare-b", 1.1_f64),
+            ("run-compare-c", 1.0_f64),
+        ] {
+            let init_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/runs")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "project_id": project_id,
+                                "run_id": run_id,
+                                "name": run_id
+                            })
+                            .to_string(),
+                        ))
+                        .expect("Failed to build init request"),
+                )
+                .await
+                .expect("Init request failed");
+            assert_eq!(init_response.status(), StatusCode::OK);
+
+            let ingest_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/ingest/batch")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "run_id": run_id,
+                                "metrics": [{"name": "loss", "value": loss_value, "step": 1}],
+                                "params": [],
+                                "tags": [],
+                                "events": []
+                            })
+                            .to_string(),
+                        ))
+                        .expect("Failed to build ingest request"),
+                )
+                .await
+                .expect("Ingest request failed");
+            assert_eq!(ingest_response.status(), StatusCode::OK);
+        }
+
+        let compare_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs/compare")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "run_ids": ["run-compare-a", "run-compare-b", "run-compare-a", "run-compare-c"],
+                            "offset": 1,
+                            "limit": 2
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build compare request"),
+            )
+            .await
+            .expect("Compare request failed");
+        assert_eq!(compare_response.status(), StatusCode::OK);
+        let payload: serde_json::Value =
+            serde_json::from_str(&response_text(compare_response).await)
+                .expect("Compare response should be JSON");
+        assert_eq!(payload["total"].as_u64(), Some(3));
+        assert_eq!(payload["limit"].as_u64(), Some(2));
+        assert_eq!(payload["offset"].as_u64(), Some(1));
+        let run_ids = payload["runs"]
+            .as_array()
+            .expect("runs should be an array")
+            .iter()
+            .filter_map(|run| run["run_id"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(run_ids, vec!["run-compare-b", "run-compare-c"]);
+        let common_metrics = payload["common_metrics"]
+            .as_array()
+            .expect("common_metrics should be an array")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(common_metrics, vec!["loss"]);
+
+        let invalid_limit_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs/compare")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "run_ids": ["run-compare-a"],
+                            "limit": 0
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build invalid compare request"),
+            )
+            .await
+            .expect("Invalid compare request failed");
+        assert_eq!(invalid_limit_response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

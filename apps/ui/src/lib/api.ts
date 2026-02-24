@@ -634,7 +634,8 @@ export const api = {
   async compareRuns(
     runIds: string[],
     metricNames: string[] = [],
-    maxPoints = 1000
+    maxPoints = 1000,
+    paging: { limit?: number; offset?: number } = {}
   ): Promise<{
     runs: Array<{
       run_id: string;
@@ -644,6 +645,9 @@ export const api = {
     }>;
     common_metrics: string[];
     alignment: string;
+    total?: number;
+    limit?: number;
+    offset?: number;
   }> {
     return fetchApi('/api/v1/runs/compare', {
       method: 'POST',
@@ -651,6 +655,8 @@ export const api = {
         run_ids: runIds,
         metric_names: metricNames,
         max_points: maxPoints,
+        limit: paging.limit,
+        offset: paging.offset,
       }),
     });
   },
