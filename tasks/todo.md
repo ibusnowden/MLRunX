@@ -57,20 +57,20 @@ Acceptance tests
 - [ ] Performance target: list/filter queries remain within agreed p95 budget on seeded dataset.
 
 ## Phase 3: Rich Logging (Metrics, Arrays, Images, Charts)
-- [ ] Standardize numeric series logging for scalar and array metrics.
-- [ ] Add image logging API with metadata and storage references.
-- [ ] Add custom chart logging schema:
-- [ ] chart type
-- [ ] data payload
-- [ ] layout/options
-- [ ] renderer hint
-- [ ] Add ingestion-time sanitization and size limits for chart JSON and image metadata.
-- [ ] Add retrieval APIs that support both run detail and compare views.
+- [x] Standardize numeric series logging for scalar and array metrics.
+- [x] Add image logging API with metadata and storage references.
+- [x] Add custom chart logging schema:
+- [x] chart type
+- [x] data payload
+- [x] layout/options
+- [x] renderer hint
+- [x] Add ingestion-time sanitization and size limits for chart JSON and image metadata.
+- [x] Add retrieval APIs that support both run detail and compare views.
 
 Acceptance tests
-- [ ] API tests for scalar metrics, array metrics, image references, and chart payload validation.
+- [x] API tests for scalar metrics, array metrics, image references, and chart payload validation.
 - [ ] UI tests that load and render logged charts for multiple runs without crashes.
-- [ ] Security tests that reject unsafe or malformed chart payloads.
+- [x] Security tests that reject unsafe or malformed chart payloads.
 
 ## Phase 4: Query and Compare at Scale
 - [ ] Implement filter grammar for runs:
