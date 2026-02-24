@@ -9292,6 +9292,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ui_session_cannot_delete_foreign_owned_run() {
+        let harness = ui_session_harness_with_role("owner").await;
+
+        let foreign_user_id = harness
+            .sqlite_store
+            .get_or_create_user_identity(
+                "jwt",
+                "foreign-delete-subject",
+                Some("foreign-delete@example.com"),
+                Some("Foreign Delete User"),
+            )
+            .await
+            .expect("Failed to create foreign user");
+
+        harness
+            .sqlite_store
+            .create_run(
+                "run-foreign-delete-test",
+                &harness.primary_project_id,
+                Some("foreign-delete"),
+                None,
+                Some(&foreign_user_id),
+            )
+            .await
+            .expect("Failed to create foreign run");
+
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        let delete_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/runs/run-foreign-delete-test")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::empty())
+                    .expect("Failed to build delete run request"),
+            )
+            .await
+            .expect("Delete run request failed");
+
+        assert_eq!(delete_response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn test_ui_owner_can_delete_owned_project() {
         let harness = ui_session_harness_with_role("owner").await;
         let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
@@ -9466,6 +9514,38 @@ mod tests {
             .await
             .expect("Admin users request failed");
         assert_eq!(allowed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_non_admin_ui_session_cannot_access_admin_or_session_endpoints() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+
+        for (method, uri) in [
+            ("GET", "/api/v1/admin/users"),
+            ("GET", "/api/v1/admin/sessions"),
+            ("GET", "/api/v1/admin/audit-events"),
+        ] {
+            let request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::COOKIE, &cookies.cookie_header)
+                .body(Body::empty())
+                .expect("Failed to build non-admin admin request");
+
+            let response = harness
+                .app
+                .clone()
+                .oneshot(request)
+                .await
+                .expect("Non-admin admin request failed");
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "expected FORBIDDEN for {method} {uri}"
+            );
+        }
     }
 
     #[tokio::test]
