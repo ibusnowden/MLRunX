@@ -19,6 +19,17 @@ interface RunsTableProps {
   onStatsChange?: (stats: RunsTableStats) => void;
 }
 
+type RunSortField =
+  | 'created_at'
+  | 'updated_at'
+  | 'name'
+  | 'status'
+  | 'duration_seconds'
+  | 'metrics_count'
+  | 'params_count';
+
+type RunSortOrder = 'asc' | 'desc';
+
 export interface RunsTableStats {
   totalRuns: number;
   pageRuns: number;
@@ -59,6 +70,24 @@ const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'failed', label: 'Failed' },
   { value: 'killed', label: 'Killed' },
   { value: 'pending', label: 'Pending' },
+];
+
+const DEFAULT_SORT_BY: RunSortField = 'created_at';
+const DEFAULT_SORT_ORDER: RunSortOrder = 'desc';
+
+const SORT_BY_OPTIONS: Array<{ value: RunSortField; label: string }> = [
+  { value: 'created_at', label: 'Created' },
+  { value: 'updated_at', label: 'Updated' },
+  { value: 'name', label: 'Name' },
+  { value: 'status', label: 'Status' },
+  { value: 'duration_seconds', label: 'Duration' },
+  { value: 'metrics_count', label: 'Metrics' },
+  { value: 'params_count', label: 'Params' },
+];
+
+const SORT_ORDER_OPTIONS: Array<{ value: RunSortOrder; label: string }> = [
+  { value: 'desc', label: 'Desc' },
+  { value: 'asc', label: 'Asc' },
 ];
 
 const TOKEN_REGEX = /(\w+):("[^"]+"|'[^']+'|\S+)/g;
@@ -136,6 +165,14 @@ function parseTagFilter(value: string): { key: string; value?: string } | null {
   const [key, tagValue] = trimmed.split('=', 2);
   if (!key) return null;
   return tagValue ? { key, value: tagValue } : { key };
+}
+
+function isRunSortField(value: string): value is RunSortField {
+  return SORT_BY_OPTIONS.some((option) => option.value === value);
+}
+
+function isRunSortOrder(value: string): value is RunSortOrder {
+  return value === 'asc' || value === 'desc';
 }
 
 function parseApiDate(value: string): Date | null {
@@ -313,6 +350,14 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
     Number.isFinite(initialPageParam) && initialPageParam > 0
       ? initialPageParam - 1
       : 0;
+  const initialSortByParam = searchParams.get('sort_by') ?? DEFAULT_SORT_BY;
+  const initialSortBy = isRunSortField(initialSortByParam)
+    ? initialSortByParam
+    : DEFAULT_SORT_BY;
+  const initialSortOrderParam = searchParams.get('sort_order') ?? DEFAULT_SORT_ORDER;
+  const initialSortOrder = isRunSortOrder(initialSortOrderParam)
+    ? initialSortOrderParam
+    : DEFAULT_SORT_ORDER;
 
   const [runs, setRuns] = useState<Run[]>(initialData?.runs || []);
   const [total, setTotal] = useState(initialData?.total || 0);
@@ -321,6 +366,8 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
   const [searchQuery, setSearchQuery] = useState(initialQuery);
   const [debouncedQuery, setDebouncedQuery] = useState(initialQuery);
   const [page, setPage] = useState(initialPage);
+  const [sortBy, setSortBy] = useState<RunSortField>(initialSortBy);
+  const [sortOrder, setSortOrder] = useState<RunSortOrder>(initialSortOrder);
   const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
@@ -396,11 +443,13 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
     const params = new URLSearchParams();
     if (debouncedQuery.trim()) params.set('q', debouncedQuery.trim());
     if (page > 0) params.set('page', String(page + 1));
+    if (sortBy !== DEFAULT_SORT_BY) params.set('sort_by', sortBy);
+    if (sortOrder !== DEFAULT_SORT_ORDER) params.set('sort_order', sortOrder);
     const queryString = params.toString();
     if (queryString !== searchParams.toString()) {
       router.replace(queryString ? `/?${queryString}` : '/', { scroll: false });
     }
-  }, [debouncedQuery, page, router, searchParams]);
+  }, [debouncedQuery, page, router, searchParams, sortBy, sortOrder]);
 
   useEffect(() => {
     const nextQuery = searchParams.get('q') ?? '';
@@ -409,10 +458,18 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
       Number.isFinite(nextPageParam) && nextPageParam > 0
         ? nextPageParam - 1
         : 0;
+    const nextSortByParam = searchParams.get('sort_by') ?? DEFAULT_SORT_BY;
+    const nextSortBy = isRunSortField(nextSortByParam) ? nextSortByParam : DEFAULT_SORT_BY;
+    const nextSortOrderParam = searchParams.get('sort_order') ?? DEFAULT_SORT_ORDER;
+    const nextSortOrder = isRunSortOrder(nextSortOrderParam)
+      ? nextSortOrderParam
+      : DEFAULT_SORT_ORDER;
 
     setSearchQuery((current) => (current === nextQuery ? current : nextQuery));
     setDebouncedQuery((current) => (current === nextQuery ? current : nextQuery));
     setPage((current) => (current === nextPage ? current : nextPage));
+    setSortBy((current) => (current === nextSortBy ? current : nextSortBy));
+    setSortOrder((current) => (current === nextSortOrder ? current : nextSortOrder));
   }, [searchParams]);
 
   const fetchRuns = useCallback(
@@ -425,6 +482,8 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
           status: effectiveFilters.status || undefined,
           query: effectiveFilters.query,
           tags: effectiveFilters.tags,
+          sortBy,
+          sortOrder,
           limit: pageSize,
           offset: page * pageSize,
         });
@@ -436,7 +495,7 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
         if (!silent) setLoading(false);
       }
     },
-    [effectiveFilters, page]
+    [effectiveFilters, page, sortBy, sortOrder]
   );
 
   useEffect(() => {
@@ -690,6 +749,40 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
                 Delete Preset
               </button>
             )}
+
+            <select
+              value={sortBy}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (!isRunSortField(value)) return;
+                setSortBy(value);
+                setPage(0);
+              }}
+              className="h-11 rounded-xl border border-border bg-background px-3.5 text-sm font-medium text-text-secondary transition-all duration-200 hover:border-[color:rgba(255,255,255,0.12)] hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/40"
+            >
+              {SORT_BY_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  Sort: {option.label}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={sortOrder}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (!isRunSortOrder(value)) return;
+                setSortOrder(value);
+                setPage(0);
+              }}
+              className="h-11 rounded-xl border border-border bg-background px-3.5 text-sm font-medium text-text-secondary transition-all duration-200 hover:border-[color:rgba(255,255,255,0.12)] hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/40"
+            >
+              {SORT_ORDER_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
 
             <button
               type="button"
