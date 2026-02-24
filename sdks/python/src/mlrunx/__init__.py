@@ -200,6 +200,8 @@ def log_chart(
     chart_type: str = "custom",
     step: int | None = None,
     layout: dict[str, Any] | None = None,
+    options: dict[str, Any] | None = None,
+    renderer_hint: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
     """Log chart payload to the active run (convenience function)."""
@@ -211,6 +213,8 @@ def log_chart(
         chart_type=chart_type,
         step=step,
         layout=layout,
+        options=options,
+        renderer_hint=renderer_hint,
         metadata=metadata,
     )
 

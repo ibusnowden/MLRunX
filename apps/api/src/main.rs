@@ -295,6 +295,15 @@ const METADATA_MAX_KEY_LEN: usize = 256;
 const METADATA_MAX_DEPTH: usize = 4;
 const METADATA_MAX_SEGMENT_LEN: usize = 64;
 const PARAM_VALUE_MAX_LEN: usize = 4096;
+const METRIC_ARRAY_MAX_LEN: usize = 1024;
+const RUN_EVENT_MAX_LEN: usize = 16_000;
+const STRUCTURED_JSON_MAX_DEPTH: usize = 8;
+const STRUCTURED_JSON_MAX_STRING_LEN: usize = 2048;
+const CHART_DATA_MAX_BYTES: usize = 32_000;
+const CHART_LAYOUT_MAX_BYTES: usize = 12_000;
+const CHART_OPTIONS_MAX_BYTES: usize = 12_000;
+const CHART_METADATA_MAX_BYTES: usize = 8_000;
+const IMAGE_METADATA_MAX_BYTES: usize = 8_000;
 
 fn canonicalize_metadata_key(raw_key: &str, default_namespace: &str) -> Result<String, String> {
     let trimmed = raw_key.trim();
@@ -2395,9 +2404,16 @@ struct IngestBatchHttpRequest {
 #[derive(Debug, Deserialize)]
 struct MetricData {
     name: String,
-    value: f64,
+    value: MetricValue,
     step: i64,
     timestamp: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum MetricValue {
+    Scalar(f64),
+    Array(Vec<f64>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -2474,11 +2490,293 @@ fn sanitize_run_event_message(raw: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let max_len = 2000usize;
+    let max_len = RUN_EVENT_MAX_LEN;
     if trimmed.len() <= max_len {
         Some(trimmed.to_string())
     } else {
         Some(trimmed.chars().take(max_len).collect())
+    }
+}
+
+#[derive(Debug)]
+struct ExpandedMetricData {
+    name: String,
+    value: f64,
+    step: i64,
+    timestamp: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StructuredEnvelope {
+    kind: String,
+    #[serde(default)]
+    payload: serde_json::Value,
+    #[serde(default)]
+    truncated: bool,
+}
+
+fn json_serialized_size(value: &serde_json::Value) -> Result<usize, String> {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .map_err(|err| format!("failed to serialize JSON payload: {err}"))
+}
+
+fn validate_structured_json_tree(value: &serde_json::Value, depth: usize) -> Result<(), String> {
+    if depth > STRUCTURED_JSON_MAX_DEPTH {
+        return Err(format!(
+            "structured payload exceeds max depth {STRUCTURED_JSON_MAX_DEPTH}"
+        ));
+    }
+
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let lowered = key.to_ascii_lowercase();
+                if lowered == "__proto__" || lowered == "constructor" || lowered == "prototype" {
+                    return Err("structured payload contains forbidden object key".to_string());
+                }
+                if key.len() > METADATA_MAX_SEGMENT_LEN {
+                    return Err(format!(
+                        "structured payload key '{key}' exceeds max length {METADATA_MAX_SEGMENT_LEN}"
+                    ));
+                }
+                validate_structured_json_tree(child, depth + 1)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                validate_structured_json_tree(child, depth + 1)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::String(text) => {
+            if text.len() > STRUCTURED_JSON_MAX_STRING_LEN {
+                return Err(format!(
+                    "structured payload string exceeds max length {STRUCTURED_JSON_MAX_STRING_LEN}"
+                ));
+            }
+            let lowered = text.to_ascii_lowercase();
+            if lowered.contains("<script") || lowered.contains("javascript:") {
+                return Err("structured payload contains unsafe script-like content".to_string());
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn sanitize_structured_image_payload(
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| "image payload must be a JSON object".to_string())?;
+
+    let name = object
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "image payload.name is required".to_string())?;
+    if name.len() > 256 {
+        return Err("image payload.name exceeds max length 256".to_string());
+    }
+
+    let path = object
+        .get("path")
+        .or_else(|| object.get("uri"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "image payload.path is required".to_string())?;
+    if path.len() > 4096 {
+        return Err("image payload.path exceeds max length 4096".to_string());
+    }
+
+    let caption = object
+        .get("caption")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::string::ToString::to_string);
+    if let Some(text) = caption.as_deref()
+        && text.len() > 1024
+    {
+        return Err("image payload.caption exceeds max length 1024".to_string());
+    }
+
+    let metadata = object
+        .get("metadata")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    validate_structured_json_tree(&metadata, 1)?;
+    if json_serialized_size(&metadata)? > IMAGE_METADATA_MAX_BYTES {
+        return Err(format!(
+            "image payload.metadata exceeds max size {IMAGE_METADATA_MAX_BYTES} bytes"
+        ));
+    }
+
+    Ok(serde_json::json!({
+        "name": name,
+        "path": path,
+        "caption": caption,
+        "metadata": metadata,
+    }))
+}
+
+fn sanitize_structured_chart_payload(
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| "chart payload must be a JSON object".to_string())?;
+
+    let name = object
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "chart payload.name is required".to_string())?;
+    if name.len() > 256 {
+        return Err("chart payload.name exceeds max length 256".to_string());
+    }
+
+    let chart_type = object
+        .get("chart_type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("custom");
+    if chart_type.len() > 64 {
+        return Err("chart payload.chart_type exceeds max length 64".to_string());
+    }
+
+    let renderer_hint = object
+        .get("renderer_hint")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("auto");
+    if renderer_hint.len() > 64 {
+        return Err("chart payload.renderer_hint exceeds max length 64".to_string());
+    }
+
+    let data = object
+        .get("data")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let layout = object
+        .get("layout")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let options = object
+        .get("options")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let metadata = object
+        .get("metadata")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    validate_structured_json_tree(&data, 1)?;
+    validate_structured_json_tree(&layout, 1)?;
+    validate_structured_json_tree(&options, 1)?;
+    validate_structured_json_tree(&metadata, 1)?;
+
+    if json_serialized_size(&data)? > CHART_DATA_MAX_BYTES {
+        return Err(format!(
+            "chart payload.data exceeds max size {CHART_DATA_MAX_BYTES} bytes"
+        ));
+    }
+    if json_serialized_size(&layout)? > CHART_LAYOUT_MAX_BYTES {
+        return Err(format!(
+            "chart payload.layout exceeds max size {CHART_LAYOUT_MAX_BYTES} bytes"
+        ));
+    }
+    if json_serialized_size(&options)? > CHART_OPTIONS_MAX_BYTES {
+        return Err(format!(
+            "chart payload.options exceeds max size {CHART_OPTIONS_MAX_BYTES} bytes"
+        ));
+    }
+    if json_serialized_size(&metadata)? > CHART_METADATA_MAX_BYTES {
+        return Err(format!(
+            "chart payload.metadata exceeds max size {CHART_METADATA_MAX_BYTES} bytes"
+        ));
+    }
+
+    Ok(serde_json::json!({
+        "name": name,
+        "chart_type": chart_type,
+        "renderer_hint": renderer_hint,
+        "data": data,
+        "layout": layout,
+        "options": options,
+        "metadata": metadata,
+    }))
+}
+
+fn sanitize_structured_event_message(raw_message: &str) -> Result<Option<String>, String> {
+    let parsed: serde_json::Value = match serde_json::from_str(raw_message) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+
+    let envelope: StructuredEnvelope = match serde_json::from_value(parsed) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+
+    match envelope.kind.as_str() {
+        "image" => {
+            if envelope.truncated {
+                return Err("image payload was truncated and cannot be ingested".to_string());
+            }
+            let sanitized_payload = sanitize_structured_image_payload(&envelope.payload)?;
+            let normalized = serde_json::json!({
+                "kind": "image",
+                "payload": sanitized_payload,
+            });
+            let encoded = serde_json::to_string(&normalized)
+                .map_err(|err| format!("failed to encode image payload: {err}"))?;
+            if encoded.len() > RUN_EVENT_MAX_LEN {
+                return Err(format!(
+                    "image structured message exceeds max length {RUN_EVENT_MAX_LEN}"
+                ));
+            }
+            Ok(Some(encoded))
+        }
+        "chart" => {
+            if envelope.truncated {
+                return Err("chart payload was truncated and cannot be ingested".to_string());
+            }
+            let sanitized_payload = sanitize_structured_chart_payload(&envelope.payload)?;
+            let normalized = serde_json::json!({
+                "kind": "chart",
+                "payload": sanitized_payload,
+            });
+            let encoded = serde_json::to_string(&normalized)
+                .map_err(|err| format!("failed to encode chart payload: {err}"))?;
+            if encoded.len() > RUN_EVENT_MAX_LEN {
+                return Err(format!(
+                    "chart structured message exceeds max length {RUN_EVENT_MAX_LEN}"
+                ));
+            }
+            Ok(Some(encoded))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn parse_structured_payload_for_kind(
+    message: &str,
+    expected_kind: &str,
+) -> Option<serde_json::Value> {
+    let envelope: StructuredEnvelope = serde_json::from_str(message).ok()?;
+    if envelope.kind == expected_kind && !envelope.truncated {
+        Some(envelope.payload)
+    } else {
+        None
     }
 }
 
@@ -2550,6 +2848,46 @@ async fn http_ingest_batch(
         validated_tags.push((canonical_key, tag.value.clone()));
     }
 
+    let mut expanded_metrics: Vec<ExpandedMetricData> = Vec::new();
+    for metric in &req.metrics {
+        let base_name = metric.name.trim();
+        if base_name.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "metric name cannot be empty".to_string(),
+            ));
+        }
+
+        match &metric.value {
+            MetricValue::Scalar(value) => {
+                expanded_metrics.push(ExpandedMetricData {
+                    name: base_name.to_string(),
+                    value: *value,
+                    step: metric.step,
+                    timestamp: metric.timestamp,
+                });
+            }
+            MetricValue::Array(values) => {
+                if values.len() > METRIC_ARRAY_MAX_LEN {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "metric array '{base_name}' exceeds max length {METRIC_ARRAY_MAX_LEN}"
+                        ),
+                    ));
+                }
+                for (idx, value) in values.iter().enumerate() {
+                    expanded_metrics.push(ExpandedMetricData {
+                        name: format!("{base_name}[{idx}]"),
+                        value: *value,
+                        step: metric.step,
+                        timestamp: metric.timestamp,
+                    });
+                }
+            }
+        }
+    }
+
     // Generate batch_id if not provided
     let batch_id = req
         .batch_id
@@ -2557,13 +2895,12 @@ async fn http_ingest_batch(
     let seq = req.seq.unwrap_or(0);
 
     // Convert request data for hashing
-    let metric_payloads: Vec<MetricPayload> = req
-        .metrics
+    let metric_payloads: Vec<MetricPayload> = expanded_metrics
         .iter()
-        .map(|m| MetricPayload {
-            name: m.name.clone(),
-            value: m.value,
-            step: m.step,
+        .map(|metric| MetricPayload {
+            name: metric.name.clone(),
+            value: metric.value,
+            step: metric.step,
         })
         .collect();
 
@@ -2604,7 +2941,7 @@ async fn http_ingest_batch(
     );
 
     // Check and record for idempotency
-    let metric_count = req.metrics.len();
+    let metric_count = expanded_metrics.len();
     let param_count = validated_params.len();
     let tag_count = validated_tags.len();
     let event_count = req.events.len();
@@ -2666,7 +3003,10 @@ async fn http_ingest_batch(
 
     // Validate cardinality limits
     let tags_for_validation: Vec<(String, String)> = validated_tags.clone();
-    let metric_names: Vec<String> = req.metrics.iter().map(|m| m.name.clone()).collect();
+    let metric_names: Vec<String> = expanded_metrics
+        .iter()
+        .map(|metric| metric.name.clone())
+        .collect();
 
     let validation = state
         .cardinality_tracker
@@ -2706,19 +3046,18 @@ async fn http_ingest_batch(
     // Filter metrics for cardinality acceptance plus finite numeric payloads.
     // Without this, a single NaN/inf can poison the whole insert batch.
     let mut non_finite_metric_count = 0usize;
-    let sqlite_metrics: Vec<MetricRow> = req
-        .metrics
+    let sqlite_metrics: Vec<MetricRow> = expanded_metrics
         .iter()
-        .filter(|m| accepted_metrics.contains(&m.name))
-        .filter_map(|m| {
-            let finite_value = m.value.is_finite();
-            let finite_timestamp = m.timestamp.is_none_or(f64::is_finite);
+        .filter(|metric| accepted_metrics.contains(&metric.name))
+        .filter_map(|metric| {
+            let finite_value = metric.value.is_finite();
+            let finite_timestamp = metric.timestamp.is_none_or(f64::is_finite);
             if finite_value && finite_timestamp {
                 Some(MetricRow {
-                    name: m.name.clone(),
-                    step: m.step,
-                    value: m.value,
-                    timestamp: m.timestamp,
+                    name: metric.name.clone(),
+                    step: metric.step,
+                    value: metric.value,
+                    timestamp: metric.timestamp,
                 })
             } else {
                 non_finite_metric_count += 1;
@@ -2789,7 +3128,7 @@ async fn http_ingest_batch(
         .events
         .iter()
         .filter_map(|event| {
-            let Some(message) = sanitize_run_event_message(&event.message) else {
+            let Some(mut message) = sanitize_run_event_message(&event.message) else {
                 dropped_event_count += 1;
                 return None;
             };
@@ -2800,6 +3139,19 @@ async fn http_ingest_batch(
                 }
                 value => value,
             };
+
+            match sanitize_structured_event_message(&message) {
+                Ok(Some(sanitized_message)) => {
+                    message = sanitized_message;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    dropped_event_count += 1;
+                    warnings.push(format!("Dropped unsafe structured event: {err}"));
+                    return None;
+                }
+            }
+
             Some(RunEventInput {
                 level: normalize_run_event_level(event.level.as_deref()),
                 source: normalize_run_event_source(event.source.as_deref()),
@@ -4409,6 +4761,148 @@ struct ListRunEventsResponse {
     has_more: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct StructuredRunLogsQuery {
+    after_id: Option<i64>,
+    #[serde(default = "default_run_events_limit")]
+    limit: usize,
+    names: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct RunChartLogResponse {
+    id: i64,
+    run_id: String,
+    name: String,
+    chart_type: String,
+    renderer_hint: Option<String>,
+    data: serde_json::Value,
+    layout: serde_json::Value,
+    options: serde_json::Value,
+    metadata: serde_json::Value,
+    step: Option<i64>,
+    timestamp: Option<f64>,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct RunImageLogResponse {
+    id: i64,
+    run_id: String,
+    name: String,
+    path: String,
+    caption: Option<String>,
+    metadata: serde_json::Value,
+    step: Option<i64>,
+    timestamp: Option<f64>,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ListRunChartsResponse {
+    run_id: String,
+    charts: Vec<RunChartLogResponse>,
+    next_after_id: Option<i64>,
+    has_more: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ListRunImagesResponse {
+    run_id: String,
+    images: Vec<RunImageLogResponse>,
+    next_after_id: Option<i64>,
+    has_more: bool,
+}
+
+fn parse_name_filter(raw: Option<&str>) -> std::collections::HashSet<String> {
+    raw.map(|value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(std::string::ToString::to_string)
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn chart_log_from_event_row(row: &RunEventRow) -> Option<RunChartLogResponse> {
+    let payload = parse_structured_payload_for_kind(&row.message, "chart")?;
+    let object = payload.as_object()?;
+    let name = object.get("name")?.as_str()?.to_string();
+    let chart_type = object
+        .get("chart_type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("custom")
+        .to_string();
+    let renderer_hint = object
+        .get("renderer_hint")
+        .and_then(serde_json::Value::as_str)
+        .map(std::string::ToString::to_string);
+    let data = object
+        .get("data")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let layout = object
+        .get("layout")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let options = object
+        .get("options")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let metadata = object
+        .get("metadata")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    Some(RunChartLogResponse {
+        id: row.id,
+        run_id: row.run_id.clone(),
+        name,
+        chart_type,
+        renderer_hint,
+        data,
+        layout,
+        options,
+        metadata,
+        step: row.step,
+        timestamp: row.timestamp,
+        created_at: row.created_at.clone(),
+    })
+}
+
+fn image_log_from_event_row(row: &RunEventRow) -> Option<RunImageLogResponse> {
+    let payload = parse_structured_payload_for_kind(&row.message, "image")?;
+    let object = payload.as_object()?;
+    let name = object.get("name")?.as_str()?.to_string();
+    let path = object
+        .get("path")
+        .or_else(|| object.get("uri"))
+        .and_then(serde_json::Value::as_str)?
+        .to_string();
+    let caption = object
+        .get("caption")
+        .and_then(serde_json::Value::as_str)
+        .map(std::string::ToString::to_string);
+    let metadata = object
+        .get("metadata")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    Some(RunImageLogResponse {
+        id: row.id,
+        run_id: row.run_id.clone(),
+        name,
+        path,
+        caption,
+        metadata,
+        step: row.step,
+        timestamp: row.timestamp,
+        created_at: row.created_at.clone(),
+    })
+}
+
 /// Get metrics for a run with optional downsampling.
 async fn http_get_metrics(
     State(state): State<AppState>,
@@ -4553,6 +5047,122 @@ async fn http_get_run_events(
     }))
 }
 
+/// Get structured chart events for a run.
+async fn http_get_run_charts(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(run_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<StructuredRunLogsQuery>,
+) -> Result<Json<ListRunChartsResponse>, (StatusCode, String)> {
+    validate_path_id(&run_id, "run_id")?;
+    let run = state
+        .sqlite_store
+        .get_run(&run_id)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, format!("Run not found: {run_id}")))?;
+
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Read,
+        Some(&run.project_id),
+        Some(&run_id),
+        "run.charts.read",
+        "run",
+        Some(&run_id),
+    )
+    .await?;
+    require_ui_run_owner(&auth, &run)?;
+
+    let limit = query.limit.clamp(1, 200);
+    let fetch_limit = (limit.saturating_mul(10)).clamp(20, 1000);
+    let names = parse_name_filter(query.names.as_deref());
+
+    let rows = state
+        .sqlite_store
+        .list_run_events(&run_id, query.after_id, fetch_limit)
+        .await
+        .map_err(internal_error)?;
+
+    let mut charts: Vec<RunChartLogResponse> = rows
+        .iter()
+        .filter_map(chart_log_from_event_row)
+        .filter(|chart| names.is_empty() || names.contains(&chart.name))
+        .collect();
+
+    let has_more = charts.len() > limit;
+    if has_more {
+        charts.truncate(limit);
+    }
+
+    let next_after_id = charts.last().map(|chart| chart.id).or(query.after_id);
+
+    Ok(Json(ListRunChartsResponse {
+        run_id,
+        charts,
+        next_after_id,
+        has_more,
+    }))
+}
+
+/// Get structured image events for a run.
+async fn http_get_run_images(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(run_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<StructuredRunLogsQuery>,
+) -> Result<Json<ListRunImagesResponse>, (StatusCode, String)> {
+    validate_path_id(&run_id, "run_id")?;
+    let run = state
+        .sqlite_store
+        .get_run(&run_id)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, format!("Run not found: {run_id}")))?;
+
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Read,
+        Some(&run.project_id),
+        Some(&run_id),
+        "run.images.read",
+        "run",
+        Some(&run_id),
+    )
+    .await?;
+    require_ui_run_owner(&auth, &run)?;
+
+    let limit = query.limit.clamp(1, 200);
+    let fetch_limit = (limit.saturating_mul(10)).clamp(20, 1000);
+    let names = parse_name_filter(query.names.as_deref());
+
+    let rows = state
+        .sqlite_store
+        .list_run_events(&run_id, query.after_id, fetch_limit)
+        .await
+        .map_err(internal_error)?;
+
+    let mut images: Vec<RunImageLogResponse> = rows
+        .iter()
+        .filter_map(image_log_from_event_row)
+        .filter(|image| names.is_empty() || names.contains(&image.name))
+        .collect();
+
+    let has_more = images.len() > limit;
+    if has_more {
+        images.truncate(limit);
+    }
+
+    let next_after_id = images.last().map(|image| image.id).or(query.after_id);
+
+    Ok(Json(ListRunImagesResponse {
+        run_id,
+        images,
+        next_after_id,
+        has_more,
+    }))
+}
+
 // =============================================================================
 // Compare Runs API
 // =============================================================================
@@ -4577,6 +5187,10 @@ fn default_alignment() -> String {
     "step".to_string()
 }
 
+const fn default_chart_limit_per_run() -> usize {
+    20
+}
+
 /// Metrics data for a single run in comparison.
 #[derive(Debug, Serialize)]
 struct RunCompareData {
@@ -4595,6 +5209,30 @@ struct CompareRunsResponse {
     common_metrics: Vec<String>,
     /// Alignment mode used
     alignment: String,
+}
+
+/// Request body for comparing chart payloads across runs.
+#[derive(Debug, Deserialize)]
+struct CompareRunChartsRequest {
+    run_ids: Vec<String>,
+    #[serde(default)]
+    chart_names: Vec<String>,
+    #[serde(default = "default_chart_limit_per_run")]
+    limit_per_run: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct RunChartsCompareData {
+    run_id: String,
+    run_name: Option<String>,
+    status: String,
+    charts: Vec<RunChartLogResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct CompareRunChartsResponse {
+    runs: Vec<RunChartsCompareData>,
+    common_chart_names: Vec<String>,
 }
 
 /// Compare metrics across multiple runs.
@@ -4712,6 +5350,100 @@ async fn http_compare_runs(
         runs: runs_data,
         common_metrics,
         alignment: req.alignment,
+    }))
+}
+
+/// Compare structured chart logs across multiple runs.
+async fn http_compare_run_charts(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<CompareRunChartsRequest>,
+) -> Result<Json<CompareRunChartsResponse>, (StatusCode, String)> {
+    if req.run_ids.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "run_ids cannot be empty".to_string(),
+        ));
+    }
+
+    if req.run_ids.len() > 100 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Maximum 100 runs can be compared".to_string(),
+        ));
+    }
+
+    let requested_names: std::collections::HashSet<String> =
+        req.chart_names.iter().cloned().collect();
+    let limit_per_run = req.limit_per_run.clamp(1, 200);
+    let mut runs_data = Vec::new();
+    let mut per_run_name_sets: Vec<std::collections::HashSet<String>> = Vec::new();
+
+    for run_id in &req.run_ids {
+        let run = state
+            .sqlite_store
+            .get_run(run_id)
+            .await
+            .map_err(|e| match e {
+                storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+                _ => internal_error(e),
+            })?;
+
+        require_endpoint_access(
+            &state,
+            &auth,
+            EndpointRbacTier::Read,
+            Some(&run.project_id),
+            Some(run_id),
+            "runs.compare.charts",
+            "run",
+            Some(run_id),
+        )
+        .await?;
+        require_ui_run_owner(&auth, &run)?;
+
+        let rows = state
+            .sqlite_store
+            .list_run_events(run_id, None, 1000)
+            .await
+            .map_err(internal_error)?;
+
+        let mut charts: Vec<RunChartLogResponse> = rows
+            .iter()
+            .filter_map(chart_log_from_event_row)
+            .filter(|chart| requested_names.is_empty() || requested_names.contains(&chart.name))
+            .collect();
+
+        if charts.len() > limit_per_run {
+            charts.truncate(limit_per_run);
+        }
+
+        let chart_name_set = charts.iter().map(|chart| chart.name.clone()).collect();
+        per_run_name_sets.push(chart_name_set);
+
+        runs_data.push(RunChartsCompareData {
+            run_id: run_id.clone(),
+            run_name: run.name.clone(),
+            status: run.status.clone(),
+            charts,
+        });
+    }
+
+    let common_chart_names: Vec<String> = if per_run_name_sets.is_empty() {
+        vec![]
+    } else {
+        let mut common = per_run_name_sets[0].clone();
+        for set in per_run_name_sets.iter().skip(1) {
+            common = common.intersection(set).cloned().collect();
+        }
+        let mut names: Vec<_> = common.into_iter().collect();
+        names.sort();
+        names
+    };
+
+    Ok(Json(CompareRunChartsResponse {
+        runs: runs_data,
+        common_chart_names,
     }))
 }
 
@@ -4966,7 +5698,10 @@ fn build_http_router(state: AppState) -> Router {
         )
         .route("/api/v1/runs/{run_id}/metrics", get(http_get_metrics))
         .route("/api/v1/runs/{run_id}/events", get(http_get_run_events))
+        .route("/api/v1/runs/{run_id}/charts", get(http_get_run_charts))
+        .route("/api/v1/runs/{run_id}/images", get(http_get_run_images))
         .route("/api/v1/runs/compare", post(http_compare_runs))
+        .route("/api/v1/runs/compare/charts", post(http_compare_run_charts))
         // Key management endpoints (admin only)
         .route("/api/v1/keys", post(http_create_key).get(http_list_keys))
         .route("/api/v1/keys/{key_id}", delete(http_revoke_key));
@@ -5902,6 +6637,421 @@ mod tests {
             Some(0),
             "future created_after should return zero runs"
         );
+    }
+
+    #[tokio::test]
+    async fn test_ingest_supports_scalar_and_array_metrics() {
+        let app = test_app().await;
+
+        let create_project_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "array-metrics-project"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create project request"),
+            )
+            .await
+            .expect("Create project request failed");
+        assert_eq!(create_project_response.status(), StatusCode::OK);
+        let create_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_project_response).await)
+                .expect("Create project response must be JSON");
+        let project_id = create_payload["project_id"]
+            .as_str()
+            .expect("project_id should exist")
+            .to_string();
+
+        let run_id = "run-array-metrics-123";
+        let init_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": project_id,
+                            "run_id": run_id,
+                            "name": "array-metrics-run"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build init request"),
+            )
+            .await
+            .expect("Init request failed");
+        assert_eq!(init_response.status(), StatusCode::OK);
+
+        let ingest_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ingest/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "run_id": run_id,
+                            "metrics": [
+                                {"name": "loss", "value": 2.5, "step": 1},
+                                {"name": "logits", "value": [0.1, 0.2, 0.3], "step": 1}
+                            ],
+                            "params": [],
+                            "tags": [],
+                            "events": []
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build ingest request"),
+            )
+            .await
+            .expect("Ingest request failed");
+        assert_eq!(ingest_response.status(), StatusCode::OK);
+
+        let metrics_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/runs/{run_id}/metrics"))
+                    .body(Body::empty())
+                    .expect("Failed to build metrics request"),
+            )
+            .await
+            .expect("Metrics request failed");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let payload: serde_json::Value =
+            serde_json::from_str(&response_text(metrics_response).await)
+                .expect("Metrics response should be JSON");
+        let available = payload["available_metrics"]
+            .as_array()
+            .expect("available_metrics should be an array")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(available.contains(&"loss"));
+        assert!(available.contains(&"logits[0]"));
+        assert!(available.contains(&"logits[1]"));
+        assert!(available.contains(&"logits[2]"));
+    }
+
+    #[tokio::test]
+    async fn test_chart_and_image_logs_are_queryable_and_unsafe_chart_is_rejected() {
+        let app = test_app().await;
+
+        let create_project_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "structured-logs-project"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create project request"),
+            )
+            .await
+            .expect("Create project request failed");
+        assert_eq!(create_project_response.status(), StatusCode::OK);
+        let create_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_project_response).await)
+                .expect("Create project response must be JSON");
+        let project_id = create_payload["project_id"]
+            .as_str()
+            .expect("project_id should exist")
+            .to_string();
+
+        let run_id = "run-structured-logs-123";
+        let init_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": project_id,
+                            "run_id": run_id,
+                            "name": "structured-logs-run"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build init request"),
+            )
+            .await
+            .expect("Init request failed");
+        assert_eq!(init_response.status(), StatusCode::OK);
+
+        let safe_chart = serde_json::json!({
+            "kind": "chart",
+            "payload": {
+                "name": "train_curve",
+                "chart_type": "line",
+                "renderer_hint": "plotly",
+                "data": {"x": [1, 2, 3], "y": [0.9, 0.7, 0.5]},
+                "layout": {"title": "Training Loss"},
+                "options": {"showLegend": true},
+                "metadata": {"split": "train"}
+            }
+        })
+        .to_string();
+        let unsafe_chart = serde_json::json!({
+            "kind": "chart",
+            "payload": {
+                "name": "unsafe_curve",
+                "chart_type": "line",
+                "data": {"label": "<script>alert(1)</script>"}
+            }
+        })
+        .to_string();
+        let safe_image = serde_json::json!({
+            "kind": "image",
+            "payload": {
+                "name": "sample_1",
+                "path": "images/sample_1.png",
+                "caption": "sample image",
+                "metadata": {"stage": "eval"}
+            }
+        })
+        .to_string();
+
+        let ingest_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ingest/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "run_id": run_id,
+                            "metrics": [],
+                            "params": [],
+                            "tags": [],
+                            "events": [
+                                {"level": "info", "source": "chart", "message": safe_chart, "step": 10},
+                                {"level": "info", "source": "chart", "message": unsafe_chart, "step": 11},
+                                {"level": "info", "source": "image", "message": safe_image, "step": 12}
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build ingest request"),
+            )
+            .await
+            .expect("Ingest request failed");
+        assert_eq!(ingest_response.status(), StatusCode::OK);
+        let ingest_payload: serde_json::Value =
+            serde_json::from_str(&response_text(ingest_response).await)
+                .expect("Ingest response should be JSON");
+        let warnings = ingest_payload["warnings"]
+            .as_array()
+            .expect("warnings should be an array");
+        assert!(
+            warnings.iter().any(|entry| {
+                entry
+                    .as_str()
+                    .is_some_and(|text| text.contains("Dropped unsafe structured event"))
+            }),
+            "unsafe chart payload should be dropped with a warning"
+        );
+
+        let charts_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/runs/{run_id}/charts"))
+                    .body(Body::empty())
+                    .expect("Failed to build charts request"),
+            )
+            .await
+            .expect("Charts request failed");
+        assert_eq!(charts_response.status(), StatusCode::OK);
+        let charts_payload: serde_json::Value =
+            serde_json::from_str(&response_text(charts_response).await)
+                .expect("Charts response should be JSON");
+        let charts = charts_payload["charts"]
+            .as_array()
+            .expect("charts should be an array");
+        assert_eq!(charts.len(), 1);
+        assert_eq!(charts[0]["name"].as_str(), Some("train_curve"));
+
+        let images_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/runs/{run_id}/images"))
+                    .body(Body::empty())
+                    .expect("Failed to build images request"),
+            )
+            .await
+            .expect("Images request failed");
+        assert_eq!(images_response.status(), StatusCode::OK);
+        let images_payload: serde_json::Value =
+            serde_json::from_str(&response_text(images_response).await)
+                .expect("Images response should be JSON");
+        let images = images_payload["images"]
+            .as_array()
+            .expect("images should be an array");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0]["name"].as_str(), Some("sample_1"));
+    }
+
+    #[tokio::test]
+    async fn test_compare_run_charts_returns_common_chart_names() {
+        let app = test_app().await;
+
+        let create_project_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "compare-charts-project"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create project request"),
+            )
+            .await
+            .expect("Create project request failed");
+        assert_eq!(create_project_response.status(), StatusCode::OK);
+        let create_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_project_response).await)
+                .expect("Create project response must be JSON");
+        let project_id = create_payload["project_id"]
+            .as_str()
+            .expect("project_id should exist")
+            .to_string();
+
+        for run_id in ["run-chart-a", "run-chart-b"] {
+            let init_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/runs")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "project_id": project_id,
+                                "run_id": run_id,
+                                "name": run_id
+                            })
+                            .to_string(),
+                        ))
+                        .expect("Failed to build init request"),
+                )
+                .await
+                .expect("Init request failed");
+            assert_eq!(init_response.status(), StatusCode::OK);
+        }
+
+        let chart_loss = serde_json::json!({
+            "kind": "chart",
+            "payload": {
+                "name": "loss_curve",
+                "chart_type": "line",
+                "data": {"x": [1, 2], "y": [1.0, 0.8]}
+            }
+        })
+        .to_string();
+        let chart_acc = serde_json::json!({
+            "kind": "chart",
+            "payload": {
+                "name": "acc_curve",
+                "chart_type": "line",
+                "data": {"x": [1, 2], "y": [0.5, 0.7]}
+            }
+        })
+        .to_string();
+
+        for (run_id, messages) in [
+            ("run-chart-a", vec![chart_loss.clone(), chart_acc.clone()]),
+            ("run-chart-b", vec![chart_loss.clone()]),
+        ] {
+            let events: Vec<serde_json::Value> = messages
+                .into_iter()
+                .map(|message| {
+                    serde_json::json!({
+                        "level": "info",
+                        "source": "chart",
+                        "message": message
+                    })
+                })
+                .collect();
+
+            let ingest_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/ingest/batch")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "run_id": run_id,
+                                "metrics": [],
+                                "params": [],
+                                "tags": [],
+                                "events": events
+                            })
+                            .to_string(),
+                        ))
+                        .expect("Failed to build ingest request"),
+                )
+                .await
+                .expect("Ingest request failed");
+            assert_eq!(ingest_response.status(), StatusCode::OK);
+        }
+
+        let compare_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs/compare/charts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "run_ids": ["run-chart-a", "run-chart-b"]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build compare charts request"),
+            )
+            .await
+            .expect("Compare charts request failed");
+        assert_eq!(compare_response.status(), StatusCode::OK);
+        let payload: serde_json::Value =
+            serde_json::from_str(&response_text(compare_response).await)
+                .expect("Compare charts response should be JSON");
+        let common = payload["common_chart_names"]
+            .as_array()
+            .expect("common_chart_names should be an array")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(common, vec!["loss_curve"]);
     }
 
     #[tokio::test]

@@ -237,7 +237,7 @@ class TestRun:
         run = Run(project_id=TEST_PROJECT_ID)
         run["parameters"] = {"lr": 0.001, "epochs": 3}
         run["tags"] = {"framework": "scratch", "seed": 42}
-        run["metrics"] = {"loss": 1.23}
+        run["metrics"] = {"loss": 1.23, "logits": [0.1, 0.2, 0.3]}
 
         assert run["parameters"]["lr"] == "0.001"
         assert run["parameters"]["epochs"] == "3"
@@ -262,6 +262,8 @@ class TestRun:
             run["parameters"] = "not-a-dict"  # type: ignore[assignment]
         with pytest.raises(TypeError):
             run["metrics"] = {"loss": True}
+        with pytest.raises(TypeError):
+            run["metrics"] = {"loss": [0.1, "bad"]}
         with pytest.raises(KeyError):
             _ = run["metrics"]
 
@@ -284,6 +286,8 @@ class TestRun:
             data={"x": [1, 2], "y": [0.5, 0.3]},
             chart_type="line",
             step=10,
+            options={"showLegend": True},
+            renderer_hint="plotly",
         )
         run.log_artifact(path="models/model.bin", name="checkpoint")
 
@@ -292,6 +296,8 @@ class TestRun:
         payloads = [json.loads(event.data["message"]) for event in events]
         assert payloads[0]["kind"] == "image"
         assert payloads[1]["kind"] == "chart"
+        assert payloads[1]["payload"]["renderer_hint"] == "plotly"
+        assert payloads[1]["payload"]["options"]["showLegend"] is True
         assert payloads[2]["kind"] == "artifact"
         run.finish()
 

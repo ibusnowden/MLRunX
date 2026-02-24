@@ -230,7 +230,7 @@ class Run:
 
     def log(
         self,
-        data: dict[str, float | int],
+        data: dict[str, Any],
         step: int | None = None,
         timestamp: float | None = None,
     ) -> None:
@@ -256,21 +256,50 @@ class Run:
 
         ts = timestamp or time.time()
 
-        # Queue each metric as a separate event for flexibility
+        # Queue each metric as a separate event for flexibility.
+        # Arrays are expanded to name[index] series for API compatibility.
         for name, value in data.items():
-            event = Event(
-                type=EventType.METRIC,
-                run_id=self._run_id,
-                timestamp=ts,
-                data={
-                    "name": name,
-                    "value": float(value),
-                    "step": step,
-                    "timestamp": ts,
-                },
-            )
-            if not self._queue.put(event):
-                logger.warning(f"Queue full, metric dropped: {name}")
+            metric_name = str(name)
+            metric_items: list[tuple[str, float]] = []
+
+            if isinstance(value, bool):
+                logger.warning("Skipping bool metric value for '%s'", metric_name)
+                continue
+
+            if isinstance(value, (int, float)):
+                metric_items.append((metric_name, float(value)))
+            elif isinstance(value, (list, tuple)):
+                for index, item in enumerate(value):
+                    if isinstance(item, bool) or not isinstance(item, (int, float)):
+                        logger.warning(
+                            "Skipping non-numeric array metric '%s[%s]'",
+                            metric_name,
+                            index,
+                        )
+                        continue
+                    metric_items.append((f"{metric_name}[{index}]", float(item)))
+            else:
+                logger.warning(
+                    "Skipping non-numeric metric value for '%s' (%s)",
+                    metric_name,
+                    type(value).__name__,
+                )
+                continue
+
+            for expanded_name, expanded_value in metric_items:
+                event = Event(
+                    type=EventType.METRIC,
+                    run_id=self._run_id,
+                    timestamp=ts,
+                    data={
+                        "name": expanded_name,
+                        "value": expanded_value,
+                        "step": step,
+                        "timestamp": ts,
+                    },
+                )
+                if not self._queue.put(event):
+                    logger.warning("Queue full, metric dropped: %s", expanded_name)
 
     def log_event(
         self,
@@ -456,6 +485,8 @@ class Run:
         chart_type: str = "custom",
         step: int | None = None,
         layout: dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
+        renderer_hint: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         """Log chart metadata/spec payload as a structured run event."""
@@ -470,6 +501,8 @@ class Run:
                 "chart_type": chart_type,
                 "data": data,
                 "layout": layout or {},
+                "options": options or {},
+                "renderer_hint": renderer_hint or "auto",
                 "metadata": metadata or {},
             },
         )
@@ -496,14 +529,31 @@ class Run:
             self.log_tags(normalized)
             return
         if key in {"metrics", "metric"}:
-            numeric_values: dict[str, float | int] = {}
+            numeric_values: dict[str, Any] = {}
             for metric_name, metric_value in value.items():
-                if isinstance(metric_value, bool) or not isinstance(metric_value, (int, float)):
+                if isinstance(metric_value, bool):
                     raise TypeError(
                         f"run['{bucket}'] accepts numeric metric values only; "
-                        f"got {type(metric_value).__name__} for '{metric_name}'"
+                        f"got bool for '{metric_name}'"
                     )
-                numeric_values[str(metric_name)] = metric_value
+                if isinstance(metric_value, (int, float)):
+                    numeric_values[str(metric_name)] = metric_value
+                    continue
+                if isinstance(metric_value, (list, tuple)):
+                    if any(
+                        isinstance(item, bool) or not isinstance(item, (int, float))
+                        for item in metric_value
+                    ):
+                        raise TypeError(
+                            f"run['{bucket}'] array metrics must contain numeric values only; "
+                            f"got invalid item in '{metric_name}'"
+                        )
+                    numeric_values[str(metric_name)] = list(metric_value)
+                    continue
+                raise TypeError(
+                    f"run['{bucket}'] accepts numeric metric values only; "
+                    f"got {type(metric_value).__name__} for '{metric_name}'"
+                )
             self.log(numeric_values)
             return
 
