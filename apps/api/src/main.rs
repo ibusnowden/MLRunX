@@ -63,7 +63,8 @@ use services::{
 };
 use storage::{
     AuditEventRow, AuthSessionAdminRow, CreateProjectInput, CreateRunInput, MetadataFilter,
-    MetricRow, ProjectRepository, ProjectRow, RunEventInput, RunEventRow, RunRepository, RunRow,
+    MetricRow, ProjectRepository, ProjectRow, RunEventInput, RunEventRow, RunFilterCondition,
+    RunFilterExpr, RunFilterOperator, RunFilterTarget, RunRepository, RunRow,
     RunStatus as PostgresRunStatus, SqliteStore, UserProjectMembershipRow, UserRow,
 };
 
@@ -495,6 +496,422 @@ fn normalize_created_at_filter(
         StatusCode::BAD_REQUEST,
         format!("Invalid {field_name}: expected RFC3339 or 'YYYY-MM-DD HH:MM:SS' format"),
     ))
+}
+
+const RUN_FILTER_MAX_LEN: usize = 2048;
+const RUN_FILTER_MAX_TOKENS: usize = 256;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RunFilterToken {
+    Identifier(String),
+    StringLiteral(String),
+    Operator(String),
+    And,
+    Or,
+    LParen,
+    RParen,
+}
+
+fn tokenize_run_filter(raw: &str) -> Result<Vec<RunFilterToken>, String> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = raw.chars().collect();
+    let mut idx = 0usize;
+
+    while idx < chars.len() {
+        let ch = chars[idx];
+        if ch.is_whitespace() {
+            idx += 1;
+            continue;
+        }
+
+        match ch {
+            '(' => {
+                tokens.push(RunFilterToken::LParen);
+                idx += 1;
+                continue;
+            }
+            ')' => {
+                tokens.push(RunFilterToken::RParen);
+                idx += 1;
+                continue;
+            }
+            '~' => {
+                tokens.push(RunFilterToken::Operator("~".to_string()));
+                idx += 1;
+                continue;
+            }
+            '"' | '\'' => {
+                let quote = ch;
+                idx += 1;
+                let mut value = String::new();
+                let mut closed = false;
+                while idx < chars.len() {
+                    let current = chars[idx];
+                    if current == '\\' && idx + 1 < chars.len() {
+                        value.push(chars[idx + 1]);
+                        idx += 2;
+                        continue;
+                    }
+                    if current == quote {
+                        closed = true;
+                        idx += 1;
+                        break;
+                    }
+                    value.push(current);
+                    idx += 1;
+                }
+                if !closed {
+                    return Err("unterminated string literal".to_string());
+                }
+                tokens.push(RunFilterToken::StringLiteral(value));
+                continue;
+            }
+            '!' | '>' | '<' | '=' => {
+                if idx + 1 < chars.len() {
+                    let pair = [ch, chars[idx + 1]];
+                    match pair {
+                        ['!', '='] => {
+                            tokens.push(RunFilterToken::Operator("!=".to_string()));
+                            idx += 2;
+                            continue;
+                        }
+                        ['>', '='] => {
+                            tokens.push(RunFilterToken::Operator(">=".to_string()));
+                            idx += 2;
+                            continue;
+                        }
+                        ['<', '='] => {
+                            tokens.push(RunFilterToken::Operator("<=".to_string()));
+                            idx += 2;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+
+                if ch == '!' {
+                    return Err("expected '!=' operator".to_string());
+                }
+
+                tokens.push(RunFilterToken::Operator(ch.to_string()));
+                idx += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        let start = idx;
+        while idx < chars.len() {
+            let current = chars[idx];
+            if current.is_whitespace()
+                || matches!(
+                    current,
+                    '(' | ')' | '~' | '!' | '>' | '<' | '=' | '"' | '\''
+                )
+            {
+                break;
+            }
+            idx += 1;
+        }
+
+        let word = chars[start..idx].iter().collect::<String>();
+        if word.is_empty() {
+            return Err("unexpected token boundary".to_string());
+        }
+
+        if word.eq_ignore_ascii_case("and") {
+            tokens.push(RunFilterToken::And);
+        } else if word.eq_ignore_ascii_case("or") {
+            tokens.push(RunFilterToken::Or);
+        } else {
+            tokens.push(RunFilterToken::Identifier(word));
+        }
+    }
+
+    if tokens.len() > RUN_FILTER_MAX_TOKENS {
+        return Err(format!(
+            "filter expression exceeds max token count {RUN_FILTER_MAX_TOKENS}"
+        ));
+    }
+
+    Ok(tokens)
+}
+
+struct RunFilterParser {
+    tokens: Vec<RunFilterToken>,
+    cursor: usize,
+}
+
+impl RunFilterParser {
+    fn new(tokens: Vec<RunFilterToken>) -> Self {
+        Self { tokens, cursor: 0 }
+    }
+
+    fn parse(mut self) -> Result<RunFilterExpr, String> {
+        let expr = self.parse_or_expression()?;
+        if self.cursor < self.tokens.len() {
+            return Err("unexpected trailing token".to_string());
+        }
+        Ok(expr)
+    }
+
+    fn parse_or_expression(&mut self) -> Result<RunFilterExpr, String> {
+        let mut expr = self.parse_and_expression()?;
+        while matches!(self.peek(), Some(RunFilterToken::Or)) {
+            self.cursor += 1;
+            let right = self.parse_and_expression()?;
+            expr = RunFilterExpr::Or(Box::new(expr), Box::new(right));
+        }
+        Ok(expr)
+    }
+
+    fn parse_and_expression(&mut self) -> Result<RunFilterExpr, String> {
+        let mut expr = self.parse_primary_expression()?;
+        while matches!(self.peek(), Some(RunFilterToken::And)) {
+            self.cursor += 1;
+            let right = self.parse_primary_expression()?;
+            expr = RunFilterExpr::And(Box::new(expr), Box::new(right));
+        }
+        Ok(expr)
+    }
+
+    fn parse_primary_expression(&mut self) -> Result<RunFilterExpr, String> {
+        if matches!(self.peek(), Some(RunFilterToken::LParen)) {
+            self.cursor += 1;
+            let expr = self.parse_or_expression()?;
+            if !matches!(self.peek(), Some(RunFilterToken::RParen)) {
+                return Err("expected ')'".to_string());
+            }
+            self.cursor += 1;
+            return Ok(expr);
+        }
+        self.parse_condition_expression()
+    }
+
+    fn parse_condition_expression(&mut self) -> Result<RunFilterExpr, String> {
+        let field = match self.next() {
+            Some(RunFilterToken::Identifier(value)) => value,
+            _ => return Err("expected field identifier".to_string()),
+        };
+        let op = match self.next() {
+            Some(RunFilterToken::Operator(value)) => value,
+            _ => return Err("expected comparison operator".to_string()),
+        };
+        let value = match self.next() {
+            Some(RunFilterToken::Identifier(raw)) | Some(RunFilterToken::StringLiteral(raw)) => raw,
+            _ => return Err("expected comparison value".to_string()),
+        };
+
+        let condition = build_run_filter_condition(&field, &op, &value)?;
+        Ok(RunFilterExpr::Condition(condition))
+    }
+
+    fn next(&mut self) -> Option<RunFilterToken> {
+        let token = self.tokens.get(self.cursor).cloned();
+        if token.is_some() {
+            self.cursor += 1;
+        }
+        token
+    }
+
+    fn peek(&self) -> Option<&RunFilterToken> {
+        self.tokens.get(self.cursor)
+    }
+}
+
+fn parse_run_filter_operator(raw: &str) -> Result<RunFilterOperator, String> {
+    match raw {
+        "=" => Ok(RunFilterOperator::Eq),
+        "!=" => Ok(RunFilterOperator::NotEq),
+        ">" => Ok(RunFilterOperator::Gt),
+        ">=" => Ok(RunFilterOperator::Gte),
+        "<" => Ok(RunFilterOperator::Lt),
+        "<=" => Ok(RunFilterOperator::Lte),
+        "~" => Ok(RunFilterOperator::Contains),
+        _ => Err(format!("unsupported operator '{raw}'")),
+    }
+}
+
+fn build_run_filter_condition(
+    field_raw: &str,
+    op_raw: &str,
+    value_raw: &str,
+) -> Result<RunFilterCondition, String> {
+    let op = parse_run_filter_operator(op_raw)?;
+    let field = field_raw.trim().to_ascii_lowercase();
+    let mut value = value_raw.trim().to_string();
+
+    if value.is_empty() {
+        return Err("comparison value cannot be empty".to_string());
+    }
+
+    let condition = match field.as_str() {
+        "project" | "project_id" => {
+            if !matches!(
+                op,
+                RunFilterOperator::Eq | RunFilterOperator::NotEq | RunFilterOperator::Contains
+            ) {
+                return Err("project supports only '=', '!=', and '~' operators".to_string());
+            }
+            RunFilterCondition {
+                target: RunFilterTarget::Project,
+                op,
+                value,
+            }
+        }
+        "owner" | "owner_user_id" => {
+            if !matches!(
+                op,
+                RunFilterOperator::Eq | RunFilterOperator::NotEq | RunFilterOperator::Contains
+            ) {
+                return Err("owner supports only '=', '!=', and '~' operators".to_string());
+            }
+            RunFilterCondition {
+                target: RunFilterTarget::Owner,
+                op,
+                value,
+            }
+        }
+        "status" => {
+            if !matches!(
+                op,
+                RunFilterOperator::Eq | RunFilterOperator::NotEq | RunFilterOperator::Contains
+            ) {
+                return Err("status supports only '=', '!=', and '~' operators".to_string());
+            }
+            value = value.to_ascii_lowercase();
+            RunFilterCondition {
+                target: RunFilterTarget::Status,
+                op,
+                value,
+            }
+        }
+        "name" => {
+            if !matches!(
+                op,
+                RunFilterOperator::Eq | RunFilterOperator::NotEq | RunFilterOperator::Contains
+            ) {
+                return Err("name supports only '=', '!=', and '~' operators".to_string());
+            }
+            RunFilterCondition {
+                target: RunFilterTarget::Name,
+                op,
+                value,
+            }
+        }
+        "id" | "run_id" => {
+            if !matches!(
+                op,
+                RunFilterOperator::Eq | RunFilterOperator::NotEq | RunFilterOperator::Contains
+            ) {
+                return Err("run_id supports only '=', '!=', and '~' operators".to_string());
+            }
+            RunFilterCondition {
+                target: RunFilterTarget::RunId,
+                op,
+                value,
+            }
+        }
+        "created_at" => {
+            if !matches!(
+                op,
+                RunFilterOperator::Eq
+                    | RunFilterOperator::NotEq
+                    | RunFilterOperator::Gt
+                    | RunFilterOperator::Gte
+                    | RunFilterOperator::Lt
+                    | RunFilterOperator::Lte
+            ) {
+                return Err(
+                    "created_at supports only '=', '!=', '>', '>=', '<', and '<=' operators"
+                        .to_string(),
+                );
+            }
+            value = normalize_created_at_filter(&value, "filter.created_at")
+                .map_err(|(_, message)| message)?;
+            RunFilterCondition {
+                target: RunFilterTarget::CreatedAt,
+                op,
+                value,
+            }
+        }
+        _ => {
+            if let Some(raw_key) = field
+                .strip_prefix("tag.")
+                .or_else(|| field.strip_prefix("tags."))
+            {
+                if !matches!(
+                    op,
+                    RunFilterOperator::Eq | RunFilterOperator::NotEq | RunFilterOperator::Contains
+                ) {
+                    return Err("tag filters support only '=', '!=', and '~' operators".to_string());
+                }
+                let (key, legacy_key) = canonical_and_legacy_metadata_key(raw_key, "tags")?;
+                RunFilterCondition {
+                    target: RunFilterTarget::Tag { key, legacy_key },
+                    op,
+                    value,
+                }
+            } else if let Some(raw_key) = field
+                .strip_prefix("param.")
+                .or_else(|| field.strip_prefix("params."))
+            {
+                if !matches!(
+                    op,
+                    RunFilterOperator::Eq | RunFilterOperator::NotEq | RunFilterOperator::Contains
+                ) {
+                    return Err(
+                        "param filters support only '=', '!=', and '~' operators".to_string()
+                    );
+                }
+                let (key, legacy_key) = canonical_and_legacy_metadata_key(raw_key, "parameters")?;
+                RunFilterCondition {
+                    target: RunFilterTarget::Param { key, legacy_key },
+                    op,
+                    value,
+                }
+            } else {
+                return Err(format!("unsupported filter field '{field_raw}'"));
+            }
+        }
+    };
+
+    Ok(condition)
+}
+
+fn parse_run_filter_expr(raw: Option<&str>) -> Result<Option<RunFilterExpr>, (StatusCode, String)> {
+    let Some(raw_filter) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw_filter.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.len() > RUN_FILTER_MAX_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("filter expression exceeds max length {RUN_FILTER_MAX_LEN} characters"),
+        ));
+    }
+
+    let tokens = tokenize_run_filter(trimmed).map_err(|err| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid filter expression: {err}"),
+        )
+    })?;
+    if tokens.is_empty() {
+        return Ok(None);
+    }
+
+    let expr = RunFilterParser::new(tokens).parse().map_err(|err| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid filter expression: {err}"),
+        )
+    })?;
+
+    Ok(Some(expr))
 }
 
 const fn auth_mode_label(auth: &AuthContext) -> &'static str {
@@ -4408,6 +4825,8 @@ struct ListRunsQuery {
     tags: Option<String>,
     /// Comma-separated param filters (key or key=value)
     params: Option<String>,
+    /// Structured filter expression with AND/OR and comparisons
+    filter: Option<String>,
     /// Include runs created at or after this timestamp
     created_after: Option<String>,
     /// Include runs created at or before this timestamp
@@ -4466,6 +4885,7 @@ async fn http_list_runs(
     let offset = query.offset.unwrap_or(0);
     let tag_filters = parse_metadata_filters(query.tags.as_deref(), "tags", "tags")?;
     let param_filters = parse_metadata_filters(query.params.as_deref(), "parameters", "params")?;
+    let filter_expr = parse_run_filter_expr(query.filter.as_deref())?;
 
     let created_after = query
         .created_after
@@ -4586,6 +5006,7 @@ async fn http_list_runs(
             created_before.as_deref(),
             &tag_filters,
             &param_filters,
+            filter_expr.as_ref(),
             limit,
             offset,
         )
@@ -6208,6 +6629,18 @@ mod tests {
         String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8")
     }
 
+    fn percent_encode_query_value(raw: &str) -> String {
+        let mut encoded = String::new();
+        for byte in raw.bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                encoded.push(char::from(byte));
+            } else {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        encoded
+    }
+
     async fn test_app_with_auth_enabled() -> Router {
         let store = Arc::new(InMemoryStore::new());
         let sqlite_store = Arc::new(
@@ -6636,6 +7069,272 @@ mod tests {
             future_payload["total"].as_u64(),
             Some(0),
             "future created_after should return zero runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_runs_supports_structured_filter_expression() {
+        let app = test_app().await;
+
+        let create_project_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "structured-filter-project"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create project request"),
+            )
+            .await
+            .expect("Create project request failed");
+        assert_eq!(create_project_response.status(), StatusCode::OK);
+        let create_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_project_response).await)
+                .expect("Create project response must be JSON");
+        let project_id = create_payload["project_id"]
+            .as_str()
+            .expect("project_id should exist")
+            .to_string();
+
+        for (run_id, framework, lr) in [
+            ("run-filter-expr-a", "pytorch", "0.001"),
+            ("run-filter-expr-b", "tensorflow", "0.100"),
+            ("run-filter-expr-c", "pytorch", "0.100"),
+        ] {
+            let init_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/runs")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "project_id": project_id,
+                                "run_id": run_id,
+                                "name": run_id
+                            })
+                            .to_string(),
+                        ))
+                        .expect("Failed to build init request"),
+                )
+                .await
+                .expect("Init request failed");
+            assert_eq!(init_response.status(), StatusCode::OK);
+
+            let ingest_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/ingest/batch")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "run_id": run_id,
+                                "metrics": [],
+                                "params": [{"name": "lr", "value": lr}],
+                                "tags": [{"key": "framework", "value": framework}],
+                                "events": []
+                            })
+                            .to_string(),
+                        ))
+                        .expect("Failed to build ingest request"),
+                )
+                .await
+                .expect("Ingest request failed");
+            assert_eq!(ingest_response.status(), StatusCode::OK);
+        }
+
+        for (run_id, status) in [
+            ("run-filter-expr-a", "finished"),
+            ("run-filter-expr-c", "failed"),
+        ] {
+            let finish_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/runs/{run_id}/finish"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "status": status
+                            })
+                            .to_string(),
+                        ))
+                        .expect("Failed to build finish request"),
+                )
+                .await
+                .expect("Finish request failed");
+            assert_eq!(finish_response.status(), StatusCode::OK);
+        }
+
+        let and_filter = percent_encode_query_value(
+            "status=finished AND tag.framework=pytorch AND param.lr=0.001",
+        );
+        let and_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/runs?project={project_id}&filter={and_filter}"
+                    ))
+                    .body(Body::empty())
+                    .expect("Failed to build AND filter request"),
+            )
+            .await
+            .expect("AND filter request failed");
+        assert_eq!(and_response.status(), StatusCode::OK);
+        let and_payload: serde_json::Value =
+            serde_json::from_str(&response_text(and_response).await)
+                .expect("AND filter response should be JSON");
+        let and_runs = and_payload["runs"]
+            .as_array()
+            .expect("runs should be an array");
+        assert_eq!(and_runs.len(), 1);
+        assert_eq!(and_runs[0]["run_id"].as_str(), Some("run-filter-expr-a"));
+
+        let or_filter = percent_encode_query_value(
+            "(status=failed AND tag.framework=pytorch) OR (status=running AND tag.framework=tensorflow)",
+        );
+        let or_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/runs?project={project_id}&filter={or_filter}"
+                    ))
+                    .body(Body::empty())
+                    .expect("Failed to build OR filter request"),
+            )
+            .await
+            .expect("OR filter request failed");
+        assert_eq!(or_response.status(), StatusCode::OK);
+        let or_payload: serde_json::Value = serde_json::from_str(&response_text(or_response).await)
+            .expect("OR filter response should be JSON");
+        let or_runs = or_payload["runs"]
+            .as_array()
+            .expect("runs should be an array");
+        assert_eq!(or_runs.len(), 2);
+        let mut run_ids: Vec<String> = or_runs
+            .iter()
+            .filter_map(|run| run["run_id"].as_str().map(str::to_string))
+            .collect();
+        run_ids.sort();
+        assert_eq!(
+            run_ids,
+            vec![
+                "run-filter-expr-b".to_string(),
+                "run-filter-expr-c".to_string()
+            ]
+        );
+
+        let created_window_filter = percent_encode_query_value(
+            "created_at>=2000-01-01T00:00:00Z AND created_at<2999-01-01T00:00:00Z",
+        );
+        let created_window_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/runs?project={project_id}&filter={created_window_filter}"
+                    ))
+                    .body(Body::empty())
+                    .expect("Failed to build created_at filter request"),
+            )
+            .await
+            .expect("created_at filter request failed");
+        assert_eq!(created_window_response.status(), StatusCode::OK);
+        let created_window_payload: serde_json::Value =
+            serde_json::from_str(&response_text(created_window_response).await)
+                .expect("created_at filter response should be JSON");
+        assert_eq!(
+            created_window_payload["total"].as_u64(),
+            Some(3),
+            "created_at window should match all seeded runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_runs_rejects_invalid_structured_filter_expression() {
+        let app = test_app().await;
+
+        let create_project_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "structured-filter-invalid-project"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create project request"),
+            )
+            .await
+            .expect("Create project request failed");
+        assert_eq!(create_project_response.status(), StatusCode::OK);
+        let create_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_project_response).await)
+                .expect("Create project response must be JSON");
+        let project_id = create_payload["project_id"]
+            .as_str()
+            .expect("project_id should exist")
+            .to_string();
+
+        let invalid_operator_filter = percent_encode_query_value("status==running");
+        let invalid_operator_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/runs?project={project_id}&filter={invalid_operator_filter}"
+                    ))
+                    .body(Body::empty())
+                    .expect("Failed to build invalid operator filter request"),
+            )
+            .await
+            .expect("Invalid operator filter request failed");
+        assert_eq!(invalid_operator_response.status(), StatusCode::BAD_REQUEST);
+        let invalid_operator_body = response_text(invalid_operator_response).await;
+        assert!(
+            invalid_operator_body.contains("Invalid filter expression"),
+            "expected parser error in response body: {invalid_operator_body}"
+        );
+
+        let invalid_field_filter = percent_encode_query_value("unknown=123");
+        let invalid_field_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/runs?project={project_id}&filter={invalid_field_filter}"
+                    ))
+                    .body(Body::empty())
+                    .expect("Failed to build invalid field filter request"),
+            )
+            .await
+            .expect("Invalid field filter request failed");
+        assert_eq!(invalid_field_response.status(), StatusCode::BAD_REQUEST);
+        let invalid_field_body = response_text(invalid_field_response).await;
+        assert!(
+            invalid_field_body.contains("unsupported filter field"),
+            "expected unsupported field error in response body: {invalid_field_body}"
         );
     }
 

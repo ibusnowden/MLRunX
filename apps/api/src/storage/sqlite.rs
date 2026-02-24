@@ -1236,6 +1236,211 @@ impl SqliteStore {
         })
     }
 
+    fn push_run_filter_pattern_param(params_vec: &mut Vec<Box<dyn rusqlite::ToSql>>, value: &str) {
+        params_vec.push(Box::new(format!("%{value}%")));
+    }
+
+    fn append_run_filter_expr_sql(
+        expr: &RunFilterExpr,
+        params_vec: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    ) -> String {
+        match expr {
+            RunFilterExpr::Condition(condition) => {
+                Self::append_run_filter_condition_sql(condition, params_vec)
+            }
+            RunFilterExpr::And(left, right) => {
+                let left_sql = Self::append_run_filter_expr_sql(left, params_vec);
+                let right_sql = Self::append_run_filter_expr_sql(right, params_vec);
+                format!("({left_sql} AND {right_sql})")
+            }
+            RunFilterExpr::Or(left, right) => {
+                let left_sql = Self::append_run_filter_expr_sql(left, params_vec);
+                let right_sql = Self::append_run_filter_expr_sql(right, params_vec);
+                format!("({left_sql} OR {right_sql})")
+            }
+        }
+    }
+
+    fn append_run_filter_condition_sql(
+        condition: &RunFilterCondition,
+        params_vec: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    ) -> String {
+        match &condition.target {
+            RunFilterTarget::Project => match condition.op {
+                RunFilterOperator::Eq => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "(r.project_id = ? OR p.name = ?)".to_string()
+                }
+                RunFilterOperator::NotEq => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "(r.project_id != ? AND (p.name IS NULL OR p.name != ?))".to_string()
+                }
+                RunFilterOperator::Contains => {
+                    Self::push_run_filter_pattern_param(params_vec, &condition.value);
+                    Self::push_run_filter_pattern_param(params_vec, &condition.value);
+                    "(r.project_id LIKE ? OR p.name LIKE ?)".to_string()
+                }
+                _ => "1=0".to_string(),
+            },
+            RunFilterTarget::Owner => match condition.op {
+                RunFilterOperator::Eq => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "r.created_by_user_id = ?".to_string()
+                }
+                RunFilterOperator::NotEq => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "r.created_by_user_id != ?".to_string()
+                }
+                RunFilterOperator::Contains => {
+                    Self::push_run_filter_pattern_param(params_vec, &condition.value);
+                    "r.created_by_user_id LIKE ?".to_string()
+                }
+                _ => "1=0".to_string(),
+            },
+            RunFilterTarget::Status => match condition.op {
+                RunFilterOperator::Eq => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "r.status = ?".to_string()
+                }
+                RunFilterOperator::NotEq => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "r.status != ?".to_string()
+                }
+                RunFilterOperator::Contains => {
+                    Self::push_run_filter_pattern_param(params_vec, &condition.value);
+                    "r.status LIKE ?".to_string()
+                }
+                _ => "1=0".to_string(),
+            },
+            RunFilterTarget::Name => match condition.op {
+                RunFilterOperator::Eq => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "r.name = ?".to_string()
+                }
+                RunFilterOperator::NotEq => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "r.name != ?".to_string()
+                }
+                RunFilterOperator::Contains => {
+                    Self::push_run_filter_pattern_param(params_vec, &condition.value);
+                    "r.name LIKE ?".to_string()
+                }
+                _ => "1=0".to_string(),
+            },
+            RunFilterTarget::RunId => match condition.op {
+                RunFilterOperator::Eq => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "r.id = ?".to_string()
+                }
+                RunFilterOperator::NotEq => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "r.id != ?".to_string()
+                }
+                RunFilterOperator::Contains => {
+                    Self::push_run_filter_pattern_param(params_vec, &condition.value);
+                    "r.id LIKE ?".to_string()
+                }
+                _ => "1=0".to_string(),
+            },
+            RunFilterTarget::CreatedAt => match condition.op {
+                RunFilterOperator::Eq => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "r.created_at = ?".to_string()
+                }
+                RunFilterOperator::NotEq => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "r.created_at != ?".to_string()
+                }
+                RunFilterOperator::Gt => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "r.created_at > ?".to_string()
+                }
+                RunFilterOperator::Gte => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "r.created_at >= ?".to_string()
+                }
+                RunFilterOperator::Lt => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "r.created_at < ?".to_string()
+                }
+                RunFilterOperator::Lte => {
+                    params_vec.push(Box::new(condition.value.clone()));
+                    "r.created_at <= ?".to_string()
+                }
+                RunFilterOperator::Contains => {
+                    Self::push_run_filter_pattern_param(params_vec, &condition.value);
+                    "r.created_at LIKE ?".to_string()
+                }
+            },
+            RunFilterTarget::Tag { key, legacy_key } => {
+                let key_sql = if let Some(legacy) = legacy_key {
+                    params_vec.push(Box::new(key.clone()));
+                    params_vec.push(Box::new(legacy.clone()));
+                    "(t.key = ? OR t.key = ?)".to_string()
+                } else {
+                    params_vec.push(Box::new(key.clone()));
+                    "t.key = ?".to_string()
+                };
+
+                match condition.op {
+                    RunFilterOperator::Eq => {
+                        params_vec.push(Box::new(condition.value.clone()));
+                        format!(
+                            "EXISTS (SELECT 1 FROM tags t WHERE t.run_id = r.id AND {key_sql} AND t.value = ?)"
+                        )
+                    }
+                    RunFilterOperator::NotEq => {
+                        params_vec.push(Box::new(condition.value.clone()));
+                        format!(
+                            "NOT EXISTS (SELECT 1 FROM tags t WHERE t.run_id = r.id AND {key_sql} AND t.value = ?)"
+                        )
+                    }
+                    RunFilterOperator::Contains => {
+                        Self::push_run_filter_pattern_param(params_vec, &condition.value);
+                        format!(
+                            "EXISTS (SELECT 1 FROM tags t WHERE t.run_id = r.id AND {key_sql} AND t.value LIKE ?)"
+                        )
+                    }
+                    _ => "1=0".to_string(),
+                }
+            }
+            RunFilterTarget::Param { key, legacy_key } => {
+                let key_sql = if let Some(legacy) = legacy_key {
+                    params_vec.push(Box::new(key.clone()));
+                    params_vec.push(Box::new(legacy.clone()));
+                    "(p2.name = ? OR p2.name = ?)".to_string()
+                } else {
+                    params_vec.push(Box::new(key.clone()));
+                    "p2.name = ?".to_string()
+                };
+
+                match condition.op {
+                    RunFilterOperator::Eq => {
+                        params_vec.push(Box::new(condition.value.clone()));
+                        format!(
+                            "EXISTS (SELECT 1 FROM params p2 WHERE p2.run_id = r.id AND {key_sql} AND p2.value = ?)"
+                        )
+                    }
+                    RunFilterOperator::NotEq => {
+                        params_vec.push(Box::new(condition.value.clone()));
+                        format!(
+                            "NOT EXISTS (SELECT 1 FROM params p2 WHERE p2.run_id = r.id AND {key_sql} AND p2.value = ?)"
+                        )
+                    }
+                    RunFilterOperator::Contains => {
+                        Self::push_run_filter_pattern_param(params_vec, &condition.value);
+                        format!(
+                            "EXISTS (SELECT 1 FROM params p2 WHERE p2.run_id = r.id AND {key_sql} AND p2.value LIKE ?)"
+                        )
+                    }
+                    _ => "1=0".to_string(),
+                }
+            }
+        }
+    }
+
     /// List runs with optional filtering.
     pub async fn list_runs(
         &self,
@@ -1248,6 +1453,7 @@ impl SqliteStore {
         created_before: Option<&str>,
         tag_filters: &[MetadataFilter],
         param_filters: &[MetadataFilter],
+        filter_expr: Option<&RunFilterExpr>,
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<RunRow>, usize), SqliteError> {
@@ -1360,6 +1566,14 @@ impl SqliteStore {
 
             sql.push(')');
             count_sql.push(')');
+        }
+
+        if let Some(expr) = filter_expr {
+            let expr_sql = Self::append_run_filter_expr_sql(expr, &mut params_vec);
+            sql.push_str(" AND ");
+            sql.push_str(&expr_sql);
+            count_sql.push_str(" AND ");
+            count_sql.push_str(&expr_sql);
         }
 
         sql.push_str(" ORDER BY r.created_at DESC LIMIT ? OFFSET ?");
@@ -2207,6 +2421,49 @@ pub struct MetadataFilter {
     pub value: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunFilterOperator {
+    Eq,
+    NotEq,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    Contains,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunFilterTarget {
+    Project,
+    Owner,
+    Status,
+    Name,
+    RunId,
+    CreatedAt,
+    Tag {
+        key: String,
+        legacy_key: Option<String>,
+    },
+    Param {
+        key: String,
+        legacy_key: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunFilterCondition {
+    pub target: RunFilterTarget,
+    pub op: RunFilterOperator,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunFilterExpr {
+    Condition(RunFilterCondition),
+    And(Box<RunFilterExpr>, Box<RunFilterExpr>),
+    Or(Box<RunFilterExpr>, Box<RunFilterExpr>),
+}
+
 /// A row from the projects table.
 #[derive(Debug, Clone)]
 pub struct ProjectRow {
@@ -2532,6 +2789,7 @@ mod tests {
                 None,
                 &[],
                 &[],
+                None,
                 100,
                 0,
             )
