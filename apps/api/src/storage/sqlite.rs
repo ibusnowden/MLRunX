@@ -1441,6 +1441,38 @@ impl SqliteStore {
         }
     }
 
+    fn append_run_order_sql(
+        sql: &mut String,
+        sort_field: RunListSortField,
+        sort_order: RunListSortOrder,
+    ) {
+        let direction_sql = match sort_order {
+            RunListSortOrder::Asc => "ASC",
+            RunListSortOrder::Desc => "DESC",
+        };
+        let field_sql = match sort_field {
+            RunListSortField::CreatedAt => "r.created_at",
+            RunListSortField::UpdatedAt => "r.updated_at",
+            RunListSortField::Name => "COALESCE(r.name, '')",
+            RunListSortField::Status => "r.status",
+            RunListSortField::DurationSeconds => {
+                "(julianday(COALESCE(r.finished_at, r.updated_at)) - julianday(r.created_at)) * 86400.0"
+            }
+            RunListSortField::MetricsCount => "r.metrics_count",
+            RunListSortField::ParamsCount => "r.params_count",
+        };
+
+        sql.push_str(" ORDER BY ");
+        sql.push_str(field_sql);
+        sql.push(' ');
+        sql.push_str(direction_sql);
+        if !matches!(sort_field, RunListSortField::CreatedAt) {
+            sql.push_str(", r.created_at DESC");
+        }
+        sql.push_str(", r.id ");
+        sql.push_str(direction_sql);
+    }
+
     /// List runs with optional filtering.
     pub async fn list_runs(
         &self,
@@ -1454,6 +1486,8 @@ impl SqliteStore {
         tag_filters: &[MetadataFilter],
         param_filters: &[MetadataFilter],
         filter_expr: Option<&RunFilterExpr>,
+        sort_field: RunListSortField,
+        sort_order: RunListSortOrder,
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<RunRow>, usize), SqliteError> {
@@ -1576,7 +1610,8 @@ impl SqliteStore {
             count_sql.push_str(&expr_sql);
         }
 
-        sql.push_str(" ORDER BY r.created_at DESC LIMIT ? OFFSET ?");
+        Self::append_run_order_sql(&mut sql, sort_field, sort_order);
+        sql.push_str(" LIMIT ? OFFSET ?");
 
         // Get total count
         let total: usize = {
@@ -2421,6 +2456,23 @@ pub struct MetadataFilter {
     pub value: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunListSortField {
+    CreatedAt,
+    UpdatedAt,
+    Name,
+    Status,
+    DurationSeconds,
+    MetricsCount,
+    ParamsCount,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunListSortOrder {
+    Asc,
+    Desc,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunFilterOperator {
     Eq,
@@ -2790,6 +2842,8 @@ mod tests {
                 &[],
                 &[],
                 None,
+                RunListSortField::CreatedAt,
+                RunListSortOrder::Desc,
                 100,
                 0,
             )

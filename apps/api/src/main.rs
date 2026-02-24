@@ -64,8 +64,9 @@ use services::{
 use storage::{
     AuditEventRow, AuthSessionAdminRow, CreateProjectInput, CreateRunInput, MetadataFilter,
     MetricRow, ProjectRepository, ProjectRow, RunEventInput, RunEventRow, RunFilterCondition,
-    RunFilterExpr, RunFilterOperator, RunFilterTarget, RunRepository, RunRow,
-    RunStatus as PostgresRunStatus, SqliteStore, UserProjectMembershipRow, UserRow,
+    RunFilterExpr, RunFilterOperator, RunFilterTarget, RunListSortField, RunListSortOrder,
+    RunRepository, RunRow, RunStatus as PostgresRunStatus, SqliteStore, UserProjectMembershipRow,
+    UserRow,
 };
 
 /// Application state shared across handlers.
@@ -912,6 +913,41 @@ fn parse_run_filter_expr(raw: Option<&str>) -> Result<Option<RunFilterExpr>, (St
     })?;
 
     Ok(Some(expr))
+}
+
+fn parse_run_list_sort_field(raw: Option<&str>) -> Result<RunListSortField, (StatusCode, String)> {
+    let Some(value) = raw else {
+        return Ok(RunListSortField::CreatedAt);
+    };
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" | "created_at" | "created" => Ok(RunListSortField::CreatedAt),
+        "updated_at" | "updated" => Ok(RunListSortField::UpdatedAt),
+        "name" => Ok(RunListSortField::Name),
+        "status" => Ok(RunListSortField::Status),
+        "duration" | "duration_seconds" => Ok(RunListSortField::DurationSeconds),
+        "metrics_count" | "metrics" => Ok(RunListSortField::MetricsCount),
+        "params_count" | "params" => Ok(RunListSortField::ParamsCount),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            format!("Invalid sort_by value '{value}'"),
+        )),
+    }
+}
+
+fn parse_run_list_sort_order(raw: Option<&str>) -> Result<RunListSortOrder, (StatusCode, String)> {
+    let Some(value) = raw else {
+        return Ok(RunListSortOrder::Desc);
+    };
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" | "desc" | "descending" => Ok(RunListSortOrder::Desc),
+        "asc" | "ascending" => Ok(RunListSortOrder::Asc),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            format!("Invalid sort_order value '{value}'"),
+        )),
+    }
 }
 
 const fn auth_mode_label(auth: &AuthContext) -> &'static str {
@@ -4827,6 +4863,10 @@ struct ListRunsQuery {
     params: Option<String>,
     /// Structured filter expression with AND/OR and comparisons
     filter: Option<String>,
+    /// Sort field for stable pagination ordering
+    sort_by: Option<String>,
+    /// Sort order ("asc" or "desc")
+    sort_order: Option<String>,
     /// Include runs created at or after this timestamp
     created_after: Option<String>,
     /// Include runs created at or before this timestamp
@@ -4886,6 +4926,8 @@ async fn http_list_runs(
     let tag_filters = parse_metadata_filters(query.tags.as_deref(), "tags", "tags")?;
     let param_filters = parse_metadata_filters(query.params.as_deref(), "parameters", "params")?;
     let filter_expr = parse_run_filter_expr(query.filter.as_deref())?;
+    let sort_field = parse_run_list_sort_field(query.sort_by.as_deref())?;
+    let sort_order = parse_run_list_sort_order(query.sort_order.as_deref())?;
 
     let created_after = query
         .created_after
@@ -5007,6 +5049,8 @@ async fn http_list_runs(
             &tag_filters,
             &param_filters,
             filter_expr.as_ref(),
+            sort_field,
+            sort_order,
             limit,
             offset,
         )
@@ -7335,6 +7379,173 @@ mod tests {
         assert!(
             invalid_field_body.contains("unsupported filter field"),
             "expected unsupported field error in response body: {invalid_field_body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_runs_supports_sorting_and_rejects_invalid_sort_values() {
+        let app = test_app().await;
+
+        let create_project_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "sorted-list-project"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build create project request"),
+            )
+            .await
+            .expect("Create project request failed");
+        assert_eq!(create_project_response.status(), StatusCode::OK);
+        let create_payload: serde_json::Value =
+            serde_json::from_str(&response_text(create_project_response).await)
+                .expect("Create project response must be JSON");
+        let project_id = create_payload["project_id"]
+            .as_str()
+            .expect("project_id should exist")
+            .to_string();
+
+        for (run_id, run_name) in [
+            ("run-sort-2", "beta"),
+            ("run-sort-1", "alpha"),
+            ("run-sort-3", "alpha"),
+        ] {
+            let init_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/runs")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "project_id": project_id,
+                                "run_id": run_id,
+                                "name": run_name
+                            })
+                            .to_string(),
+                        ))
+                        .expect("Failed to build init request"),
+                )
+                .await
+                .expect("Init request failed");
+            assert_eq!(init_response.status(), StatusCode::OK);
+        }
+
+        let finish_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runs/run-sort-3/finish")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "status": "failed"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build finish request"),
+            )
+            .await
+            .expect("Finish request failed");
+        assert_eq!(finish_response.status(), StatusCode::OK);
+
+        let by_name_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/runs?project={project_id}&sort_by=name&sort_order=asc"
+                    ))
+                    .body(Body::empty())
+                    .expect("Failed to build sort-by-name request"),
+            )
+            .await
+            .expect("Sort-by-name request failed");
+        assert_eq!(by_name_response.status(), StatusCode::OK);
+        let by_name_payload: serde_json::Value =
+            serde_json::from_str(&response_text(by_name_response).await)
+                .expect("Sort-by-name response should be JSON");
+        let name_order: Vec<String> = by_name_payload["runs"]
+            .as_array()
+            .expect("runs should be an array")
+            .iter()
+            .filter_map(|run| run["run_id"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(
+            name_order,
+            vec![
+                "run-sort-1".to_string(),
+                "run-sort-3".to_string(),
+                "run-sort-2".to_string(),
+            ],
+            "name sort should be stable with deterministic tie-breakers"
+        );
+
+        let by_status_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/runs?project={project_id}&sort_by=status&sort_order=asc"
+                    ))
+                    .body(Body::empty())
+                    .expect("Failed to build sort-by-status request"),
+            )
+            .await
+            .expect("Sort-by-status request failed");
+        assert_eq!(by_status_response.status(), StatusCode::OK);
+        let by_status_payload: serde_json::Value =
+            serde_json::from_str(&response_text(by_status_response).await)
+                .expect("Sort-by-status response should be JSON");
+        let first_status = by_status_payload["runs"]
+            .as_array()
+            .expect("runs should be an array")
+            .first()
+            .and_then(|run| run["status"].as_str());
+        assert_eq!(first_status, Some("failed"));
+
+        let invalid_sort_by_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/runs?project={project_id}&sort_by=unknown_field"
+                    ))
+                    .body(Body::empty())
+                    .expect("Failed to build invalid sort_by request"),
+            )
+            .await
+            .expect("Invalid sort_by request failed");
+        assert_eq!(invalid_sort_by_response.status(), StatusCode::BAD_REQUEST);
+
+        let invalid_sort_order_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/runs?project={project_id}&sort_order=sideways"
+                    ))
+                    .body(Body::empty())
+                    .expect("Failed to build invalid sort_order request"),
+            )
+            .await
+            .expect("Invalid sort_order request failed");
+        assert_eq!(
+            invalid_sort_order_response.status(),
+            StatusCode::BAD_REQUEST
         );
     }
 

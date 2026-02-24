@@ -46,6 +46,9 @@ export interface ListRunsParams {
   status?: string;
   query?: string;
   tags?: string[];
+  filter?: string;
+  sortBy?: 'created_at' | 'updated_at' | 'name' | 'status' | 'duration_seconds' | 'metrics_count' | 'params_count';
+  sortOrder?: 'asc' | 'desc';
   limit?: number;
   offset?: number;
 }
@@ -566,6 +569,9 @@ export const api = {
     if (params.status) searchParams.set('status', params.status);
     if (params.query) searchParams.set('q', params.query);
     if (params.tags?.length) searchParams.set('tags', params.tags.join(','));
+    if (params.filter) searchParams.set('filter', params.filter);
+    if (params.sortBy) searchParams.set('sort_by', params.sortBy);
+    if (params.sortOrder) searchParams.set('sort_order', params.sortOrder);
     if (params.limit) searchParams.set('limit', params.limit.toString());
     if (params.offset) searchParams.set('offset', params.offset.toString());
 
