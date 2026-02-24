@@ -12,6 +12,7 @@ import json
 import logging
 import threading
 import time
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from mlrunx.batching import AdaptiveBatcher, BatchConfig, BatchStats, FlushMetrics
@@ -159,6 +160,7 @@ class FlushWorker:
         # Metrics
         self._metrics = FlushMetrics()
         self._batch_count = 0
+        self._batch_seq = 0
         self._error_count = 0
         self._spool_count = 0
 
@@ -362,9 +364,15 @@ class FlushWorker:
             elif event.type == EventType.EVENT:
                 events_data.append(event.data)
 
+        with self._lock:
+            self._batch_seq += 1
+            seq = self._batch_seq
+
         # Build batch payload
         batch: dict[str, Any] = {
             "run_id": events[0].run_id,
+            "batch_id": f"{events[0].run_id}-{seq}-{uuid.uuid4().hex}",
+            "seq": seq,
             "metrics": metrics,
             "params": params,
             "tags": tags,

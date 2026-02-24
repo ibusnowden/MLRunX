@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from unittest.mock import MagicMock, patch
 
@@ -225,6 +226,75 @@ class TestRun:
 
         run.finish()
 
+    @pytest.mark.unit
+    @patch("mlrunx.run.HttpTransport")
+    def test_run_dict_style_logging(self, mock_transport_cls: MagicMock) -> None:
+        """Dictionary-style buckets should route to existing logging APIs."""
+        mock_transport = MagicMock()
+        mock_transport.init_run.return_value = {"run_id": "test-123"}
+        mock_transport_cls.return_value = mock_transport
+
+        run = Run(project_id=TEST_PROJECT_ID)
+        run["parameters"] = {"lr": 0.001, "epochs": 3}
+        run["tags"] = {"framework": "scratch", "seed": 42}
+        run["metrics"] = {"loss": 1.23}
+
+        assert run["parameters"]["lr"] == "0.001"
+        assert run["parameters"]["epochs"] == "3"
+        assert run["tags"]["framework"] == "scratch"
+        assert run["tags"]["seed"] == "42"
+        assert run._queue.size > 0
+        run.finish()
+
+    @pytest.mark.unit
+    @patch("mlrunx.run.HttpTransport")
+    def test_run_dict_style_validation(self, mock_transport_cls: MagicMock) -> None:
+        """Dictionary-style buckets should reject unsupported shapes."""
+        mock_transport = MagicMock()
+        mock_transport.init_run.return_value = {"run_id": "test-123"}
+        mock_transport_cls.return_value = mock_transport
+
+        run = Run(project_id=TEST_PROJECT_ID)
+
+        with pytest.raises(KeyError):
+            run["unknown"] = {"a": 1}
+        with pytest.raises(TypeError):
+            run["parameters"] = "not-a-dict"  # type: ignore[assignment]
+        with pytest.raises(TypeError):
+            run["metrics"] = {"loss": True}
+        with pytest.raises(KeyError):
+            _ = run["metrics"]
+
+        run.finish()
+
+    @pytest.mark.unit
+    @patch("mlrunx.run.HttpTransport")
+    def test_run_structured_media_and_artifact_events(
+        self, mock_transport_cls: MagicMock
+    ) -> None:
+        """Image/chart/artifact helpers should emit structured event envelopes."""
+        mock_transport = MagicMock()
+        mock_transport.init_run.return_value = {"run_id": "test-123"}
+        mock_transport_cls.return_value = mock_transport
+
+        run = Run(project_id=TEST_PROJECT_ID)
+        run.log_image(name="sample", path="plots/loss.png", step=9, caption="loss curve")
+        run.log_chart(
+            name="eval_curve",
+            data={"x": [1, 2], "y": [0.5, 0.3]},
+            chart_type="line",
+            step=10,
+        )
+        run.log_artifact(path="models/model.bin", name="checkpoint")
+
+        events = [event for event in run._queue.drain() if event.type == EventType.EVENT]
+        assert len(events) == 3
+        payloads = [json.loads(event.data["message"]) for event in events]
+        assert payloads[0]["kind"] == "image"
+        assert payloads[1]["kind"] == "chart"
+        assert payloads[2]["kind"] == "artifact"
+        run.finish()
+
 
 class TestModuleAPI:
     """Tests for the module-level API."""
@@ -243,6 +313,13 @@ class TestModuleAPI:
         # Should work via module-level API
         mlrunx.log({"loss": 0.5})
         mlrunx.log_params({"lr": 0.001})
+        mlrunx.log_image(name="sample", path="plot.png")
+        mlrunx.log_chart(
+            name="line",
+            data={"x": [1, 2, 3], "y": [3, 2, 1]},
+            chart_type="line",
+        )
+        mlrunx.log_artifact(path="model.bin", name="model")
 
         mlrunx.finish()
 

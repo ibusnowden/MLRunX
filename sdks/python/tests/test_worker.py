@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from mlrunx.batching import BatchStats
 from mlrunx.config import Config
 from mlrunx.queue import Event, EventQueue, EventType
 from mlrunx.transport.base import TransportError
@@ -79,3 +80,27 @@ class TestFlushWorkerSpoolReplay:
 
         assert success is False
         assert worker.error_count == 1
+
+    @pytest.mark.unit
+    def test_send_batch_includes_idempotency_fields(self) -> None:
+        """Each batch should include batch_id and seq for API idempotency."""
+        transport = MagicMock()
+        transport.send_batch.return_value = {"status": "ok"}
+        worker = _make_worker(transport)
+
+        stats = BatchStats(event_count=1, metric_count=1, estimated_bytes=100)
+        assert worker._send_batch_with_context(
+            [_metric_event("run-1")], stats, replaying_spool=False
+        )
+        first_payload = transport.send_batch.call_args.args[0]
+        assert first_payload["run_id"] == "run-1"
+        assert isinstance(first_payload["batch_id"], str)
+        assert first_payload["batch_id"].startswith("run-1-1-")
+        assert first_payload["seq"] == 1
+
+        assert worker._send_batch_with_context(
+            [_metric_event("run-1")], stats, replaying_spool=False
+        )
+        second_payload = transport.send_batch.call_args.args[0]
+        assert second_payload["seq"] == 2
+        assert second_payload["batch_id"].startswith("run-1-2-")

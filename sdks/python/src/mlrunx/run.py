@@ -6,6 +6,7 @@ and artifacts during an experiment.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
@@ -27,6 +28,7 @@ class Run:
     - Metrics (time-series data like loss, accuracy)
     - Parameters (hyperparameters, configuration)
     - Tags (metadata for filtering/organizing)
+    - Structured log events (trainer/runtime/system)
     - Artifacts (files like models, datasets)
 
     Example:
@@ -92,6 +94,7 @@ class Run:
         self._name = name or self._generate_name()
         self._run_id = run_id or str(uuid.uuid4())
         self._tags = tags or {}
+        self._params: dict[str, str] = {}
         self._finished = False
         self._offline = False
         self._step = 0
@@ -316,6 +319,27 @@ class Run:
         if not self._queue.put(event):
             logger.warning("Queue full, run event dropped")
 
+    @staticmethod
+    def _serialize_structured_message(
+        kind: str,
+        payload: dict[str, Any],
+        max_chars: int = 1800,
+    ) -> str:
+        envelope = {"kind": kind, "payload": payload}
+        encoded = json.dumps(envelope, ensure_ascii=True, separators=(",", ":"), default=str)
+        if len(encoded) <= max_chars:
+            return encoded
+
+        preview_len = max(0, max_chars - 220)
+        preview = encoded[:preview_len]
+        truncated = {
+            "kind": kind,
+            "truncated": True,
+            "original_size": len(encoded),
+            "preview": preview,
+        }
+        return json.dumps(truncated, ensure_ascii=True, separators=(",", ":"))
+
     def log_params(self, params: dict[str, Any]) -> None:
         """Log parameters/hyperparameters (non-blocking).
 
@@ -330,12 +354,14 @@ class Run:
             return
 
         for name, value in params.items():
+            value_text = str(value)
+            self._params[name] = value_text
             event = Event(
                 type=EventType.PARAM,
                 run_id=self._run_id,
                 data={
                     "name": name,
-                    "value": str(value),
+                    "value": value_text,
                 },
             )
             if not self._queue.put(event):
@@ -373,20 +399,129 @@ class Run:
         path: str,
         name: str | None = None,
         artifact_type: str = "file",
+        metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Log an artifact (placeholder for future implementation).
+        """Log artifact metadata as a structured run event.
 
         Args:
             path: Local path to the artifact file
             name: Name for the artifact (defaults to filename)
             artifact_type: Type of artifact ("file", "model", "dataset", etc.)
+            metadata: Optional artifact metadata payload
         """
         if self._finished:
             logger.warning("Attempting to log to a finished run")
             return
 
-        # TODO: Implement artifact upload with presigned URLs
-        logger.info(f"Artifact logging not yet implemented: {path}")
+        artifact_name = name or path
+        message = self._serialize_structured_message(
+            "artifact",
+            {
+                "name": artifact_name,
+                "path": path,
+                "artifact_type": artifact_type,
+                "metadata": metadata or {},
+            },
+        )
+        self.log_event(message, level="info", source="artifact")
+
+    def log_image(
+        self,
+        name: str,
+        path: str,
+        step: int | None = None,
+        caption: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Log image metadata as a structured run event."""
+        if self._finished:
+            logger.warning("Attempting to log to a finished run")
+            return
+
+        message = self._serialize_structured_message(
+            "image",
+            {
+                "name": name,
+                "path": path,
+                "caption": caption,
+                "metadata": metadata or {},
+            },
+        )
+        self.log_event(message, level="info", source="image", step=step)
+
+    def log_chart(
+        self,
+        name: str,
+        data: dict[str, Any],
+        chart_type: str = "custom",
+        step: int | None = None,
+        layout: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Log chart metadata/spec payload as a structured run event."""
+        if self._finished:
+            logger.warning("Attempting to log to a finished run")
+            return
+
+        message = self._serialize_structured_message(
+            "chart",
+            {
+                "name": name,
+                "chart_type": chart_type,
+                "data": data,
+                "layout": layout or {},
+                "metadata": metadata or {},
+            },
+        )
+        self.log_event(message, level="info", source="chart", step=step)
+
+    def __setitem__(self, bucket: str, value: Any) -> None:
+        """Dictionary-style logging shortcuts.
+
+        Supported buckets:
+        - ``run["parameters"] = {...}``
+        - ``run["params"] = {...}``
+        - ``run["tags"] = {...}``
+        - ``run["metrics"] = {...}``
+        """
+        if not isinstance(value, dict):
+            raise TypeError(f"run['{bucket}'] expects a dictionary value")
+
+        key = bucket.strip().lower()
+        if key in {"parameters", "params"}:
+            self.log_params(value)
+            return
+        if key == "tags":
+            normalized = {str(k): str(v) for k, v in value.items()}
+            self.log_tags(normalized)
+            return
+        if key in {"metrics", "metric"}:
+            numeric_values: dict[str, float | int] = {}
+            for metric_name, metric_value in value.items():
+                if isinstance(metric_value, bool) or not isinstance(metric_value, (int, float)):
+                    raise TypeError(
+                        f"run['{bucket}'] accepts numeric metric values only; "
+                        f"got {type(metric_value).__name__} for '{metric_name}'"
+                    )
+                numeric_values[str(metric_name)] = metric_value
+            self.log(numeric_values)
+            return
+
+        raise KeyError(
+            f"Unsupported run bucket '{bucket}'. Use one of: "
+            "parameters, params, tags, metrics."
+        )
+
+    def __getitem__(self, bucket: str) -> dict[str, str]:
+        """Read local run metadata caches for dictionary-style usage."""
+        key = bucket.strip().lower()
+        if key in {"parameters", "params"}:
+            return dict(self._params)
+        if key == "tags":
+            return dict(self._tags)
+        raise KeyError(
+            f"Unsupported run bucket '{bucket}'. Use one of: parameters, params, tags."
+        )
 
     def finish(self, status: str = "finished") -> None:
         """Finish the run and flush all pending data.

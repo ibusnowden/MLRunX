@@ -30,6 +30,8 @@ Example usage:
         # Auto-finishes on exit
 """
 
+import atexit
+
 __version__ = "0.1.3"
 
 from typing import Any
@@ -46,11 +48,35 @@ __all__ = [
     "Config",
     "configure",
     "get_config",
+    "log",
+    "log_params",
     "log_event",
+    "log_image",
+    "log_chart",
+    "log_artifact",
+    "finish",
+    "get_run",
 ]
 
 # Global active run (for convenience API)
 _active_run: Run | None = None
+
+
+def _shutdown_active_run() -> None:
+    """Best-effort flush for interpreter shutdown."""
+    global _active_run
+    if _active_run is None or _active_run.is_finished:
+        return
+    try:
+        _active_run.finish()
+    except Exception:
+        # Shutdown path should never crash interpreter teardown.
+        pass
+    finally:
+        _active_run = None
+
+
+atexit.register(_shutdown_active_run)
 
 
 def init(
@@ -153,6 +179,57 @@ def log_event(
     if _active_run is None:
         raise RuntimeError("No active run. Call mlrunx.init() first.")
     _active_run.log_event(message, level=level, step=step, source=source)
+
+
+def log_image(
+    name: str,
+    path: str,
+    step: int | None = None,
+    caption: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Log image metadata to the active run (convenience function)."""
+    if _active_run is None:
+        raise RuntimeError("No active run. Call mlrunx.init() first.")
+    _active_run.log_image(name=name, path=path, step=step, caption=caption, metadata=metadata)
+
+
+def log_chart(
+    name: str,
+    data: dict[str, Any],
+    chart_type: str = "custom",
+    step: int | None = None,
+    layout: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Log chart payload to the active run (convenience function)."""
+    if _active_run is None:
+        raise RuntimeError("No active run. Call mlrunx.init() first.")
+    _active_run.log_chart(
+        name=name,
+        data=data,
+        chart_type=chart_type,
+        step=step,
+        layout=layout,
+        metadata=metadata,
+    )
+
+
+def log_artifact(
+    path: str,
+    name: str | None = None,
+    artifact_type: str = "file",
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Log artifact metadata to the active run (convenience function)."""
+    if _active_run is None:
+        raise RuntimeError("No active run. Call mlrunx.init() first.")
+    _active_run.log_artifact(
+        path=path,
+        name=name,
+        artifact_type=artifact_type,
+        metadata=metadata,
+    )
 
 
 def finish() -> None:
