@@ -71,12 +71,6 @@ function smoothData(data: number[], factor: number): number[] {
   return smoothed;
 }
 
-function resolveThemeColor(variable: string, fallback: string): string {
-  if (typeof window === 'undefined') return fallback;
-  const value = window.getComputedStyle(document.documentElement).getPropertyValue(variable).trim();
-  return value || fallback;
-}
-
 export function UPlotChart({
   xData,
   series,
@@ -99,16 +93,11 @@ export function UPlotChart({
   const [dimensions, setDimensions] = useState({ width: 0, height });
   const [hoveredSeries, setHoveredSeries] = useState<number | null>(null);
 
-  // Resolve theme colors from CSS vars so dark/light updates stay centralized in globals.css.
-  const { bgColor, gridColor, axisColor, textColor } = useMemo(
-    () => ({
-      bgColor: resolveThemeColor('--chart-bg', darkTheme ? '#000000' : '#ffffff'),
-      gridColor: resolveThemeColor('--chart-grid', darkTheme ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.06)'),
-      axisColor: resolveThemeColor('--chart-axis', darkTheme ? '#8a909b' : '#9ca3af'),
-      textColor: resolveThemeColor('--chart-text', darkTheme ? '#dce2ea' : '#374151'),
-    }),
-    [darkTheme]
-  );
+  // Keep chart theme tied directly to the theme state to avoid DOM class timing races on toggle.
+  const bgColor = darkTheme ? '#000000' : '#ffffff';
+  const gridColor = darkTheme ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.06)';
+  const axisColor = darkTheme ? '#8a909b' : '#9ca3af';
+  const textColor = darkTheme ? '#dce2ea' : '#374151';
   const seriesColorScale = useMemo(
     () => createSeriesColorScale(series.map((entry, index) => entry.label || `series-${index}`), darkTheme),
     [series, darkTheme]
