@@ -37,6 +37,7 @@ type EventLevelFilter = 'all' | 'debug' | 'info' | 'warn' | 'error';
 
 type MetricChartView = {
   name: string;
+  displayName: string;
   xData: number[];
   series: ChartSeries[];
 };
@@ -205,6 +206,10 @@ function humanizeKey(raw: string): string {
   return raw
     .replace(/[_/.-]+/g, ' ')
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function metricDisplayName(metricName: string, aliasMap: Record<string, string>): string {
+  return aliasMap[metricName]?.trim() || metricName;
 }
 
 function buildTagIndex(tags: Record<string, string>): Map<string, string> {
@@ -546,6 +551,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<MetricSeries[]>([]);
+  const [metricAliases, setMetricAliases] = useState<Record<string, string>>({});
   const [availableMetrics, setAvailableMetrics] = useState<string[]>([]);
   const [metricsLoading, setMetricsLoading] = useState(true);
   const [metricsError, setMetricsError] = useState<string | null>(null);
@@ -601,6 +607,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     try {
       const response = await api.getMetrics(runId, { maxPoints: METRIC_FETCH_MAX_POINTS });
       setAvailableMetrics(response.available_metrics);
+      setMetricAliases(response.metric_aliases ?? {});
       setMetrics(response.series);
     } catch (err) {
       setMetricsError(err instanceof Error ? err.message : 'Failed to load metrics');
@@ -672,11 +679,17 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
   );
 
   const perMetricCharts = useMemo<MetricChartView[]>(() => {
-    return metrics.map((series) => ({
-      name: series.name,
-      ...alignSeriesForChart([series]),
-    }));
-  }, [metrics]);
+    return metrics.map((series) => {
+      const displayName = metricDisplayName(series.name, metricAliases);
+      const aligned = alignSeriesForChart([series]);
+      return {
+        name: series.name,
+        displayName,
+        xData: aligned.xData,
+        series: aligned.series.map((entry) => ({ ...entry, label: displayName })),
+      };
+    });
+  }, [metricAliases, metrics]);
 
   const metricChartGroups = useMemo<MetricChartGroup[]>(() => {
     if (perMetricCharts.length === 0) return [];
@@ -1053,7 +1066,14 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
                         <div className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-accent-subtle text-accent">
                           <CompareIcon />
                         </div>
-                        <h2 className="text-lg font-semibold text-text-primary">{chart.name}</h2>
+                        <h2 className="text-lg font-semibold text-text-primary">
+                          {chart.displayName}
+                          {chart.displayName !== chart.name && (
+                            <span className="ml-2 rounded border border-border bg-surface-secondary px-2 py-0.5 font-mono text-xs font-normal text-text-muted">
+                              {chart.name}
+                            </span>
+                          )}
+                        </h2>
                       </div>
                       <div className="p-4">
                         <div className="overflow-hidden rounded-xl border border-border">
@@ -1061,7 +1081,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
                             xData={chart.xData}
                             series={chart.series}
                             xLabel="Step"
-                            yLabel={chart.name}
+                            yLabel={chart.displayName}
                             height={280}
                             interactive={true}
                             darkTheme={isDark}

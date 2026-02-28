@@ -63,10 +63,10 @@ use services::{
 };
 use storage::{
     AuditEventRow, AuthSessionAdminRow, CreateProjectInput, CreateRunInput, MetadataFilter,
-    MetricRow, ProjectRepository, ProjectRow, RunEventInput, RunEventRow, RunFilterCondition,
-    RunFilterExpr, RunFilterOperator, RunFilterTarget, RunListSortField, RunListSortOrder,
-    RunRepository, RunRow, RunStatus as PostgresRunStatus, SqliteStore, UserProjectMembershipRow,
-    UserRow,
+    MetricAliasRow, MetricRow, ProjectRepository, ProjectRow, RunEventInput, RunEventRow,
+    RunFilterCondition, RunFilterExpr, RunFilterOperator, RunFilterTarget, RunListSortField,
+    RunListSortOrder, RunRepository, RunRow, RunStatus as PostgresRunStatus, SqliteStore,
+    UserProjectMembershipRow, UserRow,
 };
 
 /// Application state shared across handlers.
@@ -1240,6 +1240,43 @@ async fn require_ui_project_owner(
     Ok(())
 }
 
+async fn require_ui_project_editor_or_owner(
+    state: &AppState,
+    auth: &AuthContext,
+    project_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    if auth.is_dev_mode || !auth.is_ui_jwt() {
+        return Ok(());
+    }
+
+    let user_id = auth_user_id(auth).ok_or_else(|| {
+        (
+            StatusCode::FORBIDDEN,
+            "Unable to resolve user identity for project authorization.".to_string(),
+        )
+    })?;
+
+    let memberships = state
+        .sqlite_store
+        .list_active_project_memberships(&user_id)
+        .await
+        .map_err(internal_error)?;
+
+    let can_write_project = memberships.iter().any(|membership| {
+        membership.project_id == project_id
+            && (membership.role == "owner" || membership.role == "editor")
+    });
+
+    if !can_write_project {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access denied: only project owners or editors can update metric aliases.".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn require_api_key_run_owner_for_mutation(
     auth: &AuthContext,
     run: &RunRow,
@@ -1792,11 +1829,42 @@ struct ListProjectsResponse {
     projects: Vec<ProjectResponse>,
 }
 
+#[derive(Debug, Deserialize)]
+struct UpsertMetricAliasRequest {
+    metric_name: String,
+    display_name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MetricAliasResponse {
+    project_id: String,
+    metric_name: String,
+    display_name: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ListMetricAliasesResponse {
+    project_id: String,
+    aliases: Vec<MetricAliasResponse>,
+}
+
 fn project_response_from_row(row: ProjectRow) -> ProjectResponse {
     ProjectResponse {
         project_id: row.id,
         name: row.name,
         description: row.description,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
+fn metric_alias_response_from_row(row: MetricAliasRow) -> MetricAliasResponse {
+    MetricAliasResponse {
+        project_id: row.project_id,
+        metric_name: row.metric_name,
+        display_name: row.display_name,
         created_at: row.created_at,
         updated_at: row.updated_at,
     }
@@ -1961,6 +2029,210 @@ async fn http_create_project(
     .await;
 
     Ok(Json(project_response_from_row(row)))
+}
+
+async fn http_list_project_metric_aliases(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+) -> Result<Json<ListMetricAliasesResponse>, (StatusCode, String)> {
+    validate_path_id(&project_id, "project_id")?;
+    state
+        .sqlite_store
+        .get_project_by_id(&project_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Project not found: '{project_id}'"),
+            )
+        })?;
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Read,
+        Some(&project_id),
+        None,
+        "project.metric_aliases.read",
+        "project",
+        Some(&project_id),
+    )
+    .await?;
+
+    let aliases = state
+        .sqlite_store
+        .list_metric_aliases(&project_id)
+        .await
+        .map_err(internal_error)?
+        .into_iter()
+        .map(metric_alias_response_from_row)
+        .collect();
+
+    Ok(Json(ListMetricAliasesResponse {
+        project_id,
+        aliases,
+    }))
+}
+
+async fn http_upsert_project_metric_alias(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Json(req): Json<UpsertMetricAliasRequest>,
+) -> Result<Json<MetricAliasResponse>, (StatusCode, String)> {
+    validate_path_id(&project_id, "project_id")?;
+    state
+        .sqlite_store
+        .get_project_by_id(&project_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Project not found: '{project_id}'"),
+            )
+        })?;
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Write,
+        Some(&project_id),
+        None,
+        "project.metric_aliases.write",
+        "project",
+        Some(&project_id),
+    )
+    .await?;
+    require_ui_project_editor_or_owner(&state, &auth, &project_id).await?;
+
+    let metric_name = req.metric_name.trim();
+    if metric_name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "metric_name is required.".to_string(),
+        ));
+    }
+    if metric_name.len() > 256 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "metric_name must be <= 256 characters.".to_string(),
+        ));
+    }
+
+    let display_name = req.display_name.trim();
+    if display_name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "display_name is required.".to_string(),
+        ));
+    }
+    if display_name.len() > 128 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "display_name must be <= 128 characters.".to_string(),
+        ));
+    }
+
+    let row = state
+        .sqlite_store
+        .upsert_metric_alias(&project_id, metric_name, display_name)
+        .await
+        .map_err(internal_error)?;
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        Some(&project_id),
+        None,
+        "project.metric_aliases.upsert",
+        "project",
+        Some(&project_id),
+        "success",
+        serde_json::json!({
+            "metric_name": metric_name,
+            "display_name": display_name,
+            "auth_mode": auth_mode_label(&auth),
+        }),
+    )
+    .await;
+
+    Ok(Json(metric_alias_response_from_row(row)))
+}
+
+async fn http_delete_project_metric_alias(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    axum::extract::Path((project_id, metric_name)): axum::extract::Path<(String, String)>,
+) -> Result<Json<AdminMutationResponse>, (StatusCode, String)> {
+    validate_path_id(&project_id, "project_id")?;
+    state
+        .sqlite_store
+        .get_project_by_id(&project_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Project not found: '{project_id}'"),
+            )
+        })?;
+    if metric_name.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "metric_name is required.".to_string(),
+        ));
+    }
+
+    require_endpoint_access(
+        &state,
+        &auth,
+        EndpointRbacTier::Write,
+        Some(&project_id),
+        None,
+        "project.metric_aliases.delete",
+        "project",
+        Some(&project_id),
+    )
+    .await?;
+    require_ui_project_editor_or_owner(&state, &auth, &project_id).await?;
+
+    let deleted = state
+        .sqlite_store
+        .delete_metric_alias(&project_id, metric_name.trim())
+        .await
+        .map_err(internal_error)?;
+
+    if !deleted {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!(
+                "Metric alias '{}' not found in project '{}'.",
+                metric_name.trim(),
+                project_id
+            ),
+        ));
+    }
+
+    emit_audit_event(
+        &state,
+        Some(&auth),
+        Some(&project_id),
+        None,
+        "project.metric_aliases.delete",
+        "project",
+        Some(&project_id),
+        "success",
+        serde_json::json!({
+            "metric_name": metric_name.trim(),
+            "auth_mode": auth_mode_label(&auth),
+        }),
+    )
+    .await;
+
+    Ok(Json(AdminMutationResponse {
+        status: "ok".to_string(),
+    }))
 }
 
 async fn http_delete_project(
@@ -4719,7 +4991,6 @@ async fn http_get_shared_run(
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             _ => internal_error(e),
         })?;
-
     // Fetch the run
     let run = state
         .sqlite_store
@@ -4740,7 +5011,6 @@ async fn http_get_shared_run(
         .get_metric_names(&share.run_id)
         .await
         .unwrap_or_default();
-
     Ok(Json(SharedRunResponse {
         run_id: run.id,
         project_id: run.project_id,
@@ -4775,6 +5045,11 @@ async fn http_get_shared_metrics(
             storage::SqliteError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             _ => internal_error(e),
         })?;
+    let run = state
+        .sqlite_store
+        .get_run(&share.run_id)
+        .await
+        .map_err(internal_error)?;
 
     // Parse metric names
     let names: Vec<String> = if query.names.is_empty() {
@@ -4797,6 +5072,11 @@ async fn http_get_shared_metrics(
     let available_metrics = state
         .sqlite_store
         .get_metric_names(&share.run_id)
+        .await
+        .unwrap_or_default();
+    let metric_aliases = state
+        .sqlite_store
+        .get_metric_alias_map(&run.project_id)
         .await
         .unwrap_or_default();
 
@@ -4824,6 +5104,7 @@ async fn http_get_shared_metrics(
         run_id: share.run_id,
         series,
         available_metrics,
+        metric_aliases,
     }))
 }
 
@@ -5481,6 +5762,11 @@ async fn http_get_metrics(
         .get_metric_names(&run_id)
         .await
         .unwrap_or_default();
+    let metric_aliases = state
+        .sqlite_store
+        .get_metric_alias_map(&run.project_id)
+        .await
+        .unwrap_or_default();
 
     // Convert SQLite format to API format
     let series: Vec<services::MetricSeries> = sqlite_series
@@ -5507,6 +5793,7 @@ async fn http_get_metrics(
         run_id,
         series,
         available_metrics,
+        metric_aliases,
     }))
 }
 
@@ -5738,6 +6025,7 @@ struct RunCompareData {
     run_name: Option<String>,
     status: String,
     series: Vec<services::MetricSeries>,
+    metric_aliases: std::collections::HashMap<String, String>,
 }
 
 /// Response for comparing runs.
@@ -5830,6 +6118,10 @@ async fn http_compare_runs(
     // Collect data for each run
     let mut runs_data = Vec::new();
     let mut all_metric_sets: Vec<std::collections::HashSet<String>> = Vec::new();
+    let mut alias_cache_by_project: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, String>,
+    > = std::collections::HashMap::new();
 
     for run_id in &paged_run_ids {
         let run = state
@@ -5897,11 +6189,25 @@ async fn http_compare_runs(
         let metric_set: std::collections::HashSet<String> = available.into_iter().collect();
         all_metric_sets.push(metric_set);
 
+        let metric_aliases =
+            if let Some(cached_aliases) = alias_cache_by_project.get(&run.project_id) {
+                cached_aliases.clone()
+            } else {
+                let aliases = state
+                    .sqlite_store
+                    .get_metric_alias_map(&run.project_id)
+                    .await
+                    .unwrap_or_default();
+                alias_cache_by_project.insert(run.project_id.clone(), aliases.clone());
+                aliases
+            };
+
         runs_data.push(RunCompareData {
             run_id: run_id.clone(),
             run_name: run.name.clone(),
             status: run.status.clone(),
             series,
+            metric_aliases,
         });
     }
 
@@ -6238,6 +6544,14 @@ fn build_http_router(state: AppState) -> Router {
             get(http_list_projects).post(http_create_project),
         )
         .route("/api/v1/projects/{project_id}", delete(http_delete_project))
+        .route(
+            "/api/v1/projects/{project_id}/metric-aliases",
+            get(http_list_project_metric_aliases).post(http_upsert_project_metric_alias),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/metric-aliases/{metric_name}",
+            delete(http_delete_project_metric_alias),
+        )
         // Platform admin control-plane endpoints (global admin only)
         .route("/api/v1/admin/users", get(http_admin_list_users))
         .route(
@@ -8747,6 +9061,33 @@ mod tests {
         let harness = ui_session_harness_with_role("owner").await;
         let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
         let cookies = login_ui_session(&harness.app, &jwt).await;
+        let alias_uri = format!(
+            "/api/v1/projects/{}/metric-aliases",
+            harness.primary_project_id
+        );
+
+        let alias_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(alias_uri.as_str())
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "metric_name": "loss",
+                            "display_name": "Training Loss"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build metric alias request"),
+            )
+            .await
+            .expect("Metric alias request failed");
+        assert_eq!(alias_response.status(), StatusCode::OK);
 
         let create_key_response = harness
             .app
@@ -8887,6 +9228,10 @@ mod tests {
             available_metrics
                 .iter()
                 .any(|name| name.as_str().map_or(false, |value| value == "loss"))
+        );
+        assert_eq!(
+            metrics_payload["metric_aliases"]["loss"].as_str(),
+            Some("Training Loss")
         );
     }
 

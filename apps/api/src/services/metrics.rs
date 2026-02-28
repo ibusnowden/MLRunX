@@ -68,6 +68,9 @@ pub struct MetricsQueryResponse {
     pub series: Vec<MetricSeries>,
     /// Available metric names for this run
     pub available_metrics: Vec<String>,
+    /// Optional project alias map keyed by raw metric name.
+    #[serde(default)]
+    pub metric_aliases: HashMap<String, String>,
 }
 
 /// Downsample a series of points to a target number of points.

@@ -72,6 +72,7 @@ export interface MetricsResponse {
   run_id: string;
   series: MetricSeries[];
   available_metrics: string[];
+  metric_aliases?: Record<string, string>;
 }
 
 export interface RunDetail extends Run {
@@ -176,6 +177,19 @@ export interface ProjectInfo {
 
 export interface ListProjectsResponse {
   projects: ProjectInfo[];
+}
+
+export interface MetricAlias {
+  project_id: string;
+  metric_name: string;
+  display_name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ListMetricAliasesResponse {
+  project_id: string;
+  aliases: MetricAlias[];
 }
 
 export interface AdminUser {
@@ -478,6 +492,36 @@ export const api = {
     );
   },
 
+  async listMetricAliases(projectId: string): Promise<ListMetricAliasesResponse> {
+    return fetchApi<ListMetricAliasesResponse>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/metric-aliases`,
+      {},
+      { skipApiKey: true }
+    );
+  },
+
+  async upsertMetricAlias(
+    projectId: string,
+    request: { metric_name: string; display_name: string }
+  ): Promise<MetricAlias> {
+    return fetchApi<MetricAlias>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/metric-aliases`,
+      {
+        method: 'POST',
+        body: JSON.stringify(request),
+      },
+      { skipApiKey: true }
+    );
+  },
+
+  async deleteMetricAlias(projectId: string, metricName: string): Promise<{ status: string }> {
+    return fetchApi<{ status: string }>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/metric-aliases/${encodeURIComponent(metricName)}`,
+      { method: 'DELETE' },
+      { skipApiKey: true }
+    );
+  },
+
   async listAdminUsers(): Promise<AdminListUsersResponse> {
     return fetchApi<AdminListUsersResponse>('/api/v1/admin/users', {}, { preferUiSession: true });
   },
@@ -645,6 +689,7 @@ export const api = {
       run_name: string | null;
       status: string;
       series: MetricSeries[];
+      metric_aliases?: Record<string, string>;
     }>;
     common_metrics: string[];
     alignment: string;

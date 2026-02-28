@@ -3,6 +3,7 @@
 //! Provides persistent storage without requiring Docker/ClickHouse/PostgreSQL.
 //! Data is stored in a single `SQLite` file for easy development and testing.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -11,8 +12,8 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-const SQLITE_SCHEMA_VERSION: &str = "2026-02-14.1";
-const SQLITE_SCHEMA_DESCRIPTION: &str = "adds is_platform_admin column to users table";
+const SQLITE_SCHEMA_VERSION: &str = "2026-02-28.1";
+const SQLITE_SCHEMA_DESCRIPTION: &str = "adds project-scoped metric alias table";
 
 /// Errors that can occur in `SQLite` operations.
 #[derive(Error, Debug)]
@@ -125,6 +126,16 @@ impl SqliteStore {
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
+            CREATE TABLE IF NOT EXISTS metric_aliases (
+                project_id TEXT NOT NULL,
+                metric_name TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY(project_id, metric_name),
+                FOREIGN KEY (project_id) REFERENCES projects(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_metric_aliases_project_id ON metric_aliases(project_id);
 
             -- Runs table
             CREATE TABLE IF NOT EXISTS runs (
@@ -590,6 +601,10 @@ impl SqliteStore {
         )?;
         tx.execute(
             "DELETE FROM project_memberships WHERE project_id = ?1",
+            params![project_id],
+        )?;
+        tx.execute(
+            "DELETE FROM metric_aliases WHERE project_id = ?1",
             params![project_id],
         )?;
         tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
@@ -1889,6 +1904,94 @@ impl SqliteStore {
         Ok(names?)
     }
 
+    /// List metric aliases configured for a project.
+    pub async fn list_metric_aliases(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<MetricAliasRow>, SqliteError> {
+        let conn = self.conn.lock().await;
+
+        let mut stmt = conn.prepare(
+            r"SELECT project_id, metric_name, display_name, created_at, updated_at
+               FROM metric_aliases
+               WHERE project_id = ?1
+               ORDER BY metric_name ASC",
+        )?;
+        let rows = stmt.query_map(params![project_id], |row| {
+            Ok(MetricAliasRow {
+                project_id: row.get(0)?,
+                metric_name: row.get(1)?,
+                display_name: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?;
+
+        let aliases: Result<Vec<_>, _> = rows.collect();
+        Ok(aliases?)
+    }
+
+    /// Get metric aliases for a project as a map keyed by metric name.
+    pub async fn get_metric_alias_map(
+        &self,
+        project_id: &str,
+    ) -> Result<HashMap<String, String>, SqliteError> {
+        let aliases = self.list_metric_aliases(project_id).await?;
+        Ok(aliases
+            .into_iter()
+            .map(|alias| (alias.metric_name, alias.display_name))
+            .collect())
+    }
+
+    /// Create or update a project metric alias.
+    pub async fn upsert_metric_alias(
+        &self,
+        project_id: &str,
+        metric_name: &str,
+        display_name: &str,
+    ) -> Result<MetricAliasRow, SqliteError> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            r"INSERT INTO metric_aliases (project_id, metric_name, display_name, created_at, updated_at)
+               VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))
+               ON CONFLICT(project_id, metric_name)
+               DO UPDATE SET display_name = excluded.display_name, updated_at = datetime('now')",
+            params![project_id, metric_name, display_name],
+        )?;
+
+        let row = conn.query_row(
+            r"SELECT project_id, metric_name, display_name, created_at, updated_at
+               FROM metric_aliases
+               WHERE project_id = ?1 AND metric_name = ?2",
+            params![project_id, metric_name],
+            |row| {
+                Ok(MetricAliasRow {
+                    project_id: row.get(0)?,
+                    metric_name: row.get(1)?,
+                    display_name: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            },
+        )?;
+
+        Ok(row)
+    }
+
+    /// Delete a project metric alias by metric name.
+    pub async fn delete_metric_alias(
+        &self,
+        project_id: &str,
+        metric_name: &str,
+    ) -> Result<bool, SqliteError> {
+        let conn = self.conn.lock().await;
+        let deleted = conn.execute(
+            "DELETE FROM metric_aliases WHERE project_id = ?1 AND metric_name = ?2",
+            params![project_id, metric_name],
+        )?;
+        Ok(deleted > 0)
+    }
+
     // =========================================================================
     // Run event operations
     // =========================================================================
@@ -2549,6 +2652,16 @@ pub struct ProjectMembershipRow {
     pub role: String,
 }
 
+/// A metric alias row scoped to a project.
+#[derive(Debug, Clone)]
+pub struct MetricAliasRow {
+    pub project_id: String,
+    pub metric_name: String,
+    pub display_name: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// A user row with aggregate metadata for control-plane views.
 #[derive(Debug, Clone)]
 pub struct UserRow {
@@ -3017,6 +3130,42 @@ mod tests {
         assert_eq!(series.len(), 1);
         assert!(series[0].points.len() <= 10);
         assert!(series[0].downsampled);
+    }
+
+    #[tokio::test]
+    async fn test_metric_alias_lifecycle() {
+        let store = create_test_store().await;
+        let project_id = store
+            .get_or_create_project("metric-alias-project")
+            .await
+            .unwrap();
+
+        let created = store
+            .upsert_metric_alias(&project_id, "train/loss", "Training Loss")
+            .await
+            .unwrap();
+        assert_eq!(created.project_id, project_id);
+        assert_eq!(created.metric_name, "train/loss");
+        assert_eq!(created.display_name, "Training Loss");
+
+        let aliases = store.list_metric_aliases(&project_id).await.unwrap();
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].metric_name, "train/loss");
+
+        store
+            .upsert_metric_alias(&project_id, "train/loss", "Loss")
+            .await
+            .unwrap();
+        let alias_map = store.get_metric_alias_map(&project_id).await.unwrap();
+        assert_eq!(alias_map.get("train/loss"), Some(&"Loss".to_string()));
+
+        let deleted = store
+            .delete_metric_alias(&project_id, "train/loss")
+            .await
+            .unwrap();
+        assert!(deleted);
+        let aliases_after_delete = store.list_metric_aliases(&project_id).await.unwrap();
+        assert!(aliases_after_delete.is_empty());
     }
 
     #[tokio::test]

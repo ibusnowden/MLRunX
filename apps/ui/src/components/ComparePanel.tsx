@@ -32,6 +32,7 @@ interface CompareData {
   run_name: string | null;
   status: string;
   series: MetricSeries[];
+  metric_aliases?: Record<string, string>;
 }
 
 interface ComparePanelProps {
@@ -125,6 +126,22 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
     () => createSeriesColorScale(seriesLabels, isDark),
     [seriesLabels, isDark]
   );
+  const metricDisplayNameByRaw = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const run of runs) {
+      const aliasMap = run.metric_aliases ?? {};
+      for (const [metricName, alias] of Object.entries(aliasMap)) {
+        const normalized = alias.trim();
+        if (!normalized || map.has(metricName)) continue;
+        map.set(metricName, normalized);
+      }
+    }
+    return map;
+  }, [runs]);
+  const selectedMetricLabel = useMemo(
+    () => metricDisplayNameByRaw.get(selectedMetric) ?? selectedMetric,
+    [metricDisplayNameByRaw, selectedMetric]
+  );
 
   // Get series for selected metric from each run
   const comparisonData = runs.map((run, idx) => {
@@ -206,7 +223,7 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
           >
             {commonMetrics.map((name) => (
               <option key={name} value={name}>
-                {name}
+                {metricDisplayNameByRaw.get(name) || name}
               </option>
             ))}
           </select>
@@ -235,18 +252,18 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
         </div>
       ) : sortedSteps.length === 0 ? (
         <div className="text-center py-8 text-text-muted">
-          No data points available for {selectedMetric}
+          No data points available for {selectedMetricLabel}
         </div>
       ) : (
         <div>
           {/* Inline chart with expand button */}
           <div className="rounded-lg border border-border overflow-hidden relative" data-compare-chart>
             <UPlotChart
-              title={`${selectedMetric} across runs`}
+              title={`${selectedMetricLabel} across runs`}
               xData={sortedSteps}
               series={chartSeries}
               xLabel="Step"
-              yLabel={selectedMetric}
+              yLabel={selectedMetricLabel}
               height={320}
               interactive={true}
               darkTheme={isDark}
@@ -269,7 +286,7 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
               <div className="flex items-center justify-between px-6 py-3 border-b border-border shrink-0">
                 <div className="flex items-center gap-4">
                   <h2 className="text-lg font-semibold text-text-primary">
-                    {selectedMetric} across runs
+                    {selectedMetricLabel} across runs
                   </h2>
                   {commonMetrics.length > 1 && (
                     <select
@@ -279,7 +296,7 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
                     >
                       {commonMetrics.map((name) => (
                         <option key={name} value={name}>
-                          {name}
+                          {metricDisplayNameByRaw.get(name) || name}
                         </option>
                       ))}
                     </select>

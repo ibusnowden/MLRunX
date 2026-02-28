@@ -23,8 +23,8 @@ pub use postgres::{
 };
 pub use sqlite::{
     AggregatedPointRow, ApiKeyRow, AuditEventRow, AuthSessionAdminRow, AuthSessionRow,
-    MetadataFilter, MetricRow, MetricSeriesRow, ProjectMembershipRow, ProjectRow, RunEventInput,
-    RunEventRow, RunFilterCondition, RunFilterExpr, RunFilterOperator, RunFilterTarget,
-    RunListSortField, RunListSortOrder, RunRow, SqliteConfig, SqliteError, SqliteStore,
-    UserProjectMembershipRow, UserRow,
+    MetadataFilter, MetricAliasRow, MetricRow, MetricSeriesRow, ProjectMembershipRow, ProjectRow,
+    RunEventInput, RunEventRow, RunFilterCondition, RunFilterExpr, RunFilterOperator,
+    RunFilterTarget, RunListSortField, RunListSortOrder, RunRow, SqliteConfig, SqliteError,
+    SqliteStore, UserProjectMembershipRow, UserRow,
 };

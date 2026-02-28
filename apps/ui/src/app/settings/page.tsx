@@ -5,6 +5,7 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ApiKeyInfo,
   CreateApiKeyResponse,
+  MetricAlias,
   ProjectInfo,
   UiAuthSessionResult,
   api,
@@ -12,8 +13,9 @@ import {
 import { ProjectsTab } from './ProjectsTab';
 import { ApiKeysTab } from './ApiKeysTab';
 import { QuickstartTab } from './QuickstartTab';
+import { MetricAliasesTab } from './MetricAliasesTab';
 
-type TabId = 'projects' | 'api-keys' | 'quickstart';
+type TabId = 'projects' | 'metric-aliases' | 'api-keys' | 'quickstart';
 type KeyCreationMode = 'recommended' | 'advanced';
 
 const DAY_SECONDS = 24 * 60 * 60;
@@ -22,6 +24,7 @@ const DEFAULT_RECOMMENDED_KEY_NAME = 'sdk-agent';
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'projects', label: 'Projects' },
+  { id: 'metric-aliases', label: 'Metrics' },
   { id: 'api-keys', label: 'API Keys' },
   { id: 'quickstart', label: 'Quickstart' },
 ];
@@ -46,6 +49,10 @@ function SettingsContent() {
   const [keys, setKeys] = useState<ApiKeyInfo[]>([]);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectDescription, setNewProjectDescription] = useState('');
+  const [metricAliases, setMetricAliases] = useState<MetricAlias[]>([]);
+  const [selectedAliasProjectId, setSelectedAliasProjectId] = useState('');
+  const [newAliasMetricName, setNewAliasMetricName] = useState('');
+  const [newAliasDisplayName, setNewAliasDisplayName] = useState('');
   const [newKeyName, setNewKeyName] = useState(DEFAULT_RECOMMENDED_KEY_NAME);
   const [newKeyProjectId, setNewKeyProjectId] = useState('');
   const [keyTtlDays, setKeyTtlDays] = useState('30');
@@ -53,9 +60,12 @@ function SettingsContent() {
   const [scopeWrite, setScopeWrite] = useState(true);
   const [createdKey, setCreatedKey] = useState<CreateApiKeyResponse | null>(null);
   const [loadingProjects, setLoadingProjects] = useState(false);
+  const [loadingAliases, setLoadingAliases] = useState(false);
   const [loadingKeys, setLoadingKeys] = useState(false);
   const [submittingProject, setSubmittingProject] = useState(false);
+  const [submittingAlias, setSubmittingAlias] = useState(false);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
+  const [deletingAliasMetricName, setDeletingAliasMetricName] = useState<string | null>(null);
   const [submittingKey, setSubmittingKey] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
@@ -103,9 +113,28 @@ function SettingsContent() {
     } catch {
       setSession(null);
       setProjects([]);
+      setMetricAliases([]);
       setKeys([]);
     }
   }, []);
+
+  const refreshAliases = useCallback(async () => {
+    if (!session || !selectedAliasProjectId) {
+      setMetricAliases([]);
+      return;
+    }
+
+    setLoadingAliases(true);
+    try {
+      const result = await api.listMetricAliases(selectedAliasProjectId);
+      setMetricAliases(result.aliases);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load metric labels.';
+      setStatus(message);
+    } finally {
+      setLoadingAliases(false);
+    }
+  }, [selectedAliasProjectId, session]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -180,6 +209,23 @@ function SettingsContent() {
   }, [availableProjectIds, newKeyProjectId, session]);
 
   useEffect(() => {
+    if (!session) {
+      setSelectedAliasProjectId('');
+      setMetricAliases([]);
+      return;
+    }
+
+    if (availableProjectIds.length === 1) {
+      setSelectedAliasProjectId(availableProjectIds[0]);
+      return;
+    }
+
+    if (!availableProjectIds.includes(selectedAliasProjectId)) {
+      setSelectedAliasProjectId(availableProjectIds[0] ?? '');
+    }
+  }, [availableProjectIds, selectedAliasProjectId, session]);
+
+  useEffect(() => {
     if (!session) return;
     const selectedTtlDays = Number(keyTtlDays);
     if (
@@ -196,6 +242,12 @@ function SettingsContent() {
       void Promise.all([refreshKeys(), refreshProjects()]);
     }
   }, [session, refreshKeys, refreshProjects]);
+
+  useEffect(() => {
+    if (session && selectedAliasProjectId) {
+      void refreshAliases();
+    }
+  }, [refreshAliases, selectedAliasProjectId, session]);
 
   const sdkApiKey = useMemo(() => createdKey?.api_key || '<paste-api-key>', [createdKey]);
   const sdkProjectId = useMemo(() => {
@@ -270,6 +322,10 @@ function SettingsContent() {
       await api.deleteProject(project.project_id);
       if (newKeyProjectId === project.project_id) {
         setNewKeyProjectId('');
+      }
+      if (selectedAliasProjectId === project.project_id) {
+        setSelectedAliasProjectId('');
+        setMetricAliases([]);
       }
       await Promise.all([refreshSession(), refreshProjects(), refreshKeys()]);
       setStatus(`Deleted project ${project.name} (${project.project_id}).`);
@@ -353,12 +409,66 @@ function SettingsContent() {
     }
   };
 
+  const handleUpsertAlias = async () => {
+    if (!session) {
+      setStatus('Sign in before updating metric labels.');
+      return;
+    }
+    if (!selectedAliasProjectId) {
+      setStatus('Choose a project first.');
+      return;
+    }
+
+    const metricName = newAliasMetricName.trim();
+    const displayName = newAliasDisplayName.trim();
+    if (!metricName || !displayName) {
+      setStatus('Both raw metric key and display label are required.');
+      return;
+    }
+
+    setSubmittingAlias(true);
+    try {
+      await api.upsertMetricAlias(selectedAliasProjectId, {
+        metric_name: metricName,
+        display_name: displayName,
+      });
+      setNewAliasMetricName('');
+      setNewAliasDisplayName('');
+      await refreshAliases();
+      setStatus(`Saved metric label '${displayName}' for '${metricName}'.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save metric label.';
+      setStatus(message);
+    } finally {
+      setSubmittingAlias(false);
+    }
+  };
+
+  const handleDeleteAlias = async (metricName: string) => {
+    if (!selectedAliasProjectId) {
+      setStatus('Choose a project first.');
+      return;
+    }
+
+    setDeletingAliasMetricName(metricName);
+    try {
+      await api.deleteMetricAlias(selectedAliasProjectId, metricName);
+      await refreshAliases();
+      setStatus(`Deleted metric label for '${metricName}'.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to delete metric label.';
+      setStatus(message);
+    } finally {
+      setDeletingAliasMetricName(null);
+    }
+  };
+
   return (
     <main className="min-h-screen">
       <div className="border-b border-border bg-surface">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-5 sm:py-6">
           <h1 className="text-2xl font-bold text-text-primary">Settings</h1>
-          <p className="text-sm text-text-secondary mt-1">Projects, API keys, and SDK quickstart.</p>
+          <p className="text-sm text-text-secondary mt-1">Projects, metric labels, API keys, and SDK quickstart.</p>
         </div>
       </div>
 
@@ -434,6 +544,27 @@ function SettingsContent() {
           />
         )}
 
+        {activeTab === 'metric-aliases' && (
+          <MetricAliasesTab
+            session={session}
+            availableProjects={availableProjects}
+            selectedProjectId={selectedAliasProjectId}
+            setSelectedProjectId={setSelectedAliasProjectId}
+            newAliasMetricName={newAliasMetricName}
+            setNewAliasMetricName={setNewAliasMetricName}
+            newAliasDisplayName={newAliasDisplayName}
+            setNewAliasDisplayName={setNewAliasDisplayName}
+            aliases={metricAliases}
+            loadingAliases={loadingAliases}
+            submittingAlias={submittingAlias}
+            deletingAliasMetricName={deletingAliasMetricName}
+            formatProjectRef={formatProjectRef}
+            handleUpsertAlias={() => void handleUpsertAlias()}
+            handleDeleteAlias={(metricName) => void handleDeleteAlias(metricName)}
+            refreshAliases={() => void refreshAliases()}
+          />
+        )}
+
         {activeTab === 'quickstart' && (
           <QuickstartTab
             apiBaseUrl={apiBaseUrl}
@@ -455,7 +586,7 @@ export default function SettingsPage() {
           <div className="border-b border-border bg-surface">
             <div className="max-w-5xl mx-auto px-4 sm:px-6 py-5 sm:py-6">
               <h1 className="text-2xl font-bold text-text-primary">Settings</h1>
-              <p className="text-sm text-text-secondary mt-1">Projects, API keys, and SDK quickstart.</p>
+              <p className="text-sm text-text-secondary mt-1">Projects, metric labels, API keys, and SDK quickstart.</p>
             </div>
           </div>
           <div className="max-w-5xl mx-auto px-4 sm:px-6 py-5 sm:py-6">
