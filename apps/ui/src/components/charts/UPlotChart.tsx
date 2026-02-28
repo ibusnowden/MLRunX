@@ -71,6 +71,12 @@ function smoothData(data: number[], factor: number): number[] {
   return smoothed;
 }
 
+function resolveThemeColor(variable: string, fallback: string): string {
+  if (typeof window === 'undefined') return fallback;
+  const value = window.getComputedStyle(document.documentElement).getPropertyValue(variable).trim();
+  return value || fallback;
+}
+
 export function UPlotChart({
   xData,
   series,
@@ -93,11 +99,16 @@ export function UPlotChart({
   const [dimensions, setDimensions] = useState({ width: 0, height });
   const [hoveredSeries, setHoveredSeries] = useState<number | null>(null);
 
-  // Theme colors
-  const bgColor = darkTheme ? '#000000' : '#ffffff';
-  const gridColor = darkTheme ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.06)';
-  const axisColor = darkTheme ? '#8a909b' : '#9ca3af';
-  const textColor = darkTheme ? '#dce2ea' : '#374151';
+  // Resolve theme colors from CSS vars so dark/light updates stay centralized in globals.css.
+  const { bgColor, gridColor, axisColor, textColor } = useMemo(
+    () => ({
+      bgColor: resolveThemeColor('--chart-bg', darkTheme ? '#000000' : '#ffffff'),
+      gridColor: resolveThemeColor('--chart-grid', darkTheme ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.06)'),
+      axisColor: resolveThemeColor('--chart-axis', darkTheme ? '#8a909b' : '#9ca3af'),
+      textColor: resolveThemeColor('--chart-text', darkTheme ? '#dce2ea' : '#374151'),
+    }),
+    [darkTheme]
+  );
   const seriesColorScale = useMemo(
     () => createSeriesColorScale(series.map((entry, index) => entry.label || `series-${index}`), darkTheme),
     [series, darkTheme]
@@ -313,7 +324,7 @@ export function UPlotChart({
   }, []);
 
   return (
-    <div className={`h-full rounded-lg overflow-hidden flex flex-col ${darkTheme ? 'bg-black' : 'bg-white'}`}>
+    <div className="h-full rounded-lg overflow-hidden flex flex-col bg-chart-bg">
       {/* Chart container */}
       <div
         ref={containerRef}
@@ -323,7 +334,7 @@ export function UPlotChart({
 
       {/* Custom Legend */}
       {showLegend && series.length > 0 && (
-        <div className={`px-4 py-3 border-t ${darkTheme ? 'border-[#21262d]' : 'border-gray-100'}`}>
+        <div className="px-4 py-3 border-t border-border">
           <div className="flex flex-wrap gap-x-5 gap-y-1.5">
             {resolvedSeries.map((s, i) => {
               const color = s.resolvedColor;
@@ -343,10 +354,10 @@ export function UPlotChart({
                     className="w-3 h-0.5 rounded-full"
                     style={{ backgroundColor: color }}
                   />
-                  <span className={`text-xs font-medium ${darkTheme ? 'text-gray-400' : 'text-gray-600'}`}>
+                  <span className="text-xs font-medium text-text-secondary">
                     {s.label}
                   </span>
-                  <span className={`text-xs font-mono ${darkTheme ? 'text-gray-600' : 'text-gray-400'}`}>
+                  <span className="text-xs font-mono text-text-muted">
                     {lastVal}
                   </span>
                 </div>

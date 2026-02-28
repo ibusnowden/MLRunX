@@ -264,7 +264,7 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
 
           {/* Expanded overlay */}
           {isExpanded && (
-            <div className="fixed inset-0 z-50 flex flex-col" style={{ backgroundColor: isDark ? '#0d1117' : '#ffffff' }}>
+            <div className="fixed inset-0 z-50 flex flex-col bg-background">
               {/* Expanded header */}
               <div className="flex items-center justify-between px-6 py-3 border-b border-border shrink-0">
                 <div className="flex items-center gap-4">
