@@ -13,7 +13,9 @@ export function QuickstartTab({
     <section className="rounded-xl border border-border bg-surface p-4 sm:p-5 space-y-4">
       <div>
         <h2 className="text-lg font-semibold text-text-primary">Quickstart</h2>
-        <p className="text-sm text-text-secondary mt-1">Use these commands on your training machine.</p>
+        <p className="text-sm text-text-secondary mt-1">
+          Use these commands on your training machine or CI runner. Browser UI access uses session login, not API keys.
+        </p>
       </div>
 
       <div className="rounded-lg border border-border bg-surface-secondary p-3">

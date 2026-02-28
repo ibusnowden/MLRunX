@@ -14,6 +14,11 @@ import { ApiKeysTab } from './ApiKeysTab';
 import { QuickstartTab } from './QuickstartTab';
 
 type TabId = 'projects' | 'api-keys' | 'quickstart';
+type KeyCreationMode = 'recommended' | 'advanced';
+
+const DAY_SECONDS = 24 * 60 * 60;
+const DEFAULT_UI_KEY_MAX_TTL_SECONDS = 90 * DAY_SECONDS;
+const DEFAULT_RECOMMENDED_KEY_NAME = 'sdk-agent';
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'projects', label: 'Projects' },
@@ -41,9 +46,9 @@ function SettingsContent() {
   const [keys, setKeys] = useState<ApiKeyInfo[]>([]);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectDescription, setNewProjectDescription] = useState('');
-  const [newKeyName, setNewKeyName] = useState('training-agent');
+  const [newKeyName, setNewKeyName] = useState(DEFAULT_RECOMMENDED_KEY_NAME);
   const [newKeyProjectId, setNewKeyProjectId] = useState('');
-  const [keyTtlDays, setKeyTtlDays] = useState('90');
+  const [keyTtlDays, setKeyTtlDays] = useState('30');
   const [scopeRead, setScopeRead] = useState(true);
   const [scopeWrite, setScopeWrite] = useState(true);
   const [createdKey, setCreatedKey] = useState<CreateApiKeyResponse | null>(null);
@@ -125,6 +130,23 @@ function SettingsContent() {
     [availableProjects],
   );
 
+  const keyPolicyMaxTtlSeconds = session?.ui_key_max_ttl_seconds ?? DEFAULT_UI_KEY_MAX_TTL_SECONDS;
+  const keyPolicyMaxTtlDays = useMemo(
+    () => Math.max(1, Math.floor(keyPolicyMaxTtlSeconds / DAY_SECONDS)),
+    [keyPolicyMaxTtlSeconds],
+  );
+  const recommendedKeyTtlDays = useMemo(
+    () => Math.min(90, keyPolicyMaxTtlDays),
+    [keyPolicyMaxTtlDays],
+  );
+  const keyTtlOptionsDays = useMemo(() => {
+    const base = [7, 30, 60, 90].filter((days) => days <= keyPolicyMaxTtlDays);
+    if (!base.includes(keyPolicyMaxTtlDays)) {
+      base.push(keyPolicyMaxTtlDays);
+    }
+    return Array.from(new Set(base)).sort((a, b) => a - b);
+  }, [keyPolicyMaxTtlDays]);
+
   const projectNameById = useMemo(() => {
     const index = new Map<string, string>();
     for (const project of availableProjects) {
@@ -156,6 +178,18 @@ function SettingsContent() {
       setNewKeyProjectId('');
     }
   }, [availableProjectIds, newKeyProjectId, session]);
+
+  useEffect(() => {
+    if (!session) return;
+    const selectedTtlDays = Number(keyTtlDays);
+    if (
+      !Number.isFinite(selectedTtlDays)
+      || selectedTtlDays <= 0
+      || selectedTtlDays > keyPolicyMaxTtlDays
+    ) {
+      setKeyTtlDays(String(recommendedKeyTtlDays));
+    }
+  }, [session, keyPolicyMaxTtlDays, keyTtlDays, recommendedKeyTtlDays]);
 
   useEffect(() => {
     if (session) {
@@ -247,18 +281,9 @@ function SettingsContent() {
     }
   };
 
-  const handleCreateKey = async () => {
+  const handleCreateKey = async (mode: KeyCreationMode) => {
     if (!session) {
       setStatus('Sign in before creating API keys.');
-      return;
-    }
-
-    const scopes: string[] = [];
-    if (scopeRead) scopes.push('read');
-    if (scopeWrite) scopes.push('write');
-
-    if (scopes.length === 0) {
-      setStatus('Choose at least one scope.');
       return;
     }
 
@@ -267,25 +292,48 @@ function SettingsContent() {
       return;
     }
 
-    const ttlDays = Number(keyTtlDays);
-    if (!Number.isFinite(ttlDays) || ttlDays <= 0) {
+    const keyName =
+      mode === 'recommended'
+        ? DEFAULT_RECOMMENDED_KEY_NAME
+        : (newKeyName.trim() || DEFAULT_RECOMMENDED_KEY_NAME);
+
+    const scopes: string[] = mode === 'recommended'
+      ? ['read', 'write']
+      : [
+          ...(scopeRead ? ['read'] : []),
+          ...(scopeWrite ? ['write'] : []),
+        ];
+    if (scopes.length === 0) {
+      setStatus('Choose at least one scope.');
+      return;
+    }
+
+    const rawTtlDays = mode === 'recommended' ? recommendedKeyTtlDays : Number(keyTtlDays);
+    if (!Number.isFinite(rawTtlDays) || rawTtlDays <= 0) {
       setStatus('Choose a valid key TTL.');
       return;
     }
-    const expiresInSeconds = Math.round(ttlDays * 24 * 60 * 60);
+    const ttlDays = Math.min(Math.floor(rawTtlDays), keyPolicyMaxTtlDays);
+    const expiresInSeconds = ttlDays * DAY_SECONDS;
 
     setSubmittingKey(true);
     try {
       const payload = {
         project_id: newKeyProjectId,
-        name: newKeyName.trim() || undefined,
+        name: keyName,
         scopes,
         expires_in_seconds: expiresInSeconds,
       };
       const result = await api.createApiKey(payload);
       setCreatedKey(result);
       await refreshKeys();
-      setStatus(`Created key ${result.key_prefix}. Copy it now (shown only once).`);
+      if (mode === 'recommended') {
+        setStatus(
+          `Created SDK key ${result.key_prefix} (${ttlDays} days). Copy it now (shown once).`,
+        );
+      } else {
+        setStatus(`Created key ${result.key_prefix}. Copy it now (shown once).`);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to create API key.';
       setStatus(message);
@@ -375,8 +423,11 @@ function SettingsContent() {
             loadingKeys={loadingKeys}
             createdKey={createdKey}
             keys={keys}
+            keyPolicyMaxTtlSeconds={keyPolicyMaxTtlSeconds}
+            recommendedKeyTtlDays={recommendedKeyTtlDays}
+            keyTtlOptionsDays={keyTtlOptionsDays}
             formatProjectRef={formatProjectRef}
-            handleCreateKey={() => void handleCreateKey()}
+            handleCreateKey={(mode) => void handleCreateKey(mode)}
             handleRevokeKey={(keyId) => void handleRevokeKey(keyId)}
             refreshKeys={() => void refreshKeys()}
             copyToClipboard={(value, msg) => void copyToClipboard(value, msg)}

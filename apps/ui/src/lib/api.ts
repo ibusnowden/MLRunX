@@ -130,6 +130,8 @@ export interface UiAuthSessionResult {
   key_prefix: string;
   is_dev_mode: boolean;
   is_platform_admin: boolean;
+  ui_session_ttl_seconds: number;
+  ui_key_max_ttl_seconds: number;
 }
 
 export interface CreateApiKeyRequest {
@@ -146,6 +148,7 @@ export interface CreateApiKeyResponse {
   project_id: string | null;
   name: string | null;
   scopes: string[];
+  expires_at: string | null;
 }
 
 export interface ApiKeyInfo {

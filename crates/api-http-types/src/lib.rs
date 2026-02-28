@@ -25,6 +25,8 @@ pub struct UiAuthSessionResponse {
     pub key_prefix: String,
     pub is_dev_mode: bool,
     pub is_platform_admin: bool,
+    pub ui_session_ttl_seconds: u64,
+    pub ui_key_max_ttl_seconds: u64,
 }
 
 #[derive(Debug, Serialize)]

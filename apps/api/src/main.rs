@@ -1664,6 +1664,7 @@ async fn http_ui_auth_login(
 }
 
 async fn http_ui_auth_session(
+    State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<UiAuthSessionResponse>, (StatusCode, String)> {
     let mut project_ids: Vec<String> = auth
@@ -1683,6 +1684,8 @@ async fn http_ui_auth_session(
         key_prefix: auth.api_key.key_prefix.clone(),
         is_dev_mode: auth.is_dev_mode,
         is_platform_admin: auth.is_platform_admin,
+        ui_session_ttl_seconds: state.key_store.ui_session_ttl_seconds(),
+        ui_key_max_ttl_seconds: ui_key_max_ttl_seconds(),
     }))
 }
 
