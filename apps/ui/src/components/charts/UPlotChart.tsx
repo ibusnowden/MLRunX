@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
+import { colorToRgba, createSeriesColorScale } from './chartColors';
 
 export interface ChartSeries {
   label: string;
@@ -45,46 +46,6 @@ export interface UPlotChartProps {
   yMax?: number;
   /** Show area fill under lines */
   areaFill?: boolean;
-}
-
-// Dark theme colors - vibrant palette inspired by W&B / modern dashboards
-const DARK_THEME_COLORS = [
-  '#84cc16', // lime
-  '#f97316', // orange
-  '#a855f7', // purple
-  '#ec4899', // pink
-  '#06b6d4', // cyan
-  '#fbbf24', // yellow
-  '#ef4444', // red
-  '#3b82f6', // blue
-  '#10b981', // emerald
-  '#f43f5e', // rose
-  '#8b5cf6', // violet
-  '#14b8a6', // teal
-];
-
-// Light theme colors - deeper, more contrast on white
-const LIGHT_THEME_COLORS = [
-  '#2563eb', // blue
-  '#dc2626', // red
-  '#16a34a', // green
-  '#9333ea', // purple
-  '#ea580c', // orange
-  '#db2777', // pink
-  '#0d9488', // teal
-  '#ca8a04', // yellow
-  '#4f46e5', // indigo
-  '#059669', // emerald
-  '#e11d48', // rose
-  '#7c3aed', // violet
-];
-
-/** Convert a hex color like '#2563eb' to 'rgba(37, 99, 235, alpha)' */
-function hexToRgba(hex: string, alpha: number): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
 // Apply exponential moving average smoothing
@@ -133,11 +94,18 @@ export function UPlotChart({
   const [hoveredSeries, setHoveredSeries] = useState<number | null>(null);
 
   // Theme colors
-  const colors = darkTheme ? DARK_THEME_COLORS : LIGHT_THEME_COLORS;
-  const bgColor = darkTheme ? '#0d1117' : '#ffffff';
-  const gridColor = darkTheme ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
-  const axisColor = darkTheme ? '#6e7681' : '#9ca3af';
-  const textColor = darkTheme ? '#e6edf3' : '#374151';
+  const bgColor = darkTheme ? '#000000' : '#ffffff';
+  const gridColor = darkTheme ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.06)';
+  const axisColor = darkTheme ? '#8a909b' : '#9ca3af';
+  const textColor = darkTheme ? '#dce2ea' : '#374151';
+  const seriesColorScale = useMemo(
+    () => createSeriesColorScale(series.map((entry, index) => entry.label || `series-${index}`), darkTheme),
+    [series, darkTheme]
+  );
+  const resolvedSeries = useMemo(
+    () => series.map((entry, index) => ({ ...entry, resolvedColor: entry.color || seriesColorScale(entry.label, index) })),
+    [series, seriesColorScale]
+  );
 
   // Observe width from container, height from parent wrapper (for fullscreen)
   useEffect(() => {
@@ -176,7 +144,7 @@ export function UPlotChart({
     }
 
     // Apply smoothing to data
-    const processedSeries = series.map(s => ({
+    const processedSeries = resolvedSeries.map(s => ({
       ...s,
       data: smoothing > 0 ? smoothData(s.data, smoothing) : s.data,
       upper: s.upper && smoothing > 0 ? smoothData(s.upper, smoothing) : s.upper,
@@ -193,7 +161,7 @@ export function UPlotChart({
     let dataIdx = 1; // next index into the data/series arrays
 
     processedSeries.forEach((s, i) => {
-      const color = s.color || colors[i % colors.length];
+      const color = s.resolvedColor;
       const isActive = hoveredSeries === null || hoveredSeries === i + 1;
 
       // 1. Main line series
@@ -201,7 +169,7 @@ export function UPlotChart({
       seriesConfig.push({
         label: s.label,
         stroke: color,
-        width: 1,
+        width: 1.1,
         points: { show: false },
         alpha: isActive ? 1 : 0.3,
         fill: areaFill ? `${color}15` : undefined,
@@ -239,7 +207,7 @@ export function UPlotChart({
         // Band between upper and lower
         bands.push({
           series: [upperIdx, lowerIdx] as [number, number],
-          fill: hexToRgba(color, isActive ? 0.10 : 0.04),
+          fill: colorToRgba(color, isActive ? 0.12 : 0.05),
         });
       }
     });
@@ -299,7 +267,7 @@ export function UPlotChart({
       cursor: {
         drag: interactive ? { x: true, y: false } : undefined,
         points: {
-          size: 6,
+          size: 5,
           fill: bgColor,
           stroke: textColor,
           width: 1,
@@ -332,7 +300,7 @@ export function UPlotChart({
         chartRef.current = null;
       }
     };
-  }, [xData, series, title, xLabel, yLabel, dimensions, interactive, onViewportChange, darkTheme, smoothing, colors, bgColor, gridColor, axisColor, textColor, hoveredSeries, logScale, yMin, yMax, areaFill]);
+  }, [xData, resolvedSeries, title, xLabel, yLabel, dimensions, interactive, onViewportChange, darkTheme, smoothing, bgColor, gridColor, axisColor, textColor, hoveredSeries, logScale, yMin, yMax, areaFill]);
 
   // Get last value for each series
   const getLastValue = useCallback((data: number[]): string => {
@@ -345,7 +313,7 @@ export function UPlotChart({
   }, []);
 
   return (
-    <div className={`h-full rounded-lg overflow-hidden flex flex-col ${darkTheme ? 'bg-[#0d1117]' : 'bg-white'}`}>
+    <div className={`h-full rounded-lg overflow-hidden flex flex-col ${darkTheme ? 'bg-black' : 'bg-white'}`}>
       {/* Chart container */}
       <div
         ref={containerRef}
@@ -357,8 +325,8 @@ export function UPlotChart({
       {showLegend && series.length > 0 && (
         <div className={`px-4 py-3 border-t ${darkTheme ? 'border-[#21262d]' : 'border-gray-100'}`}>
           <div className="flex flex-wrap gap-x-5 gap-y-1.5">
-            {series.map((s, i) => {
-              const color = s.color || colors[i % colors.length];
+            {resolvedSeries.map((s, i) => {
+              const color = s.resolvedColor;
               const lastVal = getLastValue(s.data);
               const isHovered = hoveredSeries === i + 1;
 

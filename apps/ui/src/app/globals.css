@@ -76,10 +76,10 @@
   --sidebar-gradient: linear-gradient(180deg, rgba(15, 18, 24, 1) 0%, rgba(12, 15, 21, 1) 100%);
   --page-gradient: radial-gradient(circle at top, rgba(59, 125, 255, 0.08) 0%, transparent 38%),
     linear-gradient(180deg, rgba(10, 13, 18, 1) 0%, rgba(10, 13, 18, 1) 100%);
-  --chart-bg: #0a0d12;
-  --chart-grid: rgba(255, 255, 255, 0.06);
-  --chart-axis: #6f7890;
-  --chart-text: #e4e8f0;
+  --chart-bg: #000000;
+  --chart-grid: rgba(255, 255, 255, 0.05);
+  --chart-axis: #8a909b;
+  --chart-text: #dce2ea;
   --badge-running-bg: rgba(96, 165, 250, 0.12);
   --badge-running-text: #60a5fa;
   --badge-finished-bg: rgba(52, 211, 153, 0.12);

@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { api, MetricSeries } from '@/lib/api';
 import { UPlotChart } from '@/components/charts/UPlotChart';
+import { createSeriesColorScale } from '@/components/charts/chartColors';
 import { useTheme } from '@/components/ThemeProvider';
 import { formatFixed, safeMinMax } from '@/lib/format';
 import { useAutoRefresh } from '@/lib/useAutoRefresh';
@@ -37,10 +38,6 @@ interface ComparePanelProps {
   runIds: string[];
 }
 
-const RUN_COLORS = [
-  '#2563eb', '#dc2626', '#16a34a', '#9333ea',
-  '#ea580c', '#db2777', '#0d9488', '#ca8a04',
-];
 const COMPARE_MAX_POINTS = 5000;
 
 export function ComparePanel({ runIds }: ComparePanelProps) {
@@ -120,6 +117,26 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
     { enabled: runIds.length > 0, intervalMs: 30000, runOnMount: false }
   );
 
+  const seriesLabels = useMemo(
+    () => runs.map((run) => run.run_name || run.run_id.slice(0, 8)),
+    [runs]
+  );
+  const runColorScale = useMemo(
+    () => createSeriesColorScale(seriesLabels, isDark),
+    [seriesLabels, isDark]
+  );
+
+  // Get series for selected metric from each run
+  const comparisonData = runs.map((run, idx) => {
+    const label = run.run_name || run.run_id.slice(0, 8);
+    return {
+      ...run,
+      label,
+      color: runColorScale(label, idx),
+      metricSeries: run.series.find((s) => s.name === selectedMetric),
+    };
+  });
+
   if (runIds.length === 0) {
     return (
       <div className="bg-surface rounded-xl border border-border p-6">
@@ -148,13 +165,6 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
     );
   }
 
-  // Get series for selected metric from each run
-  const comparisonData = runs.map((run, idx) => ({
-    ...run,
-    color: RUN_COLORS[idx % RUN_COLORS.length],
-    metricSeries: run.series.find((s) => s.name === selectedMetric),
-  }));
-
   // Find all steps
   const allSteps = new Set<number>();
   comparisonData.forEach((r) => {
@@ -176,7 +186,7 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
       }
     });
     return {
-      label: run.run_name || run.run_id.slice(0, 8),
+      label: run.label,
       color: run.color,
       data,
       upper,
@@ -212,7 +222,7 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
               style={{ backgroundColor: run.color }}
             />
             <span className="text-sm font-medium text-text-primary">
-              {run.run_name || run.run_id.slice(0, 8)}
+              {run.label}
             </span>
             <span className="text-xs text-text-muted">({run.status})</span>
           </div>
@@ -302,7 +312,7 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
                       style={{ backgroundColor: run.color }}
                     />
                     <span className="text-sm font-medium text-text-primary">
-                      {run.run_name || run.run_id.slice(0, 8)}
+                      {run.label}
                     </span>
                     <span className="text-xs text-text-muted">({run.status})</span>
                   </div>
@@ -346,7 +356,7 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
                           className="w-2 h-2 rounded-full"
                           style={{ backgroundColor: run.color }}
                         />
-                        {run.run_name || run.run_id.slice(0, 8)}
+                        {run.label}
                       </td>
                       <td className="text-right py-2 px-3 font-mono text-text-secondary">
                         {formatFixed(bounds.min)}
