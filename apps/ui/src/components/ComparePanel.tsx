@@ -7,6 +7,7 @@ import { createSeriesColorScale } from '@/components/charts/chartColors';
 import { useTheme } from '@/components/ThemeProvider';
 import { formatFixed, safeMinMax } from '@/lib/format';
 import { useAutoRefresh } from '@/lib/useAutoRefresh';
+import { computeDerivedSeries, derivedModeLabel, type DerivedSeriesMode } from '@/lib/computedSeries';
 
 // Icons
 const ExpandIcon = () => (
@@ -40,14 +41,41 @@ interface ComparePanelProps {
 }
 
 const COMPARE_MAX_POINTS = 5000;
+const COMPARE_PAGE_SIZE = 200;
+
+function normalizeRunIds(runIds: string[]): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const id of runIds) {
+    const trimmed = id.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+  return normalized;
+}
+
+function computeCommonMetricNames(runs: CompareData[]): string[] {
+  if (runs.length === 0) return [];
+  let common = new Set<string>(runs[0].series.map((series) => series.name));
+  for (const run of runs.slice(1)) {
+    const runMetricNames = new Set<string>(run.series.map((series) => series.name));
+    common = new Set([...common].filter((name) => runMetricNames.has(name)));
+  }
+  return [...common].sort();
+}
 
 export function ComparePanel({ runIds }: ComparePanelProps) {
   const { isDark } = useTheme();
   const [runs, setRuns] = useState<CompareData[]>([]);
   const [commonMetrics, setCommonMetrics] = useState<string[]>([]);
   const [selectedMetric, setSelectedMetric] = useState<string>('');
+  const [derivedMode, setDerivedMode] = useState<DerivedSeriesMode>('none');
+  const [derivedWindow, setDerivedWindow] = useState(16);
+  const [showRawSeries, setShowRawSeries] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [isExpanded, setIsExpanded] = useState(false);
   const expandedChartRef = useRef<HTMLDivElement>(null);
 
@@ -78,10 +106,12 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
   }, [selectedMetric]);
 
   const fetchComparison = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
-    if (runIds.length === 0) {
+    const normalizedRunIds = normalizeRunIds(runIds);
+    if (normalizedRunIds.length === 0) {
       setRuns([]);
       setCommonMetrics([]);
       setSelectedMetric('');
+      setNotice(null);
       setLoading(false);
       return;
     }
@@ -90,16 +120,42 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
       setLoading(true);
     }
     setError(null);
+    setNotice(null);
 
     try {
-      const response = await api.compareRuns(runIds, [], COMPARE_MAX_POINTS);
-      setRuns(response.runs);
-      setCommonMetrics(response.common_metrics);
+      const collectedRuns: CompareData[] = [];
+      let offset = 0;
+      let total = normalizedRunIds.length;
+      while (offset < total) {
+        const response = await api.compareRuns(
+          normalizedRunIds,
+          [],
+          COMPARE_MAX_POINTS,
+          { limit: COMPARE_PAGE_SIZE, offset }
+        );
+        collectedRuns.push(...response.runs);
+
+        if (typeof response.total === 'number') {
+          total = response.total;
+        }
+        if (response.runs.length === 0) {
+          break;
+        }
+        offset += response.runs.length;
+      }
+
+      const computedCommonMetrics = computeCommonMetricNames(collectedRuns);
+      setRuns(collectedRuns);
+      setCommonMetrics(computedCommonMetrics);
       setSelectedMetric((prev) => {
-        if (response.common_metrics.length === 0) return '';
-        if (prev && response.common_metrics.includes(prev)) return prev;
-        return response.common_metrics[0];
+        if (computedCommonMetrics.length === 0) return '';
+        if (prev && computedCommonMetrics.includes(prev)) return prev;
+        return computedCommonMetrics[0];
       });
+      if (collectedRuns.length > COMPARE_PAGE_SIZE) {
+        const pageCount = Math.ceil(collectedRuns.length / COMPARE_PAGE_SIZE);
+        setNotice(`Loaded ${collectedRuns.length} runs across ${pageCount} compare pages.`);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to compare runs');
     } finally {
@@ -117,6 +173,12 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
     () => fetchComparison({ silent: true }),
     { enabled: runIds.length > 0, intervalMs: 30000, runOnMount: false }
   );
+
+  useEffect(() => {
+    if (derivedMode === 'none') {
+      setShowRawSeries(true);
+    }
+  }, [derivedMode]);
 
   const seriesLabels = useMemo(
     () => runs.map((run) => run.run_name || run.run_id.slice(0, 8)),
@@ -142,6 +204,19 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
     () => metricDisplayNameByRaw.get(selectedMetric) ?? selectedMetric,
     [metricDisplayNameByRaw, selectedMetric]
   );
+  const computedLabel = useMemo(
+    () => derivedModeLabel(derivedMode, derivedWindow),
+    [derivedMode, derivedWindow]
+  );
+  const yAxisLabel = useMemo(() => {
+    if (derivedMode === 'pct_change' && !showRawSeries) {
+      return `${selectedMetricLabel} (% change)`;
+    }
+    if (derivedMode !== 'none' && !showRawSeries) {
+      return `${selectedMetricLabel} (${computedLabel})`;
+    }
+    return selectedMetricLabel;
+  }, [computedLabel, derivedMode, selectedMetricLabel, showRawSeries]);
 
   // Get series for selected metric from each run
   const comparisonData = runs.map((run, idx) => {
@@ -189,11 +264,11 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
   });
   const sortedSteps = Array.from(allSteps).sort((a, b) => a - b);
   const stepToIndex = new Map(sortedSteps.map((step, idx) => [step, idx]));
-  const chartSeries = comparisonData.map((run) => {
+  const chartSeries = comparisonData.flatMap((run) => {
     const points = run.metricSeries?.points ?? [];
-    const data = new Array(sortedSteps.length).fill(null);
-    const upper = new Array(sortedSteps.length).fill(null);
-    const lower = new Array(sortedSteps.length).fill(null);
+    const data = new Array<number>(sortedSteps.length).fill(Number.NaN);
+    const upper = new Array<number>(sortedSteps.length).fill(Number.NaN);
+    const lower = new Array<number>(sortedSteps.length).fill(Number.NaN);
     points.forEach((point) => {
       const idx = stepToIndex.get(point.step);
       if (idx !== undefined) {
@@ -202,32 +277,99 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
         lower[idx] = point.min;
       }
     });
-    return {
-      label: run.label,
-      color: run.color,
-      data,
-      upper,
-      lower,
-    };
+    const entries: Array<{
+      label: string;
+      color: string;
+      data: number[];
+      upper?: number[];
+      lower?: number[];
+    }> = [];
+
+    if (showRawSeries || derivedMode === 'none') {
+      entries.push({
+        label: run.label,
+        color: run.color,
+        data,
+        upper,
+        lower,
+      });
+    }
+
+    if (derivedMode !== 'none') {
+      const derivedData = computeDerivedSeries(data, derivedMode, derivedWindow);
+      entries.push({
+        label: `${run.label} ${computedLabel}`,
+        color: run.color,
+        data: derivedData,
+      });
+    }
+
+    return entries;
   });
 
   return (
     <div className="bg-surface rounded-xl border border-border p-4 sm:p-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
-        <h2 className="text-lg sm:text-xl font-semibold text-text-primary">Compare Runs</h2>
-        {commonMetrics.length > 0 && (
-          <select
-            value={selectedMetric}
-            onChange={(e) => setSelectedMetric(e.target.value)}
-            className="w-full sm:w-auto px-3 py-2 border border-border rounded-lg text-text-primary bg-surface-secondary focus:outline-none focus:ring-2 focus:ring-accent"
-          >
-            {commonMetrics.map((name) => (
-              <option key={name} value={name}>
-                {metricDisplayNameByRaw.get(name) || name}
-              </option>
-            ))}
-          </select>
-        )}
+      <div className="flex flex-col gap-3 mb-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <h2 className="text-lg sm:text-xl font-semibold text-text-primary">Compare Runs</h2>
+          {commonMetrics.length > 0 && (
+            <select
+              value={selectedMetric}
+              onChange={(e) => setSelectedMetric(e.target.value)}
+              className="w-full sm:w-auto px-3 py-2 border border-border rounded-lg text-text-primary bg-surface-secondary focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              {commonMetrics.map((name) => (
+                <option key={name} value={name}>
+                  {metricDisplayNameByRaw.get(name) || name}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="text-xs text-text-muted">
+            Derived Series
+            <select
+              value={derivedMode}
+              onChange={(event) => setDerivedMode(event.target.value as DerivedSeriesMode)}
+              className="mt-1 block rounded-md border border-border bg-surface-secondary px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              <option value="none">Raw only</option>
+              <option value="ema">EMA</option>
+              <option value="delta">Delta</option>
+              <option value="pct_change">% Change</option>
+              <option value="cumulative_avg">Cumulative Avg</option>
+            </select>
+          </label>
+          {derivedMode === 'ema' && (
+            <label className="text-xs text-text-muted">
+              EMA Window
+              <input
+                type="number"
+                min={2}
+                max={512}
+                value={derivedWindow}
+                onChange={(event) => {
+                  const next = Number(event.target.value);
+                  if (!Number.isFinite(next)) return;
+                  setDerivedWindow(Math.max(2, Math.min(512, Math.floor(next))));
+                }}
+                className="mt-1 block w-24 rounded-md border border-border bg-surface-secondary px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+              />
+            </label>
+          )}
+          <label className="inline-flex items-center gap-2 rounded-md border border-border bg-surface-secondary px-3 py-2 text-sm text-text-secondary">
+            <input
+              type="checkbox"
+              checked={showRawSeries}
+              disabled={derivedMode === 'none'}
+              onChange={(event) => setShowRawSeries(event.target.checked)}
+              className="rounded border-border bg-surface"
+            />
+            Show raw lines
+          </label>
+          {notice && <span className="text-xs text-text-muted">{notice}</span>}
+        </div>
       </div>
 
       {/* Legend */}
@@ -259,11 +401,11 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
           {/* Inline chart with expand button */}
           <div className="rounded-lg border border-border overflow-hidden relative" data-compare-chart>
             <UPlotChart
-              title={`${selectedMetricLabel} across runs`}
+              title={`${selectedMetricLabel} across runs${derivedMode === 'none' ? '' : ` • ${computedLabel}`}`}
               xData={sortedSteps}
               series={chartSeries}
               xLabel="Step"
-              yLabel={selectedMetricLabel}
+              yLabel={yAxisLabel}
               height={320}
               interactive={true}
               darkTheme={isDark}
@@ -286,7 +428,7 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
               <div className="flex items-center justify-between px-6 py-3 border-b border-border shrink-0">
                 <div className="flex items-center gap-4">
                   <h2 className="text-lg font-semibold text-text-primary">
-                    {selectedMetricLabel} across runs
+                    {selectedMetricLabel} across runs{derivedMode === 'none' ? '' : ` • ${computedLabel}`}
                   </h2>
                   {commonMetrics.length > 1 && (
                     <select
@@ -339,7 +481,8 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
               {/* Expanded chart — takes remaining space */}
               <div ref={expandedChartRef} className="flex-1 min-h-0 p-4">
                 <ExpandedChart
-                  selectedMetric={selectedMetric}
+                  title={`${selectedMetricLabel} across runs${derivedMode === 'none' ? '' : ` • ${computedLabel}`}`}
+                  yLabel={yAxisLabel}
                   sortedSteps={sortedSteps}
                   chartSeries={chartSeries}
                   isDark={isDark}
@@ -402,12 +545,14 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
  * container height independently and passes it to UPlotChart.
  */
 function ExpandedChart({
-  selectedMetric,
+  title,
+  yLabel,
   sortedSteps,
   chartSeries,
   isDark,
 }: {
-  selectedMetric: string;
+  title: string;
+  yLabel: string;
   sortedSteps: number[];
   chartSeries: { label: string; color: string; data: number[]; upper?: number[]; lower?: number[] }[];
   isDark: boolean;
@@ -433,11 +578,11 @@ function ExpandedChart({
   return (
     <div ref={containerRef} className="w-full h-full">
       <UPlotChart
-        title={`${selectedMetric} across runs`}
+        title={title}
         xData={sortedSteps}
         series={chartSeries}
         xLabel="Step"
-        yLabel={selectedMetric}
+        yLabel={yLabel}
         height={chartHeight}
         interactive={true}
         darkTheme={isDark}

@@ -15,6 +15,9 @@ import {
   upsertComparePreset,
 } from '@/lib/presets';
 
+const RUN_SELECTOR_FETCH_LIMIT = 1000;
+const MAX_COMPARE_SELECTION = 5000;
+
 function ComparePageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -22,15 +25,18 @@ function ComparePageContent() {
   // Get run IDs from URL
   const runIdsParam = searchParams.get('runs') || '';
   const selectedRunIds = useMemo(
-    () => (runIdsParam ? runIdsParam.split(',') : []),
+    () => normalizeRunIdSet(runIdsParam ? runIdsParam.split(',') : []),
     [runIdsParam]
   );
 
   // Available runs for selection
   const [runs, setRuns] = useState<Run[]>([]);
+  const [runSearch, setRunSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [savedComparePresets, setSavedComparePresets] = useState<ComparePreset[]>([]);
   const [activeComparePresetId, setActiveComparePresetId] = useState('');
+  const [selectorStatus, setSelectorStatus] = useState<string | null>(null);
+  const [invalidSelectedRunIds, setInvalidSelectedRunIds] = useState<string[]>([]);
 
   // Fetch available runs
   const fetchRuns = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
@@ -38,7 +44,7 @@ function ComparePageContent() {
       setLoading(true);
     }
     try {
-      const response = await api.listRuns({ limit: 100 });
+      const response = await api.listRuns({ limit: RUN_SELECTOR_FETCH_LIMIT });
       setRuns(response.runs);
     } catch (err) {
       console.error('Failed to fetch runs:', err);
@@ -56,6 +62,11 @@ function ComparePageContent() {
   useEffect(() => {
     setSavedComparePresets(loadComparePresets());
   }, []);
+
+  const runIndex = useMemo(
+    () => new Map(runs.map((run) => [run.run_id, run])),
+    [runs]
+  );
 
   useEffect(() => {
     const normalizedSelection = normalizeRunIdSet(selectedRunIds);
@@ -79,9 +90,58 @@ function ComparePageContent() {
     { intervalMs: 30000, enabled: true, runOnMount: false }
   );
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const unresolvedRunIds = selectedRunIds.filter((runId) => !runIndex.has(runId));
+    if (unresolvedRunIds.length === 0) {
+      setInvalidSelectedRunIds([]);
+      return () => {};
+    }
+
+    const resolveSelection = async () => {
+      const resolvedRuns: Run[] = [];
+      const invalidIds: string[] = [];
+
+      await Promise.all(
+        unresolvedRunIds.map(async (runId) => {
+          try {
+            const run = await api.getRun(runId);
+            resolvedRuns.push(run);
+          } catch {
+            invalidIds.push(runId);
+          }
+        })
+      );
+
+      if (cancelled) return;
+      if (resolvedRuns.length > 0) {
+        setRuns((previous) => {
+          const merged = new Map(previous.map((run) => [run.run_id, run]));
+          for (const run of resolvedRuns) {
+            merged.set(run.run_id, run);
+          }
+          return [...merged.values()];
+        });
+      }
+      setInvalidSelectedRunIds(invalidIds);
+      if (invalidIds.length > 0) {
+        setSelectorStatus(
+          `${invalidIds.length} selected run(s) were not found and can be removed from this sweep comparison.`
+        );
+      }
+    };
+
+    void resolveSelection();
+    return () => {
+      cancelled = true;
+    };
+  }, [runIndex, selectedRunIds]);
+
   const applyRunSelection = useCallback(
     (runIds: string[]) => {
       const normalizedSelection = normalizeRunIdSet(runIds);
+      setSelectorStatus(null);
       const newParams = new URLSearchParams(searchParams);
       if (normalizedSelection.length > 0) {
         newParams.set('runs', normalizedSelection.join(','));
@@ -96,6 +156,10 @@ function ComparePageContent() {
 
   // Toggle run selection
   const toggleRun = (runId: string) => {
+    if (!selectedRunIds.includes(runId) && selectedRunIds.length >= MAX_COMPARE_SELECTION) {
+      setSelectorStatus(`Maximum ${MAX_COMPARE_SELECTION} runs can be selected at once.`);
+      return;
+    }
     const newSelection = selectedRunIds.includes(runId)
       ? selectedRunIds.filter((id) => id !== runId)
       : [...selectedRunIds, runId];
@@ -117,6 +181,7 @@ function ComparePageContent() {
       setSavedComparePresets(result.presets);
       setActiveComparePresetId(result.saved.id);
       saveComparePresets(result.presets);
+      setSelectorStatus(`Saved compare preset '${result.saved.name}'.`);
     } catch (err) {
       console.error('Failed to save compare preset', err);
     }
@@ -145,6 +210,21 @@ function ComparePageContent() {
   const clearSelection = () => {
     applyRunSelection([]);
   };
+
+  const removeInvalidSelection = () => {
+    if (invalidSelectedRunIds.length === 0) return;
+    applyRunSelection(selectedRunIds.filter((runId) => !invalidSelectedRunIds.includes(runId)));
+    setInvalidSelectedRunIds([]);
+  };
+
+  const filteredRuns = useMemo(() => {
+    const query = runSearch.trim().toLowerCase();
+    if (!query) return runs;
+    return runs.filter((run) => {
+      const runName = (run.name || '').toLowerCase();
+      return runName.includes(query) || run.run_id.toLowerCase().includes(query);
+    });
+  }, [runSearch, runs]);
 
   const selectedPreset = savedComparePresets.find((preset) => preset.id === activeComparePresetId);
 
@@ -209,16 +289,44 @@ function ComparePageContent() {
 
       {/* Content */}
       <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6">
+        {selectorStatus && (
+          <div className="mb-4 rounded-lg border border-border bg-surface-secondary px-3 py-2 text-sm text-text-secondary">
+            {selectorStatus}
+          </div>
+        )}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Run Selector */}
           <div className="lg:col-span-1">
             <div className="bg-surface rounded-xl border border-border p-4 sticky top-16 md:top-4">
               <h2 className="font-semibold text-text-primary mb-3">Select Runs</h2>
+              <div className="mb-3">
+                <input
+                  type="text"
+                  value={runSearch}
+                  onChange={(event) => setRunSearch(event.target.value)}
+                  placeholder="Search run name or ID..."
+                  className="w-full rounded-lg border border-border bg-surface-secondary px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent"
+                />
+              </div>
+              {invalidSelectedRunIds.length > 0 && (
+                <div className="mb-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span>{invalidSelectedRunIds.length} invalid selected run(s).</span>
+                    <button
+                      type="button"
+                      onClick={removeInvalidSelection}
+                      className="rounded border border-warning/40 px-2 py-1 font-medium hover:bg-warning/10"
+                    >
+                      Remove invalid
+                    </button>
+                  </div>
+                </div>
+              )}
               {loading ? (
                 <div className="text-text-muted text-sm">Loading runs...</div>
               ) : (
                 <div className="space-y-1.5 max-h-96 overflow-y-auto">
-                  {runs.map((run) => {
+                  {filteredRuns.map((run) => {
                     const isSelected = selectedRunIds.includes(run.run_id);
                     return (
                       <label
@@ -249,6 +357,11 @@ function ComparePageContent() {
                       </label>
                     );
                   })}
+                  {filteredRuns.length === 0 && (
+                    <div className="rounded-lg border border-border bg-surface-secondary px-3 py-2 text-sm text-text-muted">
+                      No runs match your search.
+                    </div>
+                  )}
                 </div>
               )}
             </div>

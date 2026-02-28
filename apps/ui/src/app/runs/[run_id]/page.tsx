@@ -9,6 +9,7 @@ import { groupMetrics } from '@/lib/metricGroups';
 import { UPlotChart, type ChartSeries } from '@/components/charts/UPlotChart';
 import { useTheme } from '@/components/ThemeProvider';
 import { useAutoRefresh } from '@/lib/useAutoRefresh';
+import { computeDerivedSeries, derivedModeLabel, type DerivedSeriesMode } from '@/lib/computedSeries';
 
 type ChartData = {
   xData: number[];
@@ -38,6 +39,7 @@ type EventLevelFilter = 'all' | 'debug' | 'info' | 'warn' | 'error';
 type MetricChartView = {
   name: string;
   displayName: string;
+  yLabel: string;
   xData: number[];
   series: ChartSeries[];
 };
@@ -210,6 +212,17 @@ function humanizeKey(raw: string): string {
 
 function metricDisplayName(metricName: string, aliasMap: Record<string, string>): string {
   return aliasMap[metricName]?.trim() || metricName;
+}
+
+function metricYAxisLabel(
+  displayName: string,
+  derivedMode: DerivedSeriesMode,
+  derivedWindow: number,
+  showRawSeries: boolean
+): string {
+  if (derivedMode === 'none' || showRawSeries) return displayName;
+  if (derivedMode === 'pct_change') return `${displayName} (% change)`;
+  return `${displayName} (${derivedModeLabel(derivedMode, derivedWindow)})`;
 }
 
 function buildTagIndex(tags: Record<string, string>): Map<string, string> {
@@ -561,6 +574,9 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [activeMetricGroup, setActiveMetricGroup] = useState('all');
+  const [derivedMode, setDerivedMode] = useState<DerivedSeriesMode>('none');
+  const [derivedWindow, setDerivedWindow] = useState(16);
+  const [showRawSeries, setShowRawSeries] = useState(true);
   const [eventLevelFilter, setEventLevelFilter] = useState<EventLevelFilter>('all');
   const eventsCursorRef = useRef<number | null>(null);
 
@@ -678,18 +694,36 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     { intervalMs: 4000, enabled: run?.status === 'running', runOnMount: false }
   );
 
+  useEffect(() => {
+    if (derivedMode === 'none') {
+      setShowRawSeries(true);
+    }
+  }, [derivedMode]);
+
   const perMetricCharts = useMemo<MetricChartView[]>(() => {
     return metrics.map((series) => {
       const displayName = metricDisplayName(series.name, metricAliases);
       const aligned = alignSeriesForChart([series]);
+      const rawSeries = aligned.series[0];
+      const chartSeries: ChartSeries[] = [];
+      if (showRawSeries || derivedMode === 'none') {
+        chartSeries.push({ ...rawSeries, label: displayName });
+      }
+      if (derivedMode !== 'none') {
+        chartSeries.push({
+          label: `${displayName} ${derivedModeLabel(derivedMode, derivedWindow)}`,
+          data: computeDerivedSeries(rawSeries.data, derivedMode, derivedWindow),
+        });
+      }
       return {
         name: series.name,
         displayName,
+        yLabel: metricYAxisLabel(displayName, derivedMode, derivedWindow, showRawSeries),
         xData: aligned.xData,
-        series: aligned.series.map((entry) => ({ ...entry, label: displayName })),
+        series: chartSeries,
       };
     });
-  }, [metricAliases, metrics]);
+  }, [derivedMode, derivedWindow, metricAliases, metrics, showRawSeries]);
 
   const metricChartGroups = useMemo<MetricChartGroup[]>(() => {
     if (perMetricCharts.length === 0) return [];
@@ -1024,6 +1058,60 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
                 <section className="mb-4 rounded-2xl border border-border bg-surface px-4 py-3">
                   <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                     <h2 className="text-sm font-semibold uppercase tracking-[0.06em] text-text-muted">
+                      Chart Analysis
+                    </h2>
+                    <span className="text-xs text-text-muted">
+                      Derived mode: {derivedModeLabel(derivedMode, derivedWindow)}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-end gap-2">
+                    <label className="text-xs text-text-muted">
+                      Derived Series
+                      <select
+                        value={derivedMode}
+                        onChange={(event) => setDerivedMode(event.target.value as DerivedSeriesMode)}
+                        className="mt-1 block rounded-md border border-border bg-surface-secondary px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+                      >
+                        <option value="none">Raw only</option>
+                        <option value="ema">EMA</option>
+                        <option value="delta">Delta</option>
+                        <option value="pct_change">% Change</option>
+                        <option value="cumulative_avg">Cumulative Avg</option>
+                      </select>
+                    </label>
+                    {derivedMode === 'ema' && (
+                      <label className="text-xs text-text-muted">
+                        EMA Window
+                        <input
+                          type="number"
+                          min={2}
+                          max={512}
+                          value={derivedWindow}
+                          onChange={(event) => {
+                            const next = Number(event.target.value);
+                            if (!Number.isFinite(next)) return;
+                            setDerivedWindow(Math.max(2, Math.min(512, Math.floor(next))));
+                          }}
+                          className="mt-1 block w-24 rounded-md border border-border bg-surface-secondary px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+                        />
+                      </label>
+                    )}
+                    <label className="inline-flex items-center gap-2 rounded-md border border-border bg-surface-secondary px-3 py-2 text-sm text-text-secondary">
+                      <input
+                        type="checkbox"
+                        checked={showRawSeries}
+                        disabled={derivedMode === 'none'}
+                        onChange={(event) => setShowRawSeries(event.target.checked)}
+                        className="rounded border-border bg-surface"
+                      />
+                      Show raw lines
+                    </label>
+                  </div>
+                </section>
+
+                <section className="mb-4 rounded-2xl border border-border bg-surface px-4 py-3">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <h2 className="text-sm font-semibold uppercase tracking-[0.06em] text-text-muted">
                       Metric Groups
                     </h2>
                     <span className="text-sm text-text-secondary">
@@ -1081,7 +1169,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
                             xData={chart.xData}
                             series={chart.series}
                             xLabel="Step"
-                            yLabel={chart.displayName}
+                            yLabel={chart.yLabel}
                             height={280}
                             interactive={true}
                             darkTheme={isDark}
