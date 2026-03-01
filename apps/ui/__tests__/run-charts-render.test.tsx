@@ -215,21 +215,24 @@ describe('Run charts rendering', () => {
     await screen.findByTestId('uplot-chart')
 
     await waitFor(() => {
-      expect(compareRunsMock).toHaveBeenCalledWith(['run-a', 'run-b'], [], 5000)
+      expect(compareRunsMock).toHaveBeenCalledWith(['run-a', 'run-b'], [], 5000, {
+        limit: 200,
+        offset: 0,
+      })
     })
 
     const compareCall = uPlotChartMock.mock.calls
       .map(([props]) => props as {
         xData?: number[];
-        series?: Array<{ label: string; data: Array<number | null> }>;
+        series?: Array<{ label: string; data: number[] }>;
       })
       .find((props) => props.xData?.length === 3 && props.series?.length === 2)
 
     expect(compareCall).toBeDefined()
     expect(compareCall?.xData).toEqual([1, 2, 3])
     expect(compareCall?.series).toMatchObject([
-      { label: 'Run A', data: [1.1, null, 1.4] },
-      { label: 'Run B', data: [null, 0.9, null] },
+      { label: 'Run A', data: [1.1, Number.NaN, 1.4] },
+      { label: 'Run B', data: [Number.NaN, 0.9, Number.NaN] },
     ])
   })
 })

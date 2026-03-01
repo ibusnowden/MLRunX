@@ -78,19 +78,34 @@ describe('presets', () => {
   })
 
   it('normalizes run id sets for compare presets', () => {
-    expect(normalizeRunIdSet(['run-b', 'run-a', 'run-b', ''])).toEqual(['run-a', 'run-b'])
+    expect(normalizeRunIdSet(['run-b', 'run-a', 'run-b', ''])).toEqual(['run-b', 'run-a'])
   })
 
   it('round-trips compare presets and supports delete', () => {
-    const first = upsertComparePreset([], 'A/B', ['run-b', 'run-a'])
+    const first = upsertComparePreset(
+      [],
+      'A/B',
+      ['run-b', 'run-a'],
+      { reward: 'higher', loss: 'lower' }
+    )
     saveComparePresets(first.presets)
 
     const loaded = loadComparePresets()
     expect(loaded).toHaveLength(1)
-    expect(loaded[0].runIds).toEqual(['run-a', 'run-b'])
+    expect(loaded[0].runIds).toEqual(['run-b', 'run-a'])
+    expect(loaded[0].metricObjectives).toEqual({ loss: 'lower', reward: 'higher' })
 
     const afterDelete = deleteComparePreset(loaded, loaded[0].id)
     expect(afterDelete).toHaveLength(0)
+  })
+
+  it('updates compare preset by name and clears objective overrides when omitted', () => {
+    const first = upsertComparePreset([], 'A/B', ['run-a', 'run-b'], { loss: 'lower' })
+    const second = upsertComparePreset(first.presets, 'a/b', ['run-c', 'run-d'])
+
+    expect(second.presets).toHaveLength(1)
+    expect(second.presets[0].runIds).toEqual(['run-c', 'run-d'])
+    expect(second.presets[0].metricObjectives).toBeUndefined()
   })
 
   it('returns empty lists when stored payload is invalid JSON', () => {

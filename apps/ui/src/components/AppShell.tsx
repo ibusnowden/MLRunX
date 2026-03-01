@@ -6,6 +6,7 @@ import { Sidebar } from './Sidebar';
 import { useSidebar } from './SidebarProvider';
 import { ApiError, api, getStoredApiConfig } from '@/lib/api';
 import { isPublicAuthPath } from '@/lib/auth/routes';
+import { CompareTray } from './CompareTray';
 
 const MenuIcon = () => (
   <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -155,6 +156,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <span className="text-sm font-semibold text-text-primary">{pageTitle}</span>
         </header>
         {children}
+        <CompareTray />
       </div>
     </div>
   );

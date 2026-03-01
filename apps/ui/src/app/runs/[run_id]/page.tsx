@@ -10,6 +10,14 @@ import { UPlotChart, type ChartSeries } from '@/components/charts/UPlotChart';
 import { useTheme } from '@/components/ThemeProvider';
 import { useAutoRefresh } from '@/lib/useAutoRefresh';
 import { computeDerivedSeries, derivedModeLabel, type DerivedSeriesMode } from '@/lib/computedSeries';
+import {
+  getCompareUrl,
+  getQuickCompareTarget,
+  setCompareBaseline,
+  setCompareCandidate,
+  startCompareWithRun,
+  useCompareSelectionState,
+} from '@/lib/compareSelection';
 
 type ChartData = {
   xData: number[];
@@ -579,8 +587,15 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
   const [showRawSeries, setShowRawSeries] = useState(true);
   const [eventLevelFilter, setEventLevelFilter] = useState<EventLevelFilter>('all');
   const eventsCursorRef = useRef<number | null>(null);
+  const compareSelection = useCompareSelectionState();
 
   const workspaceView = parseWorkspaceView(searchParams.get('view'));
+  const quickCompareTarget = getQuickCompareTarget(runId, compareSelection);
+  const quickCompareLabel = quickCompareTarget === 'baseline'
+    ? 'Compare w/ Baseline'
+    : quickCompareTarget === 'candidate'
+      ? 'Compare w/ Candidate'
+      : 'Compare';
 
   const setWorkspaceView = useCallback(
     (nextView: WorkspaceView) => {
@@ -597,6 +612,18 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
       toggleTheme();
     }
   };
+  const handleQuickCompare = useCallback(() => {
+    const next = startCompareWithRun(runId);
+    router.push(getCompareUrl(next));
+  }, [router, runId]);
+
+  const handleSetBaseline = useCallback(() => {
+    setCompareBaseline(runId);
+  }, [runId]);
+
+  const handleSetCandidate = useCallback(() => {
+    setCompareCandidate(runId);
+  }, [runId]);
 
   const fetchRun = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     if (!silent) {
@@ -900,11 +927,33 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
 
             <button
               type="button"
-              onClick={() => router.push(`/compare?runs=${encodeURIComponent(run.run_id)}`)}
+              onClick={handleQuickCompare}
               className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-border bg-surface px-3 text-sm font-medium text-text-secondary transition-all duration-200 hover:-translate-y-0.5 hover:bg-surface-hover hover:text-text-primary"
             >
               <CompareIcon />
-              Compare
+              {quickCompareLabel}
+            </button>
+            <button
+              type="button"
+              onClick={handleSetBaseline}
+              className={`inline-flex h-9 items-center rounded-lg border px-2.5 text-xs font-semibold transition-all duration-200 hover:-translate-y-0.5 ${
+                compareSelection.baselineRunId === run.run_id
+                  ? 'border-accent/50 bg-accent-subtle text-accent'
+                  : 'border-border bg-surface text-text-secondary hover:bg-surface-hover hover:text-text-primary'
+              }`}
+            >
+              Set Baseline
+            </button>
+            <button
+              type="button"
+              onClick={handleSetCandidate}
+              className={`inline-flex h-9 items-center rounded-lg border px-2.5 text-xs font-semibold transition-all duration-200 hover:-translate-y-0.5 ${
+                compareSelection.candidateRunId === run.run_id
+                  ? 'border-accent/50 bg-accent-subtle text-accent'
+                  : 'border-border bg-surface text-text-secondary hover:bg-surface-hover hover:text-text-primary'
+              }`}
+            >
+              Set Candidate
             </button>
 
             {showDeleteConfirm ? (

@@ -12,8 +12,9 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-const SQLITE_SCHEMA_VERSION: &str = "2026-02-28.1";
-const SQLITE_SCHEMA_DESCRIPTION: &str = "adds project-scoped metric alias table";
+const SQLITE_SCHEMA_VERSION: &str = "2026-03-01.1";
+const SQLITE_SCHEMA_DESCRIPTION: &str =
+    "extends metric aliases with unit/description/active fields and active-display uniqueness";
 
 /// Errors that can occur in `SQLite` operations.
 #[derive(Error, Debug)]
@@ -130,6 +131,9 @@ impl SqliteStore {
                 project_id TEXT NOT NULL,
                 metric_name TEXT NOT NULL,
                 display_name TEXT NOT NULL,
+                unit TEXT,
+                description TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY(project_id, metric_name),
@@ -384,6 +388,30 @@ impl SqliteStore {
             "users",
             "is_platform_admin",
             "ALTER TABLE users ADD COLUMN is_platform_admin INTEGER NOT NULL DEFAULT 0",
+        )?;
+        Self::ensure_table_column(
+            &conn,
+            "metric_aliases",
+            "unit",
+            "ALTER TABLE metric_aliases ADD COLUMN unit TEXT",
+        )?;
+        Self::ensure_table_column(
+            &conn,
+            "metric_aliases",
+            "description",
+            "ALTER TABLE metric_aliases ADD COLUMN description TEXT",
+        )?;
+        Self::ensure_table_column(
+            &conn,
+            "metric_aliases",
+            "is_active",
+            "ALTER TABLE metric_aliases ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
+        )?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_metric_aliases_project_display_active \
+             ON metric_aliases(project_id, lower(display_name)) \
+             WHERE is_active = 1",
+            [],
         )?;
 
         conn.execute(
@@ -1912,7 +1940,7 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
 
         let mut stmt = conn.prepare(
-            r"SELECT project_id, metric_name, display_name, created_at, updated_at
+            r"SELECT project_id, metric_name, display_name, unit, description, is_active, created_at, updated_at
                FROM metric_aliases
                WHERE project_id = ?1
                ORDER BY metric_name ASC",
@@ -1922,8 +1950,11 @@ impl SqliteStore {
                 project_id: row.get(0)?,
                 metric_name: row.get(1)?,
                 display_name: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
+                unit: row.get(3)?,
+                description: row.get(4)?,
+                is_active: row.get::<_, i64>(5)? != 0,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
             })
         })?;
 
@@ -1939,6 +1970,7 @@ impl SqliteStore {
         let aliases = self.list_metric_aliases(project_id).await?;
         Ok(aliases
             .into_iter()
+            .filter(|alias| alias.is_active)
             .map(|alias| (alias.metric_name, alias.display_name))
             .collect())
     }
@@ -1949,18 +1981,35 @@ impl SqliteStore {
         project_id: &str,
         metric_name: &str,
         display_name: &str,
+        unit: Option<&str>,
+        description: Option<&str>,
+        is_active: bool,
     ) -> Result<MetricAliasRow, SqliteError> {
         let conn = self.conn.lock().await;
         conn.execute(
-            r"INSERT INTO metric_aliases (project_id, metric_name, display_name, created_at, updated_at)
-               VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))
+            r"INSERT INTO metric_aliases (
+                   project_id, metric_name, display_name, unit, description, is_active, created_at, updated_at
+               )
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), datetime('now'))
                ON CONFLICT(project_id, metric_name)
-               DO UPDATE SET display_name = excluded.display_name, updated_at = datetime('now')",
-            params![project_id, metric_name, display_name],
+               DO UPDATE SET
+                   display_name = excluded.display_name,
+                   unit = excluded.unit,
+                   description = excluded.description,
+                   is_active = excluded.is_active,
+                   updated_at = datetime('now')",
+            params![
+                project_id,
+                metric_name,
+                display_name,
+                unit,
+                description,
+                if is_active { 1 } else { 0 }
+            ],
         )?;
 
         let row = conn.query_row(
-            r"SELECT project_id, metric_name, display_name, created_at, updated_at
+            r"SELECT project_id, metric_name, display_name, unit, description, is_active, created_at, updated_at
                FROM metric_aliases
                WHERE project_id = ?1 AND metric_name = ?2",
             params![project_id, metric_name],
@@ -1969,8 +2018,11 @@ impl SqliteStore {
                     project_id: row.get(0)?,
                     metric_name: row.get(1)?,
                     display_name: row.get(2)?,
-                    created_at: row.get(3)?,
-                    updated_at: row.get(4)?,
+                    unit: row.get(3)?,
+                    description: row.get(4)?,
+                    is_active: row.get::<_, i64>(5)? != 0,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             },
         )?;
@@ -2658,6 +2710,9 @@ pub struct MetricAliasRow {
     pub project_id: String,
     pub metric_name: String,
     pub display_name: String,
+    pub unit: Option<String>,
+    pub description: Option<String>,
+    pub is_active: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -3141,23 +3196,43 @@ mod tests {
             .unwrap();
 
         let created = store
-            .upsert_metric_alias(&project_id, "train/loss", "Training Loss")
+            .upsert_metric_alias(
+                &project_id,
+                "train/loss",
+                "Training Loss",
+                Some("loss"),
+                Some("Primary training loss"),
+                true,
+            )
             .await
             .unwrap();
         assert_eq!(created.project_id, project_id);
         assert_eq!(created.metric_name, "train/loss");
         assert_eq!(created.display_name, "Training Loss");
+        assert_eq!(created.unit.as_deref(), Some("loss"));
+        assert_eq!(
+            created.description.as_deref(),
+            Some("Primary training loss")
+        );
+        assert!(created.is_active);
 
         let aliases = store.list_metric_aliases(&project_id).await.unwrap();
         assert_eq!(aliases.len(), 1);
         assert_eq!(aliases[0].metric_name, "train/loss");
 
         store
-            .upsert_metric_alias(&project_id, "train/loss", "Loss")
+            .upsert_metric_alias(&project_id, "train/loss", "Loss", None, None, true)
             .await
             .unwrap();
         let alias_map = store.get_metric_alias_map(&project_id).await.unwrap();
         assert_eq!(alias_map.get("train/loss"), Some(&"Loss".to_string()));
+
+        store
+            .upsert_metric_alias(&project_id, "train/loss", "Loss", None, None, false)
+            .await
+            .unwrap();
+        let inactive_alias_map = store.get_metric_alias_map(&project_id).await.unwrap();
+        assert!(!inactive_alias_map.contains_key("train/loss"));
 
         let deleted = store
             .delete_metric_alias(&project_id, "train/loss")
@@ -3166,6 +3241,35 @@ mod tests {
         assert!(deleted);
         let aliases_after_delete = store.list_metric_aliases(&project_id).await.unwrap();
         assert!(aliases_after_delete.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_metric_alias_active_display_name_uniqueness() {
+        let store = create_test_store().await;
+        let project_id = store
+            .get_or_create_project("metric-alias-uniqueness-project")
+            .await
+            .unwrap();
+
+        store
+            .upsert_metric_alias(&project_id, "train/loss", "Loss", None, None, true)
+            .await
+            .unwrap();
+
+        let duplicate = store
+            .upsert_metric_alias(&project_id, "eval/loss", "Loss", None, None, true)
+            .await;
+        assert!(duplicate.is_err());
+
+        store
+            .upsert_metric_alias(&project_id, "train/loss", "Loss", None, None, false)
+            .await
+            .unwrap();
+
+        store
+            .upsert_metric_alias(&project_id, "eval/loss", "Loss", None, None, true)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

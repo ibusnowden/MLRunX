@@ -14,9 +14,38 @@ import {
   type ComparePreset,
   upsertComparePreset,
 } from '@/lib/presets';
+import {
+  normalizeMetricObjectiveOverrides,
+  parseMetricObjectiveOverridesParam,
+  serializeMetricObjectiveOverridesParam,
+  type MetricObjective,
+} from '@/lib/compareObjectives';
 
 const RUN_SELECTOR_FETCH_LIMIT = 1000;
 const MAX_COMPARE_SELECTION = 5000;
+
+function objectivesEqual(
+  left: Record<string, MetricObjective>,
+  right: Record<string, MetricObjective>
+): boolean {
+  const leftEntries = Object.entries(normalizeMetricObjectiveOverrides(left));
+  const rightEntries = Object.entries(normalizeMetricObjectiveOverrides(right));
+  if (leftEntries.length !== rightEntries.length) return false;
+  return leftEntries.every(([metricName, objective], index) => {
+    const [otherMetricName, otherObjective] = rightEntries[index] ?? [];
+    return metricName === otherMetricName && objective === otherObjective;
+  });
+}
+
+function formatComparePresetOptionLabel(preset: ComparePreset): string {
+  const runCount = preset.runIds.length;
+  const objectiveOverrideCount = Object.keys(preset.metricObjectives ?? {}).length;
+  const runLabel = `${runCount} run${runCount === 1 ? '' : 's'}`;
+  const objectiveLabel = objectiveOverrideCount === 0
+    ? 'default objectives'
+    : `${objectiveOverrideCount} objective override${objectiveOverrideCount === 1 ? '' : 's'}`;
+  return `${preset.name} (${runLabel}, ${objectiveLabel})`;
+}
 
 function ComparePageContent() {
   const router = useRouter();
@@ -24,9 +53,14 @@ function ComparePageContent() {
 
   // Get run IDs from URL
   const runIdsParam = searchParams.get('runs') || '';
+  const metricObjectivesParam = searchParams.get('metricObjectives');
   const selectedRunIds = useMemo(
     () => normalizeRunIdSet(runIdsParam ? runIdsParam.split(',') : []),
     [runIdsParam]
+  );
+  const metricObjectiveOverrides = useMemo(
+    () => parseMetricObjectiveOverridesParam(metricObjectivesParam),
+    [metricObjectivesParam]
   );
 
   // Available runs for selection
@@ -70,6 +104,7 @@ function ComparePageContent() {
 
   useEffect(() => {
     const normalizedSelection = normalizeRunIdSet(selectedRunIds);
+    const normalizedObjectives = normalizeMetricObjectiveOverrides(metricObjectiveOverrides);
     if (normalizedSelection.length === 0) {
       setActiveComparePresetId('');
       return;
@@ -77,13 +112,15 @@ function ComparePageContent() {
 
     const matchedPreset = savedComparePresets.find((preset) => {
       const normalizedPresetRuns = normalizeRunIdSet(preset.runIds);
+      const normalizedPresetObjectives = normalizeMetricObjectiveOverrides(preset.metricObjectives ?? {});
       return (
         normalizedPresetRuns.length === normalizedSelection.length &&
-        normalizedPresetRuns.every((runId, index) => runId === normalizedSelection[index])
+        normalizedPresetRuns.every((runId, index) => runId === normalizedSelection[index]) &&
+        objectivesEqual(normalizedPresetObjectives, normalizedObjectives)
       );
     });
     setActiveComparePresetId(matchedPreset?.id || '');
-  }, [savedComparePresets, selectedRunIds]);
+  }, [savedComparePresets, selectedRunIds, metricObjectiveOverrides]);
 
   useAutoRefresh(
     () => fetchRuns({ silent: true }),
@@ -138,20 +175,52 @@ function ComparePageContent() {
     };
   }, [runIndex, selectedRunIds]);
 
-  const applyRunSelection = useCallback(
-    (runIds: string[]) => {
+  const applyCompareState = useCallback(
+    (
+      runIds: string[],
+      objectives: Record<string, MetricObjective>,
+      { clearStatus = false }: { clearStatus?: boolean } = {}
+    ) => {
       const normalizedSelection = normalizeRunIdSet(runIds);
-      setSelectorStatus(null);
+      const normalizedObjectives = normalizeMetricObjectiveOverrides(objectives);
+      const serializedObjectives = serializeMetricObjectiveOverridesParam(normalizedObjectives);
+
       const newParams = new URLSearchParams(searchParams);
       if (normalizedSelection.length > 0) {
         newParams.set('runs', normalizedSelection.join(','));
       } else {
         newParams.delete('runs');
       }
-      const query = newParams.toString();
-      router.push(query ? `/compare?${query}` : '/compare');
+      if (serializedObjectives) {
+        newParams.set('metricObjectives', serializedObjectives);
+      } else {
+        newParams.delete('metricObjectives');
+      }
+
+      const currentQuery = searchParams.toString();
+      const nextQuery = newParams.toString();
+      if (nextQuery === currentQuery) return;
+
+      if (clearStatus) {
+        setSelectorStatus(null);
+      }
+      router.push(nextQuery ? `/compare?${nextQuery}` : '/compare');
     },
     [router, searchParams]
+  );
+
+  const applyRunSelection = useCallback(
+    (runIds: string[]) => {
+      applyCompareState(runIds, metricObjectiveOverrides, { clearStatus: true });
+    },
+    [applyCompareState, metricObjectiveOverrides]
+  );
+
+  const handleMetricObjectiveOverridesChange = useCallback(
+    (objectives: Record<string, MetricObjective>) => {
+      applyCompareState(selectedRunIds, objectives);
+    },
+    [applyCompareState, selectedRunIds]
   );
 
   // Toggle run selection
@@ -177,7 +246,12 @@ function ComparePageContent() {
     if (!name) return;
 
     try {
-      const result = upsertComparePreset(savedComparePresets, name, normalizedSelection);
+      const result = upsertComparePreset(
+        savedComparePresets,
+        name,
+        normalizedSelection,
+        metricObjectiveOverrides
+      );
       setSavedComparePresets(result.presets);
       setActiveComparePresetId(result.saved.id);
       saveComparePresets(result.presets);
@@ -195,7 +269,7 @@ function ComparePageContent() {
     const preset = savedComparePresets.find((entry) => entry.id === presetId);
     if (!preset) return;
     setActiveComparePresetId(preset.id);
-    applyRunSelection(preset.runIds);
+    applyCompareState(preset.runIds, preset.metricObjectives ?? {}, { clearStatus: true });
   };
 
   const handleDeletePreset = () => {
@@ -255,7 +329,7 @@ function ComparePageContent() {
                 <option value="">Compare Presets</option>
                 {savedComparePresets.map((preset) => (
                   <option key={preset.id} value={preset.id}>
-                    {preset.name} ({preset.runIds.length})
+                    {formatComparePresetOptionLabel(preset)}
                   </option>
                 ))}
               </select>
@@ -369,7 +443,12 @@ function ComparePageContent() {
 
           {/* Compare Panel */}
           <div className="lg:col-span-2">
-            <ComparePanel runIds={selectedRunIds} />
+            <ComparePanel
+              runIds={selectedRunIds}
+              onRunIdsChange={applyRunSelection}
+              metricObjectiveOverrides={metricObjectiveOverrides}
+              onMetricObjectiveOverridesChange={handleMetricObjectiveOverridesChange}
+            />
           </div>
         </div>
       </div>

@@ -8,6 +8,7 @@ import { useTheme } from '@/components/ThemeProvider';
 import { formatFixed, safeMinMax } from '@/lib/format';
 import { useAutoRefresh } from '@/lib/useAutoRefresh';
 import { computeDerivedSeries, derivedModeLabel, type DerivedSeriesMode } from '@/lib/computedSeries';
+import { type MetricObjective } from '@/lib/compareObjectives';
 
 // Icons
 const ExpandIcon = () => (
@@ -38,10 +39,26 @@ interface CompareData {
 
 interface ComparePanelProps {
   runIds: string[];
+  onRunIdsChange?: (runIds: string[]) => void;
+  metricObjectiveOverrides?: Record<string, MetricObjective>;
+  onMetricObjectiveOverridesChange?: (overrides: Record<string, MetricObjective>) => void;
 }
+
+type PairwiseWinner = 'baseline' | 'candidate' | 'tie' | 'unknown';
 
 const COMPARE_MAX_POINTS = 5000;
 const COMPARE_PAGE_SIZE = 200;
+const LOWER_IS_BETTER_TOKENS = [
+  'loss',
+  'error',
+  'latency',
+  'duration',
+  'time',
+  'cost',
+  'perplexity',
+  'wer',
+  'cer',
+];
 
 function normalizeRunIds(runIds: string[]): string[] {
   const seen = new Set<string>();
@@ -65,11 +82,100 @@ function computeCommonMetricNames(runs: CompareData[]): string[] {
   return [...common].sort();
 }
 
-export function ComparePanel({ runIds }: ComparePanelProps) {
+function getLastPointMean(series?: MetricSeries): number | undefined {
+  if (!series || series.points.length === 0) return undefined;
+  return series.points[series.points.length - 1]?.mean;
+}
+
+function formatSigned(value: number | undefined, decimals = 4): string {
+  if (value === undefined || Number.isNaN(value) || !Number.isFinite(value)) return '-';
+  const fixed = value.toFixed(decimals);
+  return value > 0 ? `+${fixed}` : fixed;
+}
+
+function inferMetricObjective(metricName: string): MetricObjective {
+  const normalized = metricName.toLowerCase();
+  if (LOWER_IS_BETTER_TOKENS.some((token) => normalized.includes(token))) {
+    return 'lower';
+  }
+  return 'higher';
+}
+
+function objectiveLabel(objective: MetricObjective): string {
+  return objective === 'higher' ? 'Higher is better' : 'Lower is better';
+}
+
+function computePairwiseWinner(
+  baselineValue: number | undefined,
+  candidateValue: number | undefined,
+  objective: MetricObjective
+): PairwiseWinner {
+  if (baselineValue === undefined || candidateValue === undefined) return 'unknown';
+  if (baselineValue === candidateValue) return 'tie';
+  if (objective === 'higher') {
+    return candidateValue > baselineValue ? 'candidate' : 'baseline';
+  }
+  return candidateValue < baselineValue ? 'candidate' : 'baseline';
+}
+
+function winnerLabel(
+  winner: PairwiseWinner,
+  baselineLabel: string,
+  candidateLabel: string
+): string {
+  if (winner === 'baseline') return baselineLabel;
+  if (winner === 'candidate') return candidateLabel;
+  if (winner === 'tie') return 'Tie';
+  return '-';
+}
+
+function winnerTextClass(winner: PairwiseWinner): string {
+  if (winner === 'candidate') return 'text-success';
+  if (winner === 'baseline') return 'text-text-primary';
+  return 'text-text-secondary';
+}
+
+function deltaTextClass(value: number | undefined, objective: MetricObjective = 'higher'): string {
+  if (value === undefined || !Number.isFinite(value) || value === 0) return 'text-text-secondary';
+  const isImprovement = objective === 'higher' ? value > 0 : value < 0;
+  return isImprovement ? 'text-success' : 'text-danger';
+}
+
+function csvCell(value: string | number | undefined): string {
+  if (value === undefined) return '';
+  const text = String(value);
+  if (text.includes(',') || text.includes('"') || text.includes('\n')) {
+    return `"${text.replaceAll('"', '""')}"`;
+  }
+  return text;
+}
+
+function downloadCsv(filename: string, rows: string[][]) {
+  const payload = rows.map((row) => row.map(csvCell).join(',')).join('\n');
+  const blob = new Blob([payload], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.setAttribute('download', filename);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+export function ComparePanel({
+  runIds,
+  onRunIdsChange,
+  metricObjectiveOverrides,
+  onMetricObjectiveOverridesChange,
+}: ComparePanelProps) {
   const { isDark } = useTheme();
   const [runs, setRuns] = useState<CompareData[]>([]);
   const [commonMetrics, setCommonMetrics] = useState<string[]>([]);
+  const [allMetrics, setAllMetrics] = useState<string[]>([]);
+  const [metricScope, setMetricScope] = useState<'common' | 'all'>('common');
   const [selectedMetric, setSelectedMetric] = useState<string>('');
+  const [internalMetricObjectiveOverrides, setInternalMetricObjectiveOverrides] = useState<Record<string, MetricObjective>>({});
   const [derivedMode, setDerivedMode] = useState<DerivedSeriesMode>('none');
   const [derivedWindow, setDerivedWindow] = useState(16);
   const [showRawSeries, setShowRawSeries] = useState(true);
@@ -145,12 +251,16 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
       }
 
       const computedCommonMetrics = computeCommonMetricNames(collectedRuns);
+      const computedAllMetrics = Array.from(
+        new Set(collectedRuns.flatMap((run) => run.series.map((series) => series.name)))
+      ).sort();
       setRuns(collectedRuns);
       setCommonMetrics(computedCommonMetrics);
+      setAllMetrics(computedAllMetrics);
       setSelectedMetric((prev) => {
-        if (computedCommonMetrics.length === 0) return '';
-        if (prev && computedCommonMetrics.includes(prev)) return prev;
-        return computedCommonMetrics[0];
+        if (computedCommonMetrics.length === 0) return computedAllMetrics[0] ?? '';
+        if (prev && (computedCommonMetrics.includes(prev) || computedAllMetrics.includes(prev))) return prev;
+        return computedCommonMetrics[0] ?? computedAllMetrics[0] ?? '';
       });
       if (collectedRuns.length > COMPARE_PAGE_SIZE) {
         const pageCount = Math.ceil(collectedRuns.length / COMPARE_PAGE_SIZE);
@@ -217,6 +327,41 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
     }
     return selectedMetricLabel;
   }, [computedLabel, derivedMode, selectedMetricLabel, showRawSeries]);
+  const metricOptions = metricScope === 'common' ? commonMetrics : allMetrics;
+  useEffect(() => {
+    setSelectedMetric((prev) => {
+      if (metricOptions.length === 0) return '';
+      if (prev && metricOptions.includes(prev)) return prev;
+      return metricOptions[0];
+    });
+  }, [metricOptions]);
+  const resolvedMetricObjectiveOverrides = metricObjectiveOverrides ?? internalMetricObjectiveOverrides;
+  const commitMetricObjectiveOverrides = useCallback(
+    (updater: (previous: Record<string, MetricObjective>) => Record<string, MetricObjective>) => {
+      if (metricObjectiveOverrides !== undefined) {
+        const next = updater(metricObjectiveOverrides);
+        onMetricObjectiveOverridesChange?.(next);
+        return;
+      }
+      setInternalMetricObjectiveOverrides((previous) => {
+        const next = updater(previous);
+        onMetricObjectiveOverridesChange?.(next);
+        return next;
+      });
+    },
+    [metricObjectiveOverrides, onMetricObjectiveOverridesChange]
+  );
+  const resolveMetricObjective = useCallback(
+    (metricName: string): MetricObjective => resolvedMetricObjectiveOverrides[metricName] ?? inferMetricObjective(metricName),
+    [resolvedMetricObjectiveOverrides]
+  );
+  const selectedMetricObjective = selectedMetric ? resolveMetricObjective(selectedMetric) : 'higher';
+  const canSwapPair = runIds.length === 2 && typeof onRunIdsChange === 'function';
+  const handleSwapRuns = useCallback(() => {
+    if (!canSwapPair) return;
+    onRunIdsChange?.([runIds[1], runIds[0]]);
+  }, [canSwapPair, onRunIdsChange, runIds]);
+  const isPairwise = runs.length === 2;
 
   // Get series for selected metric from each run
   const comparisonData = runs.map((run, idx) => {
@@ -228,6 +373,109 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
       metricSeries: run.series.find((s) => s.name === selectedMetric),
     };
   });
+  const baselineRun = isPairwise ? comparisonData[0] : null;
+  const candidateRun = isPairwise ? comparisonData[1] : null;
+  const pairwiseRows = useMemo(() => {
+    if (!baselineRun || !candidateRun) return [];
+    return metricOptions.map((metricName) => {
+      const baselineSeries = baselineRun.series.find((series) => series.name === metricName);
+      const candidateSeries = candidateRun.series.find((series) => series.name === metricName);
+      const baselineLast = getLastPointMean(baselineSeries);
+      const candidateLast = getLastPointMean(candidateSeries);
+      const delta = baselineLast !== undefined && candidateLast !== undefined
+        ? candidateLast - baselineLast
+        : undefined;
+      const deltaPct = delta !== undefined && baselineLast !== undefined && baselineLast !== 0
+        ? (delta / Math.abs(baselineLast)) * 100
+        : undefined;
+      const objective = resolveMetricObjective(metricName);
+      const winner = computePairwiseWinner(baselineLast, candidateLast, objective);
+      return {
+        metricName,
+        baselineLast,
+        candidateLast,
+        delta,
+        deltaPct,
+        objective,
+        winner,
+      };
+    });
+  }, [baselineRun, candidateRun, metricOptions, resolveMetricObjective]);
+  const selectedPairwise = useMemo(
+    () => pairwiseRows.find((row) => row.metricName === selectedMetric),
+    [pairwiseRows, selectedMetric]
+  );
+  const handleExportCsv = useCallback(() => {
+    if (isPairwise && baselineRun && candidateRun && pairwiseRows.length > 0) {
+      const rows: string[][] = [
+        [
+          'metric_raw_name',
+          'metric_display_name',
+          'objective',
+          'baseline_run',
+          'candidate_run',
+          'baseline_last',
+          'candidate_last',
+          'delta',
+          'delta_pct',
+          'winner',
+        ],
+      ];
+      pairwiseRows.forEach((row) => {
+        rows.push([
+          row.metricName,
+          metricDisplayNameByRaw.get(row.metricName) || row.metricName,
+          objectiveLabel(row.objective),
+          baselineRun.label,
+          candidateRun.label,
+          formatFixed(row.baselineLast),
+          formatFixed(row.candidateLast),
+          formatSigned(row.delta),
+          row.deltaPct === undefined ? '-' : `${formatSigned(row.deltaPct, 2)}%`,
+          winnerLabel(row.winner, baselineRun.label, candidateRun.label),
+        ]);
+      });
+      downloadCsv('compare_pairwise.csv', rows);
+      return;
+    }
+
+    const rows: string[][] = [[
+      'metric_raw_name',
+      'metric_display_name',
+      'run',
+      'status',
+      'min',
+      'max',
+      'last',
+      'points',
+    ]];
+    comparisonData.forEach((run) => {
+      const series = run.metricSeries;
+      if (!series) return;
+      const bounds = safeMinMax(series.points);
+      const lastPoint = series.points.at(-1)?.mean;
+      rows.push([
+        selectedMetric,
+        selectedMetricLabel,
+        run.label,
+        run.status,
+        formatFixed(bounds.min),
+        formatFixed(bounds.max),
+        lastPoint === undefined ? '-' : formatFixed(lastPoint),
+        String(series.total_points),
+      ]);
+    });
+    downloadCsv(`compare_${selectedMetric || 'metrics'}.csv`, rows);
+  }, [
+    baselineRun,
+    candidateRun,
+    comparisonData,
+    isPairwise,
+    metricDisplayNameByRaw,
+    pairwiseRows,
+    selectedMetric,
+    selectedMetricLabel,
+  ]);
 
   if (runIds.length === 0) {
     return (
@@ -312,24 +560,83 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
       <div className="flex flex-col gap-3 mb-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h2 className="text-lg sm:text-xl font-semibold text-text-primary">Compare Runs</h2>
-          {commonMetrics.length > 0 && (
-            <select
-              value={selectedMetric}
-              onChange={(e) => setSelectedMetric(e.target.value)}
-              className="w-full sm:w-auto px-3 py-2 border border-border rounded-lg text-text-primary bg-surface-secondary focus:outline-none focus:ring-2 focus:ring-accent"
-            >
-              {commonMetrics.map((name) => (
-                <option key={name} value={name}>
-                  {metricDisplayNameByRaw.get(name) || name}
-                </option>
-              ))}
-            </select>
-          )}
+          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+            {canSwapPair && (
+              <button
+                type="button"
+                onClick={handleSwapRuns}
+                className="px-3 py-2 text-sm rounded-lg border border-border bg-surface-secondary text-text-primary hover:bg-surface-hover transition-colors"
+                title="Swap baseline and candidate order"
+              >
+                Swap A/B
+              </button>
+            )}
+            {metricOptions.length > 0 && (
+              <select
+                aria-label="Metric Scope"
+                value={metricScope}
+                onChange={(e) => setMetricScope(e.target.value as 'common' | 'all')}
+                className="w-full sm:w-auto px-3 py-2 border border-border rounded-lg text-text-primary bg-surface-secondary focus:outline-none focus:ring-2 focus:ring-accent"
+              >
+                <option value="common">Common metrics</option>
+                <option value="all">All metrics</option>
+              </select>
+            )}
+            {metricOptions.length > 0 && (
+              <select
+                aria-label="Metric"
+                value={selectedMetric}
+                onChange={(e) => setSelectedMetric(e.target.value)}
+                className="w-full sm:w-auto px-3 py-2 border border-border rounded-lg text-text-primary bg-surface-secondary focus:outline-none focus:ring-2 focus:ring-accent"
+              >
+                {metricOptions.map((name) => (
+                  <option key={name} value={name}>
+                    {metricDisplayNameByRaw.get(name) || name}
+                  </option>
+                ))}
+              </select>
+            )}
+            {isPairwise && selectedMetric && (
+              <select
+                aria-label="Metric Objective"
+                value={selectedMetricObjective}
+                onChange={(event) => {
+                  const nextObjective = event.target.value as MetricObjective;
+                  commitMetricObjectiveOverrides((previous) => {
+                    const defaultObjective = inferMetricObjective(selectedMetric);
+                    if (nextObjective === defaultObjective) {
+                      const next = { ...previous };
+                      delete next[selectedMetric];
+                      return next;
+                    }
+                    return { ...previous, [selectedMetric]: nextObjective };
+                  });
+                }}
+                className="w-full sm:w-auto px-3 py-2 border border-border rounded-lg text-text-primary bg-surface-secondary focus:outline-none focus:ring-2 focus:ring-accent"
+              >
+                <option value="higher">Higher is better</option>
+                <option value="lower">Lower is better</option>
+              </select>
+            )}
+          </div>
         </div>
+        {isPairwise && baselineRun && candidateRun && (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-text-secondary">
+            <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface-secondary px-2 py-1">
+              <span className="font-semibold text-text-primary">Baseline</span>
+              <span>{baselineRun.label}</span>
+            </span>
+            <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface-secondary px-2 py-1">
+              <span className="font-semibold text-text-primary">Candidate</span>
+              <span>{candidateRun.label}</span>
+            </span>
+          </div>
+        )}
         <div className="flex flex-wrap items-end gap-2">
           <label className="text-xs text-text-muted">
             Derived Series
             <select
+              aria-label="Derived Series"
               value={derivedMode}
               onChange={(event) => setDerivedMode(event.target.value as DerivedSeriesMode)}
               className="mt-1 block rounded-md border border-border bg-surface-secondary px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
@@ -368,6 +675,14 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
             />
             Show raw lines
           </label>
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            className="rounded-md border border-border bg-surface-secondary px-3 py-2 text-sm text-text-secondary hover:bg-surface-hover hover:text-text-primary transition-colors"
+            title="Export current compare data as CSV (includes raw and display metric names)"
+          >
+            Export CSV
+          </button>
           {notice && <span className="text-xs text-text-muted">{notice}</span>}
         </div>
       </div>
@@ -387,10 +702,44 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
           </div>
         ))}
       </div>
+      {selectedPairwise && baselineRun && candidateRun && (
+        <div className="mb-4 rounded-lg border border-border bg-surface-secondary px-3 py-2">
+          <div className="text-xs text-text-muted">
+            Selected metric head-to-head ({metricDisplayNameByRaw.get(selectedPairwise.metricName) || selectedPairwise.metricName})
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-text-secondary">
+            <span className="inline-flex items-center rounded-md border border-border bg-surface px-2 py-1">
+              Objective: {objectiveLabel(selectedPairwise.objective)}
+            </span>
+            <span className={`inline-flex items-center rounded-md border border-border bg-surface px-2 py-1 ${winnerTextClass(selectedPairwise.winner)}`}>
+              Winner: {winnerLabel(selectedPairwise.winner, baselineRun.label, candidateRun.label)}
+            </span>
+          </div>
+          <div className="mt-1 flex flex-wrap items-baseline gap-4 text-sm">
+            <span className="text-text-secondary">
+              {baselineRun.label}: <span className="font-mono text-text-primary">{formatFixed(selectedPairwise.baselineLast)}</span>
+            </span>
+            <span className="text-text-secondary">
+              {candidateRun.label}: <span className="font-mono text-text-primary">{formatFixed(selectedPairwise.candidateLast)}</span>
+            </span>
+            <span className={deltaTextClass(selectedPairwise.delta, selectedPairwise.objective)}>
+              Delta: <span className="font-mono">{formatSigned(selectedPairwise.delta)}</span>
+            </span>
+            <span className={deltaTextClass(selectedPairwise.deltaPct, selectedPairwise.objective)}>
+              Delta %:{' '}
+              <span className="font-mono">
+                {selectedPairwise.deltaPct === undefined ? '-' : `${formatSigned(selectedPairwise.deltaPct, 2)}%`}
+              </span>
+            </span>
+          </div>
+        </div>
+      )}
 
-      {commonMetrics.length === 0 ? (
+      {metricOptions.length === 0 ? (
         <div className="text-center py-8 text-text-muted">
-          No common metrics found between selected runs
+          {metricScope === 'common'
+            ? 'No common metrics found between selected runs'
+            : 'No metrics found for selected runs'}
         </div>
       ) : sortedSteps.length === 0 ? (
         <div className="text-center py-8 text-text-muted">
@@ -430,13 +779,14 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
                   <h2 className="text-lg font-semibold text-text-primary">
                     {selectedMetricLabel} across runs{derivedMode === 'none' ? '' : ` • ${computedLabel}`}
                   </h2>
-                  {commonMetrics.length > 1 && (
+                  {metricOptions.length > 1 && (
                     <select
+                      aria-label="Metric (expanded)"
                       value={selectedMetric}
                       onChange={(e) => setSelectedMetric(e.target.value)}
                       className="px-3 py-1.5 border border-border rounded-lg text-sm text-text-primary bg-surface-secondary focus:outline-none focus:ring-2 focus:ring-accent"
                     >
-                      {commonMetrics.map((name) => (
+                      {metricOptions.map((name) => (
                         <option key={name} value={name}>
                           {metricDisplayNameByRaw.get(name) || name}
                         </option>
@@ -534,6 +884,53 @@ export function ComparePanel({ runIds }: ComparePanelProps) {
               </tbody>
             </table>
           </div>
+          {pairwiseRows.length > 0 && baselineRun && candidateRun && (
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border">
+                    <th className="text-left py-2 px-3 text-text-secondary font-semibold">Metric</th>
+                    <th className="text-right py-2 px-3 text-text-secondary font-semibold">{baselineRun.label}</th>
+                    <th className="text-right py-2 px-3 text-text-secondary font-semibold">{candidateRun.label}</th>
+                    <th className="text-right py-2 px-3 text-text-secondary font-semibold">Delta</th>
+                    <th className="text-right py-2 px-3 text-text-secondary font-semibold">Delta %</th>
+                    <th className="text-left py-2 px-3 text-text-secondary font-semibold">Objective</th>
+                    <th className="text-left py-2 px-3 text-text-secondary font-semibold">Winner</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pairwiseRows.map((row) => (
+                    <tr
+                      key={row.metricName}
+                      className={`border-b border-border ${row.metricName === selectedMetric ? 'bg-accent-subtle/30' : ''}`}
+                    >
+                      <td className="py-2 px-3 font-medium text-text-primary">
+                        {metricDisplayNameByRaw.get(row.metricName) || row.metricName}
+                      </td>
+                      <td className="text-right py-2 px-3 font-mono text-text-secondary">
+                        {formatFixed(row.baselineLast)}
+                      </td>
+                      <td className="text-right py-2 px-3 font-mono text-text-secondary">
+                        {formatFixed(row.candidateLast)}
+                      </td>
+                      <td className={`text-right py-2 px-3 font-mono ${deltaTextClass(row.delta, row.objective)}`}>
+                        {formatSigned(row.delta)}
+                      </td>
+                      <td className={`text-right py-2 px-3 font-mono ${deltaTextClass(row.deltaPct, row.objective)}`}>
+                        {row.deltaPct === undefined ? '-' : `${formatSigned(row.deltaPct, 2)}%`}
+                      </td>
+                      <td className="py-2 px-3 text-text-secondary">
+                        {objectiveLabel(row.objective)}
+                      </td>
+                      <td className={`py-2 px-3 font-medium ${winnerTextClass(row.winner)}`}>
+                        {winnerLabel(row.winner, baselineRun.label, candidateRun.label)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
     </div>

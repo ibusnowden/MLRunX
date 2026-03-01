@@ -181,8 +181,13 @@ export interface ListProjectsResponse {
 
 export interface MetricAlias {
   project_id: string;
+  raw_name: string;
+  // Backward-compatible field returned by older API payloads.
   metric_name: string;
   display_name: string;
+  unit?: string | null;
+  description?: string | null;
+  is_active?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -502,7 +507,14 @@ export const api = {
 
   async upsertMetricAlias(
     projectId: string,
-    request: { metric_name: string; display_name: string }
+    request: {
+      raw_name?: string;
+      metric_name?: string;
+      display_name: string;
+      unit?: string;
+      description?: string;
+      is_active?: boolean;
+    }
   ): Promise<MetricAlias> {
     return fetchApi<MetricAlias>(
       `/api/v1/projects/${encodeURIComponent(projectId)}/metric-aliases`,

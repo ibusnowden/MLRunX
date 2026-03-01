@@ -1831,15 +1831,31 @@ struct ListProjectsResponse {
 
 #[derive(Debug, Deserialize)]
 struct UpsertMetricAliasRequest {
-    metric_name: String,
+    #[serde(default, alias = "metric_name")]
+    raw_name: String,
     display_name: String,
+    #[serde(default)]
+    unit: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default = "default_metric_alias_is_active")]
+    is_active: bool,
+}
+
+const fn default_metric_alias_is_active() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize)]
 struct MetricAliasResponse {
     project_id: String,
+    raw_name: String,
+    // Backward-compatible alias for older UI clients.
     metric_name: String,
     display_name: String,
+    unit: Option<String>,
+    description: Option<String>,
+    is_active: bool,
     created_at: String,
     updated_at: String,
 }
@@ -1863,8 +1879,12 @@ fn project_response_from_row(row: ProjectRow) -> ProjectResponse {
 fn metric_alias_response_from_row(row: MetricAliasRow) -> MetricAliasResponse {
     MetricAliasResponse {
         project_id: row.project_id,
+        raw_name: row.metric_name.clone(),
         metric_name: row.metric_name,
         display_name: row.display_name,
+        unit: row.unit,
+        description: row.description,
+        is_active: row.is_active,
         created_at: row.created_at,
         updated_at: row.updated_at,
     }
@@ -2106,17 +2126,14 @@ async fn http_upsert_project_metric_alias(
     .await?;
     require_ui_project_editor_or_owner(&state, &auth, &project_id).await?;
 
-    let metric_name = req.metric_name.trim();
-    if metric_name.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "metric_name is required.".to_string(),
-        ));
+    let raw_name = req.raw_name.trim();
+    if raw_name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "raw_name is required.".to_string()));
     }
-    if metric_name.len() > 256 {
+    if raw_name.len() > 256 {
         return Err((
             StatusCode::BAD_REQUEST,
-            "metric_name must be <= 256 characters.".to_string(),
+            "raw_name must be <= 256 characters.".to_string(),
         ));
     }
 
@@ -2136,9 +2153,34 @@ async fn http_upsert_project_metric_alias(
 
     let row = state
         .sqlite_store
-        .upsert_metric_alias(&project_id, metric_name, display_name)
+        .upsert_metric_alias(
+            &project_id,
+            raw_name,
+            display_name,
+            req.unit
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            req.description
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            req.is_active,
+        )
         .await
-        .map_err(internal_error)?;
+        .map_err(|err| {
+            let message = err.to_string();
+            if message.contains("idx_metric_aliases_project_display_active")
+                || message.contains("metric_aliases.project_id, lower(display_name)")
+            {
+                return (
+                    StatusCode::CONFLICT,
+                    "display_name must be unique among active metric aliases in the project."
+                        .to_string(),
+                );
+            }
+            internal_error(err)
+        })?;
 
     emit_audit_event(
         &state,
@@ -2150,8 +2192,9 @@ async fn http_upsert_project_metric_alias(
         Some(&project_id),
         "success",
         serde_json::json!({
-            "metric_name": metric_name,
+            "raw_name": raw_name,
             "display_name": display_name,
+            "is_active": req.is_active,
             "auth_mode": auth_mode_label(&auth),
         }),
     )
@@ -9232,6 +9275,150 @@ mod tests {
         assert_eq!(
             metrics_payload["metric_aliases"]["loss"].as_str(),
             Some("Training Loss")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_metric_alias_active_display_name_conflict_and_deactivation() {
+        let harness = ui_session_harness_with_role("owner").await;
+        let jwt = build_test_jwt(&harness.jwt_secret, &harness.jwt_subject);
+        let cookies = login_ui_session(&harness.app, &jwt).await;
+        let alias_uri = format!(
+            "/api/v1/projects/{}/metric-aliases",
+            harness.primary_project_id
+        );
+
+        let create_primary = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(alias_uri.as_str())
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "raw_name": "train/loss",
+                            "display_name": "Loss",
+                            "unit": "%",
+                            "description": "Training loss",
+                            "is_active": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build metric alias request"),
+            )
+            .await
+            .expect("Metric alias request failed");
+        assert_eq!(create_primary.status(), StatusCode::OK);
+
+        let conflicting = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(alias_uri.as_str())
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "raw_name": "eval/loss",
+                            "display_name": "loss",
+                            "is_active": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build conflicting metric alias request"),
+            )
+            .await
+            .expect("Conflicting metric alias request failed");
+        assert_eq!(conflicting.status(), StatusCode::CONFLICT);
+
+        let deactivate_primary = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(alias_uri.as_str())
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "raw_name": "train/loss",
+                            "display_name": "Loss",
+                            "is_active": false
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build deactivate metric alias request"),
+            )
+            .await
+            .expect("Deactivate metric alias request failed");
+        assert_eq!(deactivate_primary.status(), StatusCode::OK);
+
+        let create_secondary = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(alias_uri.as_str())
+                    .header("content-type", "application/json")
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .header("x-csrf-token", &cookies.csrf_token)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "raw_name": "eval/loss",
+                            "display_name": "Loss",
+                            "is_active": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Failed to build secondary metric alias request"),
+            )
+            .await
+            .expect("Secondary metric alias request failed");
+        assert_eq!(create_secondary.status(), StatusCode::OK);
+
+        let list_response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(alias_uri.as_str())
+                    .header(header::COOKIE, &cookies.cookie_header)
+                    .body(Body::empty())
+                    .expect("Failed to build list metric aliases request"),
+            )
+            .await
+            .expect("List metric aliases request failed");
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_payload: serde_json::Value =
+            serde_json::from_str(&response_text(list_response).await)
+                .expect("List aliases response should be JSON");
+        let aliases = list_payload["aliases"]
+            .as_array()
+            .expect("aliases should be an array");
+        assert!(
+            aliases.iter().any(|alias| {
+                alias["raw_name"].as_str() == Some("train/loss")
+                    && alias["is_active"].as_bool() == Some(false)
+            }),
+            "Expected inactive train/loss alias in payload"
+        );
+        assert!(
+            aliases.iter().any(|alias| {
+                alias["raw_name"].as_str() == Some("eval/loss")
+                    && alias["is_active"].as_bool() == Some(true)
+            }),
+            "Expected active eval/loss alias in payload"
         );
     }
 

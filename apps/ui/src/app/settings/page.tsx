@@ -21,6 +21,67 @@ type KeyCreationMode = 'recommended' | 'advanced';
 const DAY_SECONDS = 24 * 60 * 60;
 const DEFAULT_UI_KEY_MAX_TTL_SECONDS = 90 * DAY_SECONDS;
 const DEFAULT_RECOMMENDED_KEY_NAME = 'sdk-agent';
+const MAX_ALIAS_RAW_NAME_LEN = 256;
+const MAX_ALIAS_DISPLAY_NAME_LEN = 128;
+const MAX_ALIAS_UNIT_LEN = 32;
+const MAX_ALIAS_DESCRIPTION_LEN = 512;
+
+type AliasFormErrors = {
+  raw_name?: string;
+  display_name?: string;
+  unit?: string;
+  description?: string;
+};
+
+type MetricAliasImportPreviewRow = {
+  rowNumber: number;
+  rawName: string;
+  displayName: string;
+  unit: string;
+  description: string;
+  isActive: boolean;
+  action: 'create' | 'update' | 'deactivate' | 'reactivate' | 'noop' | 'error';
+  error?: string;
+};
+
+function getMetricAliasRawName(alias: MetricAlias): string {
+  return (alias.raw_name || alias.metric_name || '').trim();
+}
+
+function parseCsvLine(line: string): string[] {
+  const values: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  for (let idx = 0; idx < line.length; idx += 1) {
+    const char = line[idx];
+    if (char === '"') {
+      const next = line[idx + 1];
+      if (inQuotes && next === '"') {
+        current += '"';
+        idx += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+    if (char === ',' && !inQuotes) {
+      values.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  values.push(current.trim());
+  return values;
+}
+
+function normalizeAliasBool(value: string): boolean | null {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return true;
+  if (['1', 'true', 'yes', 'y', 'active'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'n', 'inactive'].includes(normalized)) return false;
+  return null;
+}
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'projects', label: 'Projects' },
@@ -51,8 +112,15 @@ function SettingsContent() {
   const [newProjectDescription, setNewProjectDescription] = useState('');
   const [metricAliases, setMetricAliases] = useState<MetricAlias[]>([]);
   const [selectedAliasProjectId, setSelectedAliasProjectId] = useState('');
-  const [newAliasMetricName, setNewAliasMetricName] = useState('');
+  const [newAliasRawName, setNewAliasRawName] = useState('');
   const [newAliasDisplayName, setNewAliasDisplayName] = useState('');
+  const [newAliasUnit, setNewAliasUnit] = useState('');
+  const [newAliasDescription, setNewAliasDescription] = useState('');
+  const [newAliasActive, setNewAliasActive] = useState(true);
+  const [editingAliasRawName, setEditingAliasRawName] = useState<string | null>(null);
+  const [aliasFormErrors, setAliasFormErrors] = useState<AliasFormErrors>({});
+  const [aliasImportPreview, setAliasImportPreview] = useState<MetricAliasImportPreviewRow[]>([]);
+  const [applyingAliasImport, setApplyingAliasImport] = useState(false);
   const [newKeyName, setNewKeyName] = useState(DEFAULT_RECOMMENDED_KEY_NAME);
   const [newKeyProjectId, setNewKeyProjectId] = useState('');
   const [keyTtlDays, setKeyTtlDays] = useState('30');
@@ -212,6 +280,14 @@ function SettingsContent() {
     if (!session) {
       setSelectedAliasProjectId('');
       setMetricAliases([]);
+      setEditingAliasRawName(null);
+      setNewAliasRawName('');
+      setNewAliasDisplayName('');
+      setNewAliasUnit('');
+      setNewAliasDescription('');
+      setNewAliasActive(true);
+      setAliasFormErrors({});
+      setAliasImportPreview([]);
       return;
     }
 
@@ -409,6 +485,40 @@ function SettingsContent() {
     }
   };
 
+  const resetAliasForm = useCallback(() => {
+    setEditingAliasRawName(null);
+    setNewAliasRawName('');
+    setNewAliasDisplayName('');
+    setNewAliasUnit('');
+    setNewAliasDescription('');
+    setNewAliasActive(true);
+    setAliasFormErrors({});
+  }, []);
+
+  const validateAliasForm = useCallback((
+    rawName: string,
+    displayName: string,
+    unit: string,
+    description: string,
+  ): AliasFormErrors => {
+    const nextErrors: AliasFormErrors = {};
+    if (!rawName.trim()) nextErrors.raw_name = 'Raw metric key is required.';
+    if (rawName.trim().length > MAX_ALIAS_RAW_NAME_LEN) {
+      nextErrors.raw_name = `Raw metric key must be <= ${MAX_ALIAS_RAW_NAME_LEN} characters.`;
+    }
+    if (!displayName.trim()) nextErrors.display_name = 'Display label is required.';
+    if (displayName.trim().length > MAX_ALIAS_DISPLAY_NAME_LEN) {
+      nextErrors.display_name = `Display label must be <= ${MAX_ALIAS_DISPLAY_NAME_LEN} characters.`;
+    }
+    if (unit.trim().length > MAX_ALIAS_UNIT_LEN) {
+      nextErrors.unit = `Unit must be <= ${MAX_ALIAS_UNIT_LEN} characters.`;
+    }
+    if (description.trim().length > MAX_ALIAS_DESCRIPTION_LEN) {
+      nextErrors.description = `Description must be <= ${MAX_ALIAS_DESCRIPTION_LEN} characters.`;
+    }
+    return nextErrors;
+  }, []);
+
   const handleUpsertAlias = async () => {
     if (!session) {
       setStatus('Sign in before updating metric labels.');
@@ -419,21 +529,27 @@ function SettingsContent() {
       return;
     }
 
-    const metricName = newAliasMetricName.trim();
+    const metricName = newAliasRawName.trim();
     const displayName = newAliasDisplayName.trim();
-    if (!metricName || !displayName) {
-      setStatus('Both raw metric key and display label are required.');
+    const unit = newAliasUnit.trim();
+    const description = newAliasDescription.trim();
+    const formErrors = validateAliasForm(metricName, displayName, unit, description);
+    setAliasFormErrors(formErrors);
+    if (Object.keys(formErrors).length > 0) {
+      setStatus('Please fix validation errors before saving.');
       return;
     }
 
     setSubmittingAlias(true);
     try {
       await api.upsertMetricAlias(selectedAliasProjectId, {
-        metric_name: metricName,
+        raw_name: metricName,
         display_name: displayName,
+        unit: unit || undefined,
+        description: description || undefined,
+        is_active: newAliasActive,
       });
-      setNewAliasMetricName('');
-      setNewAliasDisplayName('');
+      resetAliasForm();
       await refreshAliases();
       setStatus(`Saved metric label '${displayName}' for '${metricName}'.`);
     } catch (error) {
@@ -444,11 +560,76 @@ function SettingsContent() {
     }
   };
 
+  const handleStartEditAlias = (alias: MetricAlias) => {
+    setEditingAliasRawName(getMetricAliasRawName(alias));
+    setNewAliasRawName(getMetricAliasRawName(alias));
+    setNewAliasDisplayName(alias.display_name || '');
+    setNewAliasUnit((alias.unit || '').trim());
+    setNewAliasDescription((alias.description || '').trim());
+    setNewAliasActive(alias.is_active !== false);
+    setAliasFormErrors({});
+  };
+
+  const handleDeactivateAlias = async (alias: MetricAlias) => {
+    if (!selectedAliasProjectId) {
+      setStatus('Choose a project first.');
+      return;
+    }
+
+    const rawName = getMetricAliasRawName(alias);
+    setDeletingAliasMetricName(rawName);
+    try {
+      await api.upsertMetricAlias(selectedAliasProjectId, {
+        raw_name: rawName,
+        display_name: alias.display_name,
+        unit: (alias.unit || '').trim() || undefined,
+        description: (alias.description || '').trim() || undefined,
+        is_active: false,
+      });
+      await refreshAliases();
+      setStatus(`Deactivated metric label for '${rawName}'.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to deactivate metric label.';
+      setStatus(message);
+    } finally {
+      setDeletingAliasMetricName(null);
+    }
+  };
+
+  const handleReactivateAlias = async (alias: MetricAlias) => {
+    if (!selectedAliasProjectId) {
+      setStatus('Choose a project first.');
+      return;
+    }
+
+    const rawName = getMetricAliasRawName(alias);
+    setDeletingAliasMetricName(rawName);
+    try {
+      await api.upsertMetricAlias(selectedAliasProjectId, {
+        raw_name: rawName,
+        display_name: alias.display_name,
+        unit: (alias.unit || '').trim() || undefined,
+        description: (alias.description || '').trim() || undefined,
+        is_active: true,
+      });
+      await refreshAliases();
+      setStatus(`Reactivated metric label for '${rawName}'.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to reactivate metric label.';
+      setStatus(message);
+    } finally {
+      setDeletingAliasMetricName(null);
+    }
+  };
+
   const handleDeleteAlias = async (metricName: string) => {
     if (!selectedAliasProjectId) {
       setStatus('Choose a project first.');
       return;
     }
+
+    const confirmed = window.confirm(`Delete alias '${metricName}' permanently?`);
+    if (!confirmed) return;
 
     setDeletingAliasMetricName(metricName);
     try {
@@ -460,6 +641,147 @@ function SettingsContent() {
       setStatus(message);
     } finally {
       setDeletingAliasMetricName(null);
+    }
+  };
+
+  const handleAliasImportFile = async (file: File | null) => {
+    if (!file) return;
+    const content = await file.text();
+    const lines = content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    if (lines.length === 0) {
+      setAliasImportPreview([]);
+      setStatus('CSV is empty.');
+      return;
+    }
+
+    const headerCells = parseCsvLine(lines[0]).map((cell) => cell.trim().toLowerCase());
+    const headers = new Map<string, number>();
+    headerCells.forEach((header, index) => headers.set(header, index));
+
+    const rawIdx = headers.get('raw_name') ?? headers.get('metric_name');
+    const displayIdx = headers.get('display_name');
+    const unitIdx = headers.get('unit');
+    const descriptionIdx = headers.get('description');
+    const activeIdx = headers.get('is_active');
+
+    if (rawIdx === undefined || displayIdx === undefined) {
+      setAliasImportPreview([]);
+      setStatus("CSV must include 'raw_name' (or 'metric_name') and 'display_name' headers.");
+      return;
+    }
+
+    const existingByRaw = new Map(metricAliases.map((alias) => [getMetricAliasRawName(alias), alias]));
+    const activeDisplayToRaw = new Map<string, string>();
+    metricAliases.forEach((alias) => {
+      if (alias.is_active === false) return;
+      const rawName = getMetricAliasRawName(alias);
+      activeDisplayToRaw.set(alias.display_name.trim().toLowerCase(), rawName);
+    });
+
+    const previewRows: MetricAliasImportPreviewRow[] = [];
+    for (let idx = 1; idx < lines.length; idx += 1) {
+      const cells = parseCsvLine(lines[idx]);
+      const rowNumber = idx + 1;
+      const rawName = (cells[rawIdx] || '').trim();
+      const displayName = (cells[displayIdx] || '').trim();
+      const unit = (unitIdx !== undefined ? (cells[unitIdx] || '').trim() : '');
+      const description = (descriptionIdx !== undefined ? (cells[descriptionIdx] || '').trim() : '');
+      const parsedIsActive = activeIdx !== undefined
+        ? normalizeAliasBool(cells[activeIdx] || '')
+        : true;
+      const isActive = parsedIsActive ?? true;
+
+      const rowErrors = validateAliasForm(rawName, displayName, unit, description);
+      let action: MetricAliasImportPreviewRow['action'] = 'create';
+      let error = Object.values(rowErrors)[0];
+
+      if (parsedIsActive === null) {
+        action = 'error';
+        error = "is_active must be true/false (or 1/0, yes/no).";
+      }
+
+      const existingAlias = existingByRaw.get(rawName);
+      const displayKey = displayName.toLowerCase();
+      const displayTakenBy = activeDisplayToRaw.get(displayKey);
+      if (!error && isActive && displayTakenBy && displayTakenBy !== rawName) {
+        action = 'error';
+        error = `display_name '${displayName}' already used by active alias '${displayTakenBy}'.`;
+      } else if (!error && existingAlias) {
+        const existingActive = existingAlias.is_active !== false;
+        const sameDisplay = existingAlias.display_name.trim() === displayName;
+        const sameUnit = (existingAlias.unit || '').trim() === unit;
+        const sameDescription = (existingAlias.description || '').trim() === description;
+        if (existingActive === isActive && sameDisplay && sameUnit && sameDescription) {
+          action = 'noop';
+        } else if (!existingActive && isActive) {
+          action = 'reactivate';
+        } else if (existingActive && !isActive) {
+          action = 'deactivate';
+        } else {
+          action = 'update';
+        }
+      } else if (!error && !isActive) {
+        action = 'deactivate';
+      } else if (!error) {
+        action = 'create';
+      }
+
+      previewRows.push({
+        rowNumber,
+        rawName,
+        displayName,
+        unit,
+        description,
+        isActive,
+        action: error ? 'error' : action,
+        error,
+      });
+    }
+
+    setAliasImportPreview(previewRows);
+    setStatus(
+      `Loaded CSV preview (${previewRows.length} rows, ${
+        previewRows.filter((row) => row.action === 'error').length
+      } errors).`
+    );
+  };
+
+  const handleApplyAliasImport = async () => {
+    if (!selectedAliasProjectId) {
+      setStatus('Choose a project first.');
+      return;
+    }
+    const actionableRows = aliasImportPreview.filter(
+      (row) => row.action !== 'error' && row.action !== 'noop'
+    );
+    if (actionableRows.length === 0) {
+      setStatus('No actionable rows in import preview.');
+      return;
+    }
+
+    setApplyingAliasImport(true);
+    try {
+      for (const row of actionableRows) {
+        await api.upsertMetricAlias(selectedAliasProjectId, {
+          raw_name: row.rawName,
+          display_name: row.displayName,
+          unit: row.unit || undefined,
+          description: row.description || undefined,
+          is_active: row.isActive,
+        });
+      }
+      await refreshAliases();
+      setStatus(`Applied ${actionableRows.length} metric alias updates from CSV preview.`);
+      setAliasImportPreview([]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to apply CSV import.';
+      setStatus(message);
+    } finally {
+      setApplyingAliasImport(false);
     }
   };
 
@@ -550,16 +872,33 @@ function SettingsContent() {
             availableProjects={availableProjects}
             selectedProjectId={selectedAliasProjectId}
             setSelectedProjectId={setSelectedAliasProjectId}
-            newAliasMetricName={newAliasMetricName}
-            setNewAliasMetricName={setNewAliasMetricName}
+            newAliasRawName={newAliasRawName}
+            setNewAliasRawName={setNewAliasRawName}
             newAliasDisplayName={newAliasDisplayName}
             setNewAliasDisplayName={setNewAliasDisplayName}
+            newAliasUnit={newAliasUnit}
+            setNewAliasUnit={setNewAliasUnit}
+            newAliasDescription={newAliasDescription}
+            setNewAliasDescription={setNewAliasDescription}
+            newAliasActive={newAliasActive}
+            setNewAliasActive={setNewAliasActive}
+            editingAliasRawName={editingAliasRawName}
+            aliasFormErrors={aliasFormErrors}
             aliases={metricAliases}
+            aliasImportPreview={aliasImportPreview}
+            applyingAliasImport={applyingAliasImport}
             loadingAliases={loadingAliases}
             submittingAlias={submittingAlias}
             deletingAliasMetricName={deletingAliasMetricName}
             formatProjectRef={formatProjectRef}
             handleUpsertAlias={() => void handleUpsertAlias()}
+            handleStartEditAlias={handleStartEditAlias}
+            handleResetAliasForm={resetAliasForm}
+            handleDeactivateAlias={(alias) => void handleDeactivateAlias(alias)}
+            handleReactivateAlias={(alias) => void handleReactivateAlias(alias)}
+            handleAliasImportFile={(file) => void handleAliasImportFile(file)}
+            handleApplyAliasImport={() => void handleApplyAliasImport()}
+            handleClearAliasImportPreview={() => setAliasImportPreview([])}
             handleDeleteAlias={(metricName) => void handleDeleteAlias(metricName)}
             refreshAliases={() => void refreshAliases()}
           />

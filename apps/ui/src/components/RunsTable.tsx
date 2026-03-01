@@ -12,6 +12,14 @@ import {
   type RunFilterPreset,
   upsertRunFilterPreset,
 } from '@/lib/presets';
+import {
+  getCompareUrl,
+  getQuickCompareTarget,
+  setCompareBaseline,
+  setCompareCandidate,
+  startCompareWithRun,
+  useCompareSelectionState,
+} from '@/lib/compareSelection';
 
 interface RunsTableProps {
   initialData?: ListRunsResponse;
@@ -74,6 +82,36 @@ const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
 
 const DEFAULT_SORT_BY: RunSortField = 'created_at';
 const DEFAULT_SORT_ORDER: RunSortOrder = 'desc';
+const RUNS_TABLE_VIEW_STATE_KEY = 'mlrunx_runs_table_view_state_v1';
+
+type RunsTableViewState = {
+  q?: string;
+  page?: number;
+  sort_by?: RunSortField;
+  sort_order?: RunSortOrder;
+};
+
+function readRunsTableViewState(): RunsTableViewState | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(RUNS_TABLE_VIEW_STATE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as RunsTableViewState;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeRunsTableViewState(state: RunsTableViewState) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(RUNS_TABLE_VIEW_STATE_KEY, JSON.stringify(state));
+  } catch {
+    // Ignore storage failures.
+  }
+}
 
 const SORT_BY_OPTIONS: Array<{ value: RunSortField; label: string }> = [
   { value: 'created_at', label: 'Created' },
@@ -376,12 +414,27 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
   const [activeFilterPresetId, setActiveFilterPresetId] = useState<string>('');
 
   const statusMenuRef = useRef<HTMLDivElement | null>(null);
+  const hydratedFromStorageRef = useRef(false);
   const pageSize = 20;
 
   const parsedSearch = useMemo(() => parseSearchQuery(searchQuery), [searchQuery]);
   const parsedDebounced = useMemo(() => parseSearchQuery(debouncedQuery), [debouncedQuery]);
   const statusToken = parsedSearch.tokens.find((token) => token.key === 'status');
   const activeStatus = statusToken?.value?.toLowerCase() ?? '';
+  const compareSelection = useCompareSelectionState();
+
+  const handleQuickCompare = useCallback((runId: string) => {
+    const next = startCompareWithRun(runId);
+    router.push(getCompareUrl(next));
+  }, [router]);
+
+  const handleSetBaseline = useCallback((runId: string) => {
+    setCompareBaseline(runId);
+  }, []);
+
+  const handleSetCandidate = useCallback((runId: string) => {
+    setCompareCandidate(runId);
+  }, []);
 
   const effectiveFilters = useMemo(() => {
     const status = parsedDebounced.tokens.find((token) => token.key === 'status')?.value;
@@ -438,6 +491,40 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
     }, 250);
     return () => clearTimeout(timer);
   }, [searchQuery]);
+
+  useEffect(() => {
+    if (hydratedFromStorageRef.current) return;
+    hydratedFromStorageRef.current = true;
+    if (searchParams.toString()) return;
+    const snapshot = readRunsTableViewState();
+    if (!snapshot) return;
+
+    const nextQuery = snapshot.q ?? '';
+    const nextPage = Number.isFinite(snapshot.page) && (snapshot.page ?? 0) >= 0
+      ? snapshot.page as number
+      : 0;
+    const nextSortBy = snapshot.sort_by && isRunSortField(snapshot.sort_by)
+      ? snapshot.sort_by
+      : DEFAULT_SORT_BY;
+    const nextSortOrder = snapshot.sort_order && isRunSortOrder(snapshot.sort_order)
+      ? snapshot.sort_order
+      : DEFAULT_SORT_ORDER;
+
+    setSearchQuery(nextQuery);
+    setDebouncedQuery(nextQuery);
+    setPage(nextPage);
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+  }, [searchParams]);
+
+  useEffect(() => {
+    writeRunsTableViewState({
+      q: debouncedQuery.trim() || undefined,
+      page: page > 0 ? page : undefined,
+      sort_by: sortBy !== DEFAULT_SORT_BY ? sortBy : undefined,
+      sort_order: sortOrder !== DEFAULT_SORT_ORDER ? sortOrder : undefined,
+    });
+  }, [debouncedQuery, page, sortBy, sortOrder]);
 
   useEffect(() => {
     const params = new URLSearchParams();
@@ -850,6 +937,14 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
                 const lossInfo = getLossInfo(run, details);
                 const stepCount = getStepCount(run, details);
                 const relativeCreatedAt = formatRelativeTime(run.created_at);
+                const compareTarget = getQuickCompareTarget(run.run_id, compareSelection);
+                const compareTitle = compareTarget === 'baseline'
+                  ? 'Compare with baseline'
+                  : compareTarget === 'candidate'
+                    ? 'Compare with candidate'
+                    : 'Compare run';
+                const isBaseline = compareSelection.baselineRunId === run.run_id;
+                const isCandidate = compareSelection.candidateRunId === run.run_id;
                 return (
                   <tr
                     key={run.run_id}
@@ -933,14 +1028,44 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
                             </button>
                             <button
                               type="button"
-                              title="Compare run"
+                              title={compareTitle}
                               onClick={(event) => {
                                 event.stopPropagation();
-                                router.push(`/compare?runs=${encodeURIComponent(run.run_id)}`);
+                                handleQuickCompare(run.run_id);
                               }}
                               className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-text-muted hover:border-border hover:bg-surface-secondary hover:text-text-primary"
                             >
                               <CompareIcon />
+                            </button>
+                            <button
+                              type="button"
+                              title="Set as baseline"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleSetBaseline(run.run_id);
+                              }}
+                              className={`inline-flex h-8 min-w-8 items-center justify-center rounded-md border px-2 text-[11px] font-semibold ${
+                                isBaseline
+                                  ? 'border-accent/50 bg-accent-subtle text-accent'
+                                  : 'border-transparent text-text-muted hover:border-border hover:bg-surface-secondary hover:text-text-primary'
+                              }`}
+                            >
+                              A
+                            </button>
+                            <button
+                              type="button"
+                              title="Set as candidate"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleSetCandidate(run.run_id);
+                              }}
+                              className={`inline-flex h-8 min-w-8 items-center justify-center rounded-md border px-2 text-[11px] font-semibold ${
+                                isCandidate
+                                  ? 'border-accent/50 bg-accent-subtle text-accent'
+                                  : 'border-transparent text-text-muted hover:border-border hover:bg-surface-secondary hover:text-text-primary'
+                              }`}
+                            >
+                              B
                             </button>
                             <button
                               type="button"
@@ -979,6 +1104,14 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
             const details = runDetailsById[run.run_id];
             const lossInfo = getLossInfo(run, details);
             const stepCount = getStepCount(run, details);
+            const compareTarget = getQuickCompareTarget(run.run_id, compareSelection);
+            const compareTitle = compareTarget === 'baseline'
+              ? 'Compare with baseline'
+              : compareTarget === 'candidate'
+                ? 'Compare with candidate'
+                : 'Compare run';
+            const isBaseline = compareSelection.baselineRunId === run.run_id;
+            const isCandidate = compareSelection.candidateRunId === run.run_id;
             return (
               <div key={run.run_id} className="rounded-xl border border-border bg-background p-4 transition-all duration-200 hover:border-[color:rgba(91,148,255,0.32)]">
                 <div className="flex items-start justify-between gap-3">
@@ -1038,10 +1171,35 @@ export function RunsTable({ initialData, onRunClick, onStatsChange }: RunsTableP
                     </button>
                     <button
                       type="button"
-                      onClick={() => router.push(`/compare?runs=${encodeURIComponent(run.run_id)}`)}
+                      title={compareTitle}
+                      onClick={() => handleQuickCompare(run.run_id)}
                       className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border text-text-secondary"
                     >
                       <CompareIcon />
+                    </button>
+                    <button
+                      type="button"
+                      title="Set as baseline"
+                      onClick={() => handleSetBaseline(run.run_id)}
+                      className={`inline-flex h-8 min-w-8 items-center justify-center rounded-md border px-2 text-[11px] font-semibold ${
+                        isBaseline
+                          ? 'border-accent/50 bg-accent-subtle text-accent'
+                          : 'border-border text-text-secondary'
+                      }`}
+                    >
+                      A
+                    </button>
+                    <button
+                      type="button"
+                      title="Set as candidate"
+                      onClick={() => handleSetCandidate(run.run_id)}
+                      className={`inline-flex h-8 min-w-8 items-center justify-center rounded-md border px-2 text-[11px] font-semibold ${
+                        isCandidate
+                          ? 'border-accent/50 bg-accent-subtle text-accent'
+                          : 'border-border text-text-secondary'
+                      }`}
+                    >
+                      B
                     </button>
                     <button
                       type="button"

@@ -1,3 +1,8 @@
+import {
+  normalizeMetricObjectiveOverrides,
+  type MetricObjective,
+} from './compareObjectives';
+
 const RUN_FILTER_PRESETS_KEY = 'mlrunx_run_filter_presets_v1';
 const COMPARE_PRESETS_KEY = 'mlrunx_compare_presets_v1';
 
@@ -17,6 +22,7 @@ export interface ComparePreset {
   id: string;
   name: string;
   runIds: string[];
+  metricObjectives?: Record<string, MetricObjective>;
   updatedAt: string;
 }
 
@@ -92,6 +98,19 @@ function parseComparePresets(raw: string | null): ComparePreset[] {
         );
       })
       .map((entry) => ({
+        metricObjectives: (() => {
+          if (
+            !entry.metricObjectives ||
+            typeof entry.metricObjectives !== 'object' ||
+            Array.isArray(entry.metricObjectives)
+          ) {
+            return undefined;
+          }
+          const normalized = normalizeMetricObjectiveOverrides(
+            entry.metricObjectives as Record<string, MetricObjective>
+          );
+          return Object.keys(normalized).length > 0 ? normalized : undefined;
+        })(),
         id: clampText(entry.id, 128),
         name: clampText(entry.name, MAX_NAME_LEN),
         runIds: entry.runIds
@@ -106,6 +125,14 @@ function parseComparePresets(raw: string | null): ComparePreset[] {
   } catch {
     return [];
   }
+}
+
+function normalizePresetObjectives(
+  metricObjectives: Record<string, MetricObjective> | undefined
+): Record<string, MetricObjective> | undefined {
+  if (!metricObjectives) return undefined;
+  const normalized = normalizeMetricObjectiveOverrides(metricObjectives);
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 export function loadRunFilterPresets(): RunFilterPreset[] {
@@ -179,17 +206,18 @@ export function normalizeRunIdSet(runIds: string[]): string[] {
         .filter(Boolean)
     )
   )
-    .sort((a, b) => a.localeCompare(b))
     .slice(0, MAX_RUN_IDS_PER_PRESET);
 }
 
 export function upsertComparePreset(
   presets: ComparePreset[],
   name: string,
-  runIds: string[]
+  runIds: string[],
+  metricObjectives?: Record<string, MetricObjective>
 ): { presets: ComparePreset[]; saved: ComparePreset } {
   const normalizedName = clampText(name, MAX_NAME_LEN);
   const normalizedRunIds = normalizeRunIdSet(runIds);
+  const normalizedObjectives = normalizePresetObjectives(metricObjectives);
   if (!normalizedName || normalizedRunIds.length === 0) {
     throw new Error('Preset name and run IDs are required.');
   }
@@ -201,10 +229,11 @@ export function upsertComparePreset(
 
   if (existingIndex >= 0) {
     const updated: ComparePreset = {
-      ...presets[existingIndex],
+      id: presets[existingIndex].id,
       name: normalizedName,
       runIds: normalizedRunIds,
       updatedAt: now,
+      ...(normalizedObjectives ? { metricObjectives: normalizedObjectives } : {}),
     };
     const next = [updated, ...presets.filter((_, idx) => idx !== existingIndex)].slice(
       0,
@@ -218,6 +247,7 @@ export function upsertComparePreset(
     name: normalizedName,
     runIds: normalizedRunIds,
     updatedAt: now,
+    ...(normalizedObjectives ? { metricObjectives: normalizedObjectives } : {}),
   };
   const next = [created, ...presets].slice(0, MAX_PRESETS);
   return { presets: next, saved: created };
