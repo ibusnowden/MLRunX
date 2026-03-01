@@ -1,0 +1,198 @@
+version: 1
+updated_utc: "2026-03-01T00:00:00Z"
+owner: "perf-core"
+scope:
+  objective: "Sub-200ms command responsiveness for compare/list/chart workflows with deterministic launch gates."
+  benchmark_source_of_truth:
+    - "bench/ci_thresholds.yaml"
+    - "bench/run_nightly.py"
+    - "bench/workloads/*.py"
+
+slo_table:
+  - command: runs.list
+    source_workload: w1_run_scale
+    source_metric: list_runs
+    nightly:
+      p95_ms: 200
+      p99_ms: 500
+    release:
+      p95_ms: 150
+      p99_ms: 300
+  - command: runs.filter_tag
+    source_workload: w1_run_scale
+    source_metric: filter_tag
+    nightly:
+      p95_ms: 150
+      p99_ms: 400
+    release:
+      p95_ms: 120
+      p99_ms: 250
+  - command: runs.filter_status
+    source_workload: w1_run_scale
+    source_metric: filter_status
+    nightly:
+      p95_ms: 150
+      p99_ms: 400
+    release:
+      p95_ms: 120
+      p99_ms: 250
+  - command: runs.search
+    source_workload: w1_run_scale
+    source_metric: search
+    nightly:
+      p95_ms: 200
+      p99_ms: 500
+    release:
+      p95_ms: 150
+      p99_ms: 300
+  - command: runs.compare
+    source_workload: w1_run_scale
+    source_metric: compare_runs
+    nightly:
+      p95_ms: 300
+      p99_ms: 800
+    release:
+      p95_ms: 200
+      p99_ms: 450
+  - command: ingest.rpc
+    source_workload: w2_ingest_latency
+    source_metric: ingest_rpc_ms
+    nightly:
+      p95_ms: 100
+      p99_ms: 300
+    release:
+      p95_ms: 80
+      p99_ms: 220
+  - command: ingest.log_to_visible
+    source_workload: w2_ingest_latency
+    source_metric: log_to_visible_ms
+    nightly:
+      p95_ms: 500
+      p99_ms: 1000
+    release:
+      p95_ms: 350
+      p99_ms: 700
+  - command: dashboard.load
+    source_workload: w3_mixed
+    source_metric: dashboard_load
+    nightly:
+      p95_ms: 300
+      p99_ms: 800
+    release:
+      p95_ms: 200
+      p99_ms: 450
+  - command: dashboard.list_runs
+    source_workload: w3_mixed
+    source_metric: list_runs
+    nightly:
+      p95_ms: 220
+      p99_ms: 600
+    release:
+      p95_ms: 160
+      p99_ms: 350
+  - command: dashboard.run_detail
+    source_workload: w3_mixed
+    source_metric: run_detail
+    nightly:
+      p95_ms: 180
+      p99_ms: 450
+    release:
+      p95_ms: 140
+      p99_ms: 280
+  - command: dashboard.metrics_series
+    source_workload: w3_mixed
+    source_metric: metrics_series
+    nightly:
+      p95_ms: 200
+      p99_ms: 500
+    release:
+      p95_ms: 150
+      p99_ms: 320
+  - command: dashboard.compare_runs
+    source_workload: w3_mixed
+    source_metric: compare_runs
+    nightly:
+      p95_ms: 280
+      p99_ms: 700
+    release:
+      p95_ms: 190
+      p99_ms: 420
+
+benchmark_harness_changes:
+  - id: PERF-H1
+    status: implemented
+    detail: "Command-level SLO schema added to bench/ci_thresholds.yaml via command_slos section."
+  - id: PERF-H2
+    status: implemented
+    detail: "run_nightly now validates command-level SLOs and emits violations separately from workload thresholds."
+  - id: PERF-H3
+    status: implemented
+    detail: "run_nightly summary includes Command SLO Table with observed vs target p95/p99."
+  - id: PERF-H4
+    status: implemented
+    detail: "Release launch-gate checks wired into nightly runner with required-command coverage and pass-rate checks."
+  - id: PERF-H5
+    status: implemented
+    detail: "W3 mixed dashboard benchmark now records per-operation latencies for list, detail, metrics, compare."
+  - id: PERF-H6
+    status: next
+    detail: "Add front-end interaction timer feed (TTFB/TTI and command render latency) into benchmark outputs."
+  - id: PERF-H7
+    status: next
+    detail: "Persist benchmark baselines by commit SHA and auto-comment regressions on PRs."
+
+quarter_roadmap:
+  q2_2026:
+    theme: "Perf core hardening and recommendation MVP"
+    weeks_1_4:
+      - "Stabilize command SLO instrumentation and close top p95 regressions in list/compare paths."
+      - "Introduce query-path tracing IDs and payload-size guardrails for hot endpoints."
+      - "Ship UI latency telemetry for compare panel and run-detail chart rendering."
+    weeks_5_8:
+      - "Add cache-aware query planning and deterministic pagination for large run lists."
+      - "Reduce log-to-visible latency with ingest batching and read-after-write projection tuning."
+      - "Implement recommendation feature store prototype (dataset/model/loss metadata extraction)."
+    weeks_9_12:
+      - "Recommendation MVP: train baseline ranking model for hyperparameter suggestions."
+      - "Expose recommendation endpoint behind feature flag with offline eval report in CI."
+      - "Run beta with opt-in projects and compare recommendation lift against baseline tuning."
+
+launch_acceptance_gates:
+  perf_release_gate:
+    max_threshold_violations: 0
+    command_slo_pass_rate_percent: 100
+    required_commands:
+      - runs.list
+      - runs.filter_tag
+      - runs.filter_status
+      - runs.search
+      - runs.compare
+      - ingest.rpc
+      - ingest.log_to_visible
+      - dashboard.load
+      - dashboard.list_runs
+      - dashboard.run_detail
+      - dashboard.metrics_series
+      - dashboard.compare_runs
+  reliability_gate:
+    sweep_action_failure_rate_max_percent: 1.0
+    flaky_test_runs_required: 10
+    max_flaky_failures: 0
+  product_gate:
+    alias_adoption_percent_min: 60
+    chart_multi_series_usage_percent_min: 30
+    support_ticket_reduction_percent_min: 40
+
+recommendation_mvp:
+  hypothesis: "Cross-run metadata can provide better-than-default hyperparameter priors."
+  launch_criteria:
+    offline_eval:
+      min_projects: 30
+      metric: "top_k_hit_rate_at_5"
+      min_value: 0.35
+    online_beta:
+      min_opt_in_projects: 10
+      success_metric: "time_to_best_validation_loss"
+      required_improvement_percent: 15
+    safety:
+      max_invalid_recommendation_rate_percent: 1

@@ -1,5 +1,5 @@
 version: 1
-updated_utc: "2026-02-12T00:00:00Z"
+updated_utc: "2026-03-01T00:00:00Z"
 summary:
   maturity: alpha
   intent: "Agent-facing map of implemented vs experimental surfaces and non-negotiable runtime invariants."
@@ -59,6 +59,8 @@ invariants:
     description: "Nightly benchmark jobs must execute real workload runners, not synthetic placeholder values."
   - id: CI-002
     description: "Required lint/test gates must fail hard (no soft-fail wrappers that mask regressions)."
+  - id: CI-003
+    description: "Release-scale benchmark runs must satisfy command-level SLO launch gates with zero threshold violations."
   - id: REL-001
     description: "Release workflow publishes both API and UI container images with version and latest tags."
 

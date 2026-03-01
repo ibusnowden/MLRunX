@@ -4,7 +4,7 @@
 # This file defines performance thresholds for CI benchmarks.
 # Nightly and release workflows check against these values.
 
-version: 1
+version: 2
 
 # Workload thresholds (all values in milliseconds unless noted)
 workloads:
@@ -43,6 +43,184 @@ workloads:
     dashboard_load:
       p95_ms: 300
       p99_ms: 800
+    list_runs:
+      p95_ms: 220
+      p99_ms: 600
+    run_detail:
+      p95_ms: 180
+      p99_ms: 450
+    metrics_series:
+      p95_ms: 200
+      p99_ms: 500
+    compare_runs:
+      p95_ms: 280
+      p99_ms: 700
+
+# Command-level SLOs by scale.
+#
+# These entries power per-command reporting and launch-gate checks.
+command_slos:
+  runs.list:
+    workload: w1_run_scale
+    metric: list_runs
+    targets:
+      nightly:
+        p95_ms: 200
+        p99_ms: 500
+      release:
+        p95_ms: 150
+        p99_ms: 300
+
+  runs.filter_tag:
+    workload: w1_run_scale
+    metric: filter_tag
+    targets:
+      nightly:
+        p95_ms: 150
+        p99_ms: 400
+      release:
+        p95_ms: 120
+        p99_ms: 250
+
+  runs.filter_status:
+    workload: w1_run_scale
+    metric: filter_status
+    targets:
+      nightly:
+        p95_ms: 150
+        p99_ms: 400
+      release:
+        p95_ms: 120
+        p99_ms: 250
+
+  runs.search:
+    workload: w1_run_scale
+    metric: search
+    targets:
+      nightly:
+        p95_ms: 200
+        p99_ms: 500
+      release:
+        p95_ms: 150
+        p99_ms: 300
+
+  runs.compare:
+    workload: w1_run_scale
+    metric: compare_runs
+    targets:
+      nightly:
+        p95_ms: 300
+        p99_ms: 800
+      release:
+        p95_ms: 200
+        p99_ms: 450
+
+  ingest.sdk_enqueue:
+    workload: w2_ingest_latency
+    metric: sdk_enqueue_us
+    targets:
+      nightly:
+        p95: 50
+        p99: 200
+      release:
+        p95: 40
+        p99: 150
+
+  ingest.rpc:
+    workload: w2_ingest_latency
+    metric: ingest_rpc_ms
+    targets:
+      nightly:
+        p95: 100
+        p99: 300
+      release:
+        p95: 80
+        p99: 220
+
+  ingest.log_to_visible:
+    workload: w2_ingest_latency
+    metric: log_to_visible_ms
+    targets:
+      nightly:
+        p95: 500
+        p99: 1000
+      release:
+        p95: 350
+        p99: 700
+
+  dashboard.load:
+    workload: w3_mixed
+    metric: dashboard_load
+    targets:
+      nightly:
+        p95_ms: 300
+        p99_ms: 800
+      release:
+        p95_ms: 200
+        p99_ms: 450
+
+  dashboard.list_runs:
+    workload: w3_mixed
+    metric: list_runs
+    targets:
+      nightly:
+        p95_ms: 220
+        p99_ms: 600
+      release:
+        p95_ms: 160
+        p99_ms: 350
+
+  dashboard.run_detail:
+    workload: w3_mixed
+    metric: run_detail
+    targets:
+      nightly:
+        p95_ms: 180
+        p99_ms: 450
+      release:
+        p95_ms: 140
+        p99_ms: 280
+
+  dashboard.metrics_series:
+    workload: w3_mixed
+    metric: metrics_series
+    targets:
+      nightly:
+        p95_ms: 200
+        p99_ms: 500
+      release:
+        p95_ms: 150
+        p99_ms: 320
+
+  dashboard.compare_runs:
+    workload: w3_mixed
+    metric: compare_runs
+    targets:
+      nightly:
+        p95_ms: 280
+        p99_ms: 700
+      release:
+        p95_ms: 190
+        p99_ms: 420
+
+# Launch gates evaluated in release benchmark runs.
+launch_gates:
+  release:
+    max_threshold_violations: 0
+    required_commands:
+      - runs.list
+      - runs.filter_tag
+      - runs.filter_status
+      - runs.search
+      - runs.compare
+      - ingest.rpc
+      - ingest.log_to_visible
+      - dashboard.load
+      - dashboard.list_runs
+      - dashboard.run_detail
+      - dashboard.metrics_series
+      - dashboard.compare_runs
+    command_slo_pass_rate_percent: 100
 
 # Regression detection policy
 regression:
