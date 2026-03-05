@@ -41,19 +41,33 @@
 
 ## Preview
 
-> Run detail dashboard with grouped metrics and a unified training console (configuration, progress, hyperparameters, and logs).
+> Run detail dashboard snapshots (dark/light) focused on charts and run-console workflow.
 
 <p align="center">
-  <img src="docs/screenshots/run-detail-light.png" alt="Run details — light mode" width="100%" />
+  <img src="docs/screenshots/Screenshot%202026-03-05%20at%201.14.59%E2%80%AFPM.png" alt="Run details — dark mode (overview)" width="100%" />
 </p>
-<p align="center"><em>Run details page — Light mode</em></p>
+<p align="center"><em>Run details — Dark mode (overview)</em></p>
 
 <br/>
 
 <p align="center">
-  <img src="docs/screenshots/run-detail-dark.png" alt="Run details — dark mode" width="100%" />
+  <img src="docs/screenshots/Screenshot%202026-03-05%20at%201.15.18%E2%80%AFPM.png" alt="Run details — dark mode (metrics focus)" width="100%" />
 </p>
-<p align="center"><em>Run details page — Dark mode</em></p>
+<p align="center"><em>Run details — Dark mode (metrics focus)</em></p>
+
+<br/>
+
+<p align="center">
+  <img src="docs/screenshots/Screenshot%202026-03-05%20at%201.15.36%E2%80%AFPM.png" alt="Run details — light mode (console view)" width="100%" />
+</p>
+<p align="center"><em>Run details — Light mode (console view)</em></p>
+
+<br/>
+
+<p align="center">
+  <img src="docs/screenshots/Screenshot%202026-03-05%20at%201.15.57%E2%80%AFPM.png" alt="Run details — light mode (logs focus)" width="100%" />
+</p>
+<p align="center"><em>Run details — Light mode (logs focus)</em></p>
 
 ---
 
