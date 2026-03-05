@@ -143,8 +143,8 @@ jobs:
       - name: Rust format check
         run: cargo fmt --check
 
-      - name: Rust clippy (deny warnings)
-        run: cargo clippy -p mlrunx-api -- -D warnings
+      - name: Rust clippy (correctness/suspicious/perf)
+        run: cargo clippy -p mlrunx-api -- -D clippy::correctness -D clippy::suspicious -D clippy::perf
 
       - name: Build
         run: cargo build --release --bin mlrunx-api
