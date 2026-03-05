@@ -23,8 +23,8 @@
   <a href="https://github.com/ibusnowden/MLRunX/actions/workflows/release.yml">
     <img src="https://github.com/ibusnowden/MLRunX/actions/workflows/release.yml/badge.svg" alt="Release" />
   </a>
-  <a href="https://github.com/ibusnowden/MLRunX/releases/tag/v0.1.0">
-    <img src="https://img.shields.io/github/v/release/ibusnowden/MLRunX?label=latest" alt="Latest Release" />
+  <a href="https://github.com/ibusnowden/MLRunX/releases/latest">
+    <img src="https://img.shields.io/github/v/tag/ibusnowden/MLRunX?sort=semver&label=latest" alt="Latest Release" />
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" />

@@ -60,7 +60,7 @@ function ensureLocalStorageMock(): void {
 
 describe('api key management client', () => {
   beforeEach(() => {
-    process.env.NEXT_PUBLIC_MLRUNX_ALLOW_LOCAL_API_KEY_STORAGE = 'true';
+    process.env.NEXT_PUBLIC_MLRUNX_ALLOW_LOCAL_STORAGE = 'true';
     ensureLocalStorageMock();
     window.localStorage.clear();
     document.cookie = `${UI_CSRF_COOKIE_NAME}=; Max-Age=0; Path=/`;
@@ -68,7 +68,7 @@ describe('api key management client', () => {
   });
 
   afterEach(() => {
-    delete process.env.NEXT_PUBLIC_MLRUNX_ALLOW_LOCAL_API_KEY_STORAGE;
+    delete process.env.NEXT_PUBLIC_MLRUNX_ALLOW_LOCAL_STORAGE;
     vi.restoreAllMocks();
   });
 
@@ -94,7 +94,7 @@ describe('api key management client', () => {
   });
 
   it('does not send X-API-Key from localStorage when browser key storage is disabled', async () => {
-    delete process.env.NEXT_PUBLIC_MLRUNX_ALLOW_LOCAL_API_KEY_STORAGE;
+    delete process.env.NEXT_PUBLIC_MLRUNX_ALLOW_LOCAL_STORAGE;
     window.localStorage.setItem(API_URL_STORAGE_KEY, 'https://mlrunx.ibra-niang.com');
     window.localStorage.setItem(API_KEY_STORAGE_KEY, 'mlrunx_local_key');
 
@@ -347,5 +347,68 @@ describe('api key management client', () => {
     expect(url).toBe('https://mlrunx.ibra-niang.com/api/v1/runs/run-1/events?limit=10');
     expect(options.credentials).toBe('include');
     expect(headers['X-API-Key']).toBeUndefined();
+  });
+
+  it('compares runs via UI session path without sending stored API key', async () => {
+    window.localStorage.setItem(API_URL_STORAGE_KEY, 'https://mlrunx.ibra-niang.com');
+    window.localStorage.setItem(API_KEY_STORAGE_KEY, 'mlrunx_local_key');
+
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({
+        runs: [],
+        common_metrics: [],
+        alignment: 'step',
+        total: 2,
+        limit: 200,
+        offset: 0,
+      })
+    );
+
+    await api.compareRuns(['run-a', 'run-b'], [], 1000, { limit: 200, offset: 0 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = headersToRecord(options.headers);
+
+    expect(url).toBe('https://mlrunx.ibra-niang.com/api/v1/runs/compare');
+    expect(options.method).toBe('POST');
+    expect(options.credentials).toBe('include');
+    expect(headers['X-API-Key']).toBeUndefined();
+  });
+
+  it('falls back to API key compare call when UI-session compare is unauthorized', async () => {
+    window.localStorage.setItem(API_URL_STORAGE_KEY, 'https://mlrunx.ibra-niang.com');
+    window.localStorage.setItem(API_KEY_STORAGE_KEY, 'mlrunx_local_key');
+
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('Authentication required', { status: 401 }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          runs: [],
+          common_metrics: [],
+          alignment: 'step',
+          total: 2,
+          limit: 200,
+          offset: 0,
+        })
+      );
+
+    await api.compareRuns(['run-a', 'run-b'], [], 1000, { limit: 200, offset: 0 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const [firstUrl, firstOptions] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [secondUrl, secondOptions] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const firstHeaders = headersToRecord(firstOptions.headers);
+    const secondHeaders = headersToRecord(secondOptions.headers);
+
+    expect(firstUrl).toBe('https://mlrunx.ibra-niang.com/api/v1/runs/compare');
+    expect(firstOptions.credentials).toBe('include');
+    expect(firstHeaders['X-API-Key']).toBeUndefined();
+
+    expect(secondUrl).toBe('https://mlrunx.ibra-niang.com/api/v1/runs/compare');
+    expect(secondOptions.credentials).toBe('same-origin');
+    expect(secondHeaders['X-API-Key']).toBe('mlrunx_local_key');
   });
 });

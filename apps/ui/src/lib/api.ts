@@ -18,7 +18,7 @@ function envFlagEnabled(value: string | undefined): boolean {
 }
 
 function localApiKeyStorageEnabled(): boolean {
-  return envFlagEnabled(process.env.NEXT_PUBLIC_MLRUNX_ALLOW_LOCAL_API_KEY_STORAGE);
+  return envFlagEnabled(process.env.NEXT_PUBLIC_MLRUNX_ALLOW_LOCAL_STORAGE);
 }
 
 export interface Run {
@@ -709,15 +709,37 @@ export const api = {
     limit?: number;
     offset?: number;
   }> {
-    return fetchApi('/api/v1/runs/compare', {
-      method: 'POST',
-      body: JSON.stringify({
-        run_ids: runIds,
-        metric_names: metricNames,
-        max_points: maxPoints,
-        limit: paging.limit,
-        offset: paging.offset,
-      }),
-    });
+    const payload = {
+      run_ids: runIds,
+      metric_names: metricNames,
+      max_points: maxPoints,
+      limit: paging.limit,
+      offset: paging.offset,
+    };
+
+    try {
+      // Prefer UI-session auth to avoid stale local API keys overriding browser sessions.
+      return await fetchApi(
+        '/api/v1/runs/compare',
+        {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        },
+        { skipApiKey: true }
+      );
+    } catch (error) {
+      // Fallback for API-key-only deployments.
+      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+        return fetchApi(
+          '/api/v1/runs/compare',
+          {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          },
+          { forceApiKey: true }
+        );
+      }
+      throw error;
+    }
   },
 };
