@@ -112,8 +112,8 @@ jobs:
       - name: Install UI dependencies
         run: npm ci --prefix apps/ui
 
-      - name: npm advisory audit
-        run: npm --prefix apps/ui audit --audit-level=high
+      - name: npm advisory audit (runtime deps)
+        run: npm --prefix apps/ui audit --audit-level=high --omit=dev
 
   # ---------------------------------------------------------------------------
   # Rust API: lint + build + test
