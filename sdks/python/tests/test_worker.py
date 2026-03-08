@@ -46,10 +46,32 @@ class TestFlushWorkerSpoolReplay:
         )
         worker = _make_worker(transport)
 
-        success = worker._send_spooled_events([_metric_event("stale-run")])
+        result = worker._send_spooled_events([_metric_event("stale-run")])
+        replay_stats = worker.get_stats()["spool_replay"]
 
-        assert success is True
+        assert result.success is True
+        assert result.outcome == "dropped_terminal"
         assert worker.error_count == 0
+        assert replay_stats["batches"] == {
+            "attempted": 1,
+            "synced": 0,
+            "dropped": 1,
+            "failed": 0,
+        }
+        assert replay_stats["events"] == {
+            "attempted": 1,
+            "synced": 0,
+            "dropped": 1,
+            "failed": 0,
+        }
+        assert replay_stats["last_outcome"] == "dropped_terminal"
+        assert replay_stats["last_run_id"] == "stale-run"
+        assert replay_stats["last_event_count"] == 1
+        assert replay_stats["last_error"] == {
+            "message": "Client error: 404 - Run not found: stale-run",
+            "status_code": 404,
+            "retryable": False,
+        }
 
     @pytest.mark.unit
     def test_spool_replay_drops_not_running_412(self) -> None:
@@ -61,10 +83,32 @@ class TestFlushWorkerSpoolReplay:
         )
         worker = _make_worker(transport)
 
-        success = worker._send_spooled_events([_metric_event("stale-run")])
+        result = worker._send_spooled_events([_metric_event("stale-run")])
+        replay_stats = worker.get_stats()["spool_replay"]
 
-        assert success is True
+        assert result.success is True
+        assert result.outcome == "dropped_terminal"
         assert worker.error_count == 0
+        assert replay_stats["batches"] == {
+            "attempted": 1,
+            "synced": 0,
+            "dropped": 1,
+            "failed": 0,
+        }
+        assert replay_stats["events"] == {
+            "attempted": 1,
+            "synced": 0,
+            "dropped": 1,
+            "failed": 0,
+        }
+        assert replay_stats["last_outcome"] == "dropped_terminal"
+        assert replay_stats["last_run_id"] == "stale-run"
+        assert replay_stats["last_event_count"] == 1
+        assert replay_stats["last_error"] == {
+            "message": "Client error: 412 - Run stale-run is not running",
+            "status_code": 412,
+            "retryable": False,
+        }
 
     @pytest.mark.unit
     def test_spool_replay_keeps_non_terminal_client_errors(self) -> None:
@@ -76,10 +120,61 @@ class TestFlushWorkerSpoolReplay:
         )
         worker = _make_worker(transport)
 
-        success = worker._send_spooled_events([_metric_event("run-1")])
+        result = worker._send_spooled_events([_metric_event("run-1")])
+        replay_stats = worker.get_stats()["spool_replay"]
 
-        assert success is False
+        assert result.success is False
+        assert result.outcome == "failed"
         assert worker.error_count == 1
+        assert replay_stats["batches"] == {
+            "attempted": 1,
+            "synced": 0,
+            "dropped": 0,
+            "failed": 1,
+        }
+        assert replay_stats["events"] == {
+            "attempted": 1,
+            "synced": 0,
+            "dropped": 0,
+            "failed": 1,
+        }
+        assert replay_stats["last_outcome"] == "failed"
+        assert replay_stats["last_run_id"] == "run-1"
+        assert replay_stats["last_event_count"] == 1
+        assert replay_stats["last_error"] == {
+            "message": "Client error: 401 - unauthorized",
+            "status_code": 401,
+            "retryable": False,
+        }
+
+    @pytest.mark.unit
+    def test_spool_replay_records_successful_sync_stats(self) -> None:
+        transport = MagicMock()
+        transport.send_batch.return_value = {"status": "ok"}
+        worker = _make_worker(transport)
+
+        result = worker._send_spooled_events([_metric_event("run-1")])
+        replay_stats = worker.get_stats()["spool_replay"]
+
+        assert result.success is True
+        assert result.outcome == "synced"
+        assert worker.error_count == 0
+        assert replay_stats["batches"] == {
+            "attempted": 1,
+            "synced": 1,
+            "dropped": 0,
+            "failed": 0,
+        }
+        assert replay_stats["events"] == {
+            "attempted": 1,
+            "synced": 1,
+            "dropped": 0,
+            "failed": 0,
+        }
+        assert replay_stats["last_outcome"] == "synced"
+        assert replay_stats["last_run_id"] == "run-1"
+        assert replay_stats["last_event_count"] == 1
+        assert replay_stats["last_error"] is None
 
     @pytest.mark.unit
     def test_send_batch_includes_idempotency_fields(self) -> None:

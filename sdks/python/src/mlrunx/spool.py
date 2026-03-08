@@ -17,7 +17,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from mlrunx.queue import Event, EventType
 
@@ -30,6 +30,89 @@ SPOOL_VERSION = 1
 SPOOL_EXT = ".spool"
 PENDING_EXT = ".pending"
 COMPLETED_EXT = ".done"
+
+SpoolReplayOutcome = Literal["synced", "dropped_terminal", "failed"]
+
+
+@dataclass(frozen=True)
+class SpoolReplaySendResult:
+    """Structured outcome for a spool replay send attempt."""
+
+    success: bool
+    outcome: SpoolReplayOutcome
+    run_id: str | None
+    event_count: int
+    error_message: str | None = None
+    error_status_code: int | None = None
+    error_retryable: bool | None = None
+
+    @classmethod
+    def synced(cls, run_id: str | None, event_count: int) -> "SpoolReplaySendResult":
+        return cls(
+            success=True,
+            outcome="synced",
+            run_id=run_id,
+            event_count=event_count,
+        )
+
+    @classmethod
+    def dropped_terminal(
+        cls,
+        run_id: str | None,
+        event_count: int,
+        *,
+        error_message: str,
+        error_status_code: int | None,
+        error_retryable: bool,
+    ) -> "SpoolReplaySendResult":
+        return cls(
+            success=True,
+            outcome="dropped_terminal",
+            run_id=run_id,
+            event_count=event_count,
+            error_message=error_message,
+            error_status_code=error_status_code,
+            error_retryable=error_retryable,
+        )
+
+    @classmethod
+    def failed(
+        cls,
+        run_id: str | None,
+        event_count: int,
+        *,
+        error_message: str | None,
+        error_status_code: int | None,
+        error_retryable: bool | None,
+    ) -> "SpoolReplaySendResult":
+        return cls(
+            success=False,
+            outcome="failed",
+            run_id=run_id,
+            event_count=event_count,
+            error_message=error_message,
+            error_status_code=error_status_code,
+            error_retryable=error_retryable,
+        )
+
+
+def _normalize_spool_replay_send_result(
+    result: bool | SpoolReplaySendResult,
+    *,
+    run_id: str | None,
+    event_count: int,
+) -> SpoolReplaySendResult:
+    if isinstance(result, SpoolReplaySendResult):
+        return result
+    if result:
+        return SpoolReplaySendResult.synced(run_id, event_count)
+    return SpoolReplaySendResult.failed(
+        run_id,
+        event_count,
+        error_message=None,
+        error_status_code=None,
+        error_retryable=None,
+    )
 
 
 @dataclass
@@ -428,14 +511,38 @@ class SpoolSyncer:
                     continue
 
                 # Send events
-                success = self._send_func(events)
+                replay_result = _normalize_spool_replay_send_result(
+                    self._send_func(events),
+                    run_id=events[0].run_id if events else None,
+                    event_count=len(events),
+                )
 
-                if success:
+                if replay_result.success:
                     self._spool.mark_synced(spool_path)
-                    logger.info(f"Synced {len(events)} events from spool")
+                    if replay_result.outcome == "dropped_terminal":
+                        logger.warning(
+                            "Discarded stale spool file %s for run %s (%s events): %s",
+                            spool_path.name,
+                            replay_result.run_id or "<unknown>",
+                            replay_result.event_count,
+                            replay_result.error_message or "terminal replay error",
+                        )
+                    else:
+                        logger.info(
+                            "Synced spool file %s for run %s (%s events)",
+                            spool_path.name,
+                            replay_result.run_id or "<unknown>",
+                            replay_result.event_count,
+                        )
                 else:
                     # Stop syncing if send failed (we're probably offline again)
-                    logger.warning("Spool sync failed, will retry later")
+                    logger.warning(
+                        "Spool sync failed for run %s from %s (%s events); will retry later: %s",
+                        replay_result.run_id or "<unknown>",
+                        spool_path.name,
+                        replay_result.event_count,
+                        replay_result.error_message or "send returned failure",
+                    )
                     break
 
             except Exception as e:

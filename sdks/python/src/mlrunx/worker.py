@@ -13,17 +13,87 @@ import logging
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mlrunx.batching import AdaptiveBatcher, BatchConfig, BatchStats, FlushMetrics
 from mlrunx.queue import Event, EventQueue, EventType
-from mlrunx.spool import DiskSpool, SpoolConfig, SpoolSyncer
+from mlrunx.spool import DiskSpool, SpoolConfig, SpoolReplaySendResult, SpoolSyncer
 from mlrunx.transport.base import Transport, TransportError
 
 if TYPE_CHECKING:
     from mlrunx.config import Config
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SpoolReplayDiagnostics:
+    """Tracks structured outcomes for spool replay attempts."""
+
+    attempted_batches: int = 0
+    synced_batches: int = 0
+    dropped_batches: int = 0
+    failed_batches: int = 0
+    attempted_events: int = 0
+    synced_events: int = 0
+    dropped_events: int = 0
+    failed_events: int = 0
+    last_outcome: str | None = None
+    last_run_id: str | None = None
+    last_event_count: int = 0
+    last_error_message: str | None = None
+    last_error_status_code: int | None = None
+    last_error_retryable: bool | None = None
+
+    def record(self, result: SpoolReplaySendResult) -> None:
+        self.attempted_batches += 1
+        self.attempted_events += result.event_count
+
+        if result.outcome == "synced":
+            self.synced_batches += 1
+            self.synced_events += result.event_count
+        elif result.outcome == "dropped_terminal":
+            self.dropped_batches += 1
+            self.dropped_events += result.event_count
+        else:
+            self.failed_batches += 1
+            self.failed_events += result.event_count
+
+        self.last_outcome = result.outcome
+        self.last_run_id = result.run_id
+        self.last_event_count = result.event_count
+        self.last_error_message = result.error_message
+        self.last_error_status_code = result.error_status_code
+        self.last_error_retryable = result.error_retryable
+
+    def to_dict(self) -> dict[str, Any]:
+        last_error = None
+        if self.last_error_message is not None:
+            last_error = {
+                "message": self.last_error_message,
+                "status_code": self.last_error_status_code,
+                "retryable": self.last_error_retryable,
+            }
+
+        return {
+            "batches": {
+                "attempted": self.attempted_batches,
+                "synced": self.synced_batches,
+                "dropped": self.dropped_batches,
+                "failed": self.failed_batches,
+            },
+            "events": {
+                "attempted": self.attempted_events,
+                "synced": self.synced_events,
+                "dropped": self.dropped_events,
+                "failed": self.failed_events,
+            },
+            "last_outcome": self.last_outcome,
+            "last_run_id": self.last_run_id,
+            "last_event_count": self.last_event_count,
+            "last_error": last_error,
+        }
 
 
 class ConnectionState:
@@ -163,6 +233,7 @@ class FlushWorker:
         self._batch_seq = 0
         self._error_count = 0
         self._spool_count = 0
+        self._spool_replay = SpoolReplayDiagnostics()
 
     def start(self) -> None:
         """Start the background worker thread."""
@@ -341,12 +412,31 @@ class FlushWorker:
         Returns:
             True if send succeeded, False otherwise
         """
+        return self._send_batch_result(
+            events,
+            stats,
+            replaying_spool=replaying_spool,
+        ).success
+
+    def _send_batch_result(
+        self,
+        events: list[Event],
+        stats: BatchStats,
+        replaying_spool: bool,
+    ) -> SpoolReplaySendResult:
+        """Send a batch and return structured replay diagnostics."""
         if not events:
-            return True
+            return SpoolReplaySendResult.synced(None, 0)
 
         # If we're offline, don't try sending.
         if not self._connection.is_online:
-            return False
+            return SpoolReplaySendResult.failed(
+                events[0].run_id,
+                len(events),
+                error_message="connection offline",
+                error_status_code=None,
+                error_retryable=True,
+            )
 
         # Group events by type
         metrics = []
@@ -419,7 +509,7 @@ class FlushWorker:
                     f"Sent batch: {len(metrics)} metrics, "
                     f"{len(params)} params, {len(tags)} tags, {len(events_data)} events"
                 )
-                return True
+                return SpoolReplaySendResult.synced(events[0].run_id, len(events))
 
             except TransportError as e:
                 if replaying_spool and self._is_terminal_spool_error(e):
@@ -432,21 +522,39 @@ class FlushWorker:
                         e,
                     )
                     self._connection.record_success()
-                    return True
+                    return SpoolReplaySendResult.dropped_terminal(
+                        run_id,
+                        len(events),
+                        error_message=str(e),
+                        error_status_code=e.status_code,
+                        error_retryable=e.retryable,
+                    )
 
                 self._connection.record_failure()
 
                 if not e.retryable or retries >= self._config.max_retries:
                     logger.error(f"Failed to send batch: {e}")
                     self._error_count += 1
-                    return False
+                    return SpoolReplaySendResult.failed(
+                        events[0].run_id,
+                        len(events),
+                        error_message=str(e),
+                        error_status_code=e.status_code,
+                        error_retryable=e.retryable,
+                    )
 
                 logger.warning(f"Retrying batch send ({retries + 1}): {e}")
                 retries += 1
                 time.sleep(delay)
                 delay = min(delay * self._config.retry_backoff, max_delay)
 
-        return False
+        return SpoolReplaySendResult.failed(
+            events[0].run_id,
+            len(events),
+            error_message="batch send exhausted retries",
+            error_status_code=None,
+            error_retryable=True,
+        )
 
     def _spool_events(self, events: list[Event]) -> None:
         """Spool events to disk when offline.
@@ -469,17 +577,21 @@ class FlushWorker:
         # Flush spool file
         self._spool.flush_all()
 
-    def _send_spooled_events(self, events: list[Event]) -> bool:
+    def _record_spool_replay_result(self, result: SpoolReplaySendResult) -> None:
+        with self._lock:
+            self._spool_replay.record(result)
+
+    def _send_spooled_events(self, events: list[Event]) -> SpoolReplaySendResult:
         """Send events from spool (called by syncer).
 
         Args:
             events: Events to send
 
         Returns:
-            True if send succeeded
+            Structured replay result for sync diagnostics
         """
         if not events:
-            return True
+            return SpoolReplaySendResult.synced(None, 0)
 
         # Create stats for the batch
         stats = BatchStats(
@@ -489,7 +601,9 @@ class FlushWorker:
             tag_count=sum(1 for e in events if e.type == EventType.TAG),
         )
 
-        return self._send_batch_with_context(events, stats, replaying_spool=True)
+        result = self._send_batch_result(events, stats, replaying_spool=True)
+        self._record_spool_replay_result(result)
+        return result
 
     @staticmethod
     def _is_terminal_spool_error(error: TransportError) -> bool:
@@ -547,6 +661,7 @@ class FlushWorker:
             },
             "connection": self._connection.to_dict(),
             "flush_metrics": self._metrics.to_dict(),
+            "spool_replay": self._spool_replay.to_dict(),
         }
 
         if self._spool is not None:

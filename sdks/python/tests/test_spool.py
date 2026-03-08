@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ from mlrunx.spool import (
     DiskSpool,
     SpoolConfig,
     SpoolFile,
+    SpoolReplaySendResult,
     SpoolSyncer,
 )
 
@@ -297,7 +299,7 @@ class TestSpoolSyncer:
             syncer.stop(timeout=1.0)
 
     @pytest.mark.unit
-    def test_syncer_syncs_pending(self) -> None:
+    def test_syncer_syncs_pending(self, caplog: pytest.LogCaptureFixture) -> None:
         """Test that syncer syncs pending files."""
         with tempfile.TemporaryDirectory() as tmpdir:
             config = SpoolConfig(
@@ -319,13 +321,14 @@ class TestSpoolSyncer:
             check_online = MagicMock(return_value=True)
 
             syncer = SpoolSyncer(spool, send_func, check_online)
-            syncer.start()
+            with caplog.at_level(logging.INFO):
+                syncer.start()
 
-            # Trigger sync
-            syncer.trigger_sync()
-            time.sleep(0.2)  # Give time to sync
+                # Trigger sync
+                syncer.trigger_sync()
+                time.sleep(0.2)  # Give time to sync
 
-            syncer.stop(timeout=1.0)
+                syncer.stop(timeout=1.0)
 
             # Send should have been called
             assert send_func.called
@@ -333,6 +336,95 @@ class TestSpoolSyncer:
             # File should be marked as completed
             pending = spool.get_pending_files()
             assert len(pending) == 0
+            assert "Synced spool file" in caplog.text
+
+    @pytest.mark.unit
+    def test_syncer_retires_terminal_stale_replay_and_logs(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Terminal stale replay results should retire the spool file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = SpoolConfig(
+                spool_dir=Path(tmpdir),
+                sync_interval_ms=100,
+            )
+            spool = DiskSpool(config)
+
+            event = Event(
+                type=EventType.METRIC,
+                run_id="stale-run",
+                data={"name": "loss", "value": 0.5},
+            )
+            spool.spool(event)
+            spool.flush_all()
+
+            send_func = MagicMock(
+                return_value=SpoolReplaySendResult.dropped_terminal(
+                    "stale-run",
+                    1,
+                    error_message="Client error: 404 - Run not found: stale-run",
+                    error_status_code=404,
+                    error_retryable=False,
+                )
+            )
+            check_online = MagicMock(return_value=True)
+
+            syncer = SpoolSyncer(spool, send_func, check_online)
+            with caplog.at_level(logging.WARNING):
+                syncer.start()
+                syncer.trigger_sync()
+                time.sleep(0.2)
+                syncer.stop(timeout=1.0)
+
+            pending = spool.get_pending_files()
+            assert len(pending) == 0
+            assert "Discarded stale spool file" in caplog.text
+            assert "stale-run" in caplog.text
+
+    @pytest.mark.unit
+    def test_syncer_keeps_failed_replay_pending_and_logs(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Failed replay results should leave the spool file pending."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = SpoolConfig(
+                spool_dir=Path(tmpdir),
+                sync_interval_ms=100,
+            )
+            spool = DiskSpool(config)
+
+            event = Event(
+                type=EventType.METRIC,
+                run_id="run-123",
+                data={"name": "loss", "value": 0.5},
+            )
+            spool.spool(event)
+            spool.flush_all()
+
+            send_func = MagicMock(
+                return_value=SpoolReplaySendResult.failed(
+                    "run-123",
+                    1,
+                    error_message="Client error: 401 - unauthorized",
+                    error_status_code=401,
+                    error_retryable=False,
+                )
+            )
+            check_online = MagicMock(return_value=True)
+
+            syncer = SpoolSyncer(spool, send_func, check_online)
+            with caplog.at_level(logging.WARNING):
+                syncer.start()
+                syncer.trigger_sync()
+                time.sleep(0.2)
+                syncer.stop(timeout=1.0)
+
+            pending = spool.get_pending_files()
+            assert len(pending) == 1
+            assert "Spool sync failed for run run-123" in caplog.text
+            assert "will retry later" in caplog.text
 
     @pytest.mark.unit
     def test_syncer_respects_offline(self) -> None:
