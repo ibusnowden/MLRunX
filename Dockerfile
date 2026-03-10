@@ -33,16 +33,14 @@ COPY Cargo.toml Cargo.lock ./
 COPY apps/api/Cargo.toml apps/api/Cargo.toml
 COPY crates/proto/Cargo.toml crates/proto/Cargo.toml
 COPY crates/proto/build.rs crates/proto/build.rs
-COPY services/ingest/Cargo.toml services/ingest/Cargo.toml
 COPY services/processor/Cargo.toml services/processor/Cargo.toml
 COPY proto proto
 COPY migrations migrations
 
 # Create dummy sources for dependency caching
-RUN mkdir -p apps/api/src crates/proto/src services/ingest/src services/processor/src && \
+RUN mkdir -p apps/api/src crates/proto/src services/processor/src && \
     echo "fn main() {}" > apps/api/src/main.rs && \
     echo "pub fn dummy() {}" > crates/proto/src/lib.rs && \
-    echo "fn main() {}" > services/ingest/src/main.rs && \
     echo "fn main() {}" > services/processor/src/main.rs
 
 # Build dependencies only (cached layer)

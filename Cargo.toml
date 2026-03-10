@@ -5,7 +5,6 @@ members = [
     "crates/api-http-types",
     "crates/api-policy",
     "crates/proto",
-    "services/ingest",
     "services/processor",
 ]
 default-members = [
@@ -26,7 +25,7 @@ tokio = { version = "1.43", features = ["full"] }
 # Web framework
 axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "decompression-gzip"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "compression-br", "decompression-gzip", "decompression-br"] }
 
 # gRPC
 tonic = "0.12"
@@ -53,6 +52,7 @@ tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-serde_json-
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 opentelemetry = "0.27"
+opentelemetry_sdk = "0.27"
 opentelemetry-otlp = "0.27"
 tracing-opentelemetry = "0.28"
 
@@ -71,6 +71,7 @@ time = { version = "0.3", features = ["serde"] }
 uuid = { version = "1.11", features = ["v7", "serde"] }
 bytes = "1.9"
 futures = "0.3"
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
 # Crypto / Auth
 sha2 = "0.10"

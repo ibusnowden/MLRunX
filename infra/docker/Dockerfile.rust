@@ -1,6 +1,6 @@
 # =============================================================================
 # MLRunX Rust Services - Multi-stage Dockerfile
-# Supports building: api, ingest, processor
+# Supports building: api, processor
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -25,34 +25,32 @@ COPY crates/api-http-types/Cargo.toml crates/api-http-types/Cargo.toml
 COPY crates/api-policy/Cargo.toml crates/api-policy/Cargo.toml
 COPY crates/proto/Cargo.toml crates/proto/Cargo.toml
 COPY crates/proto/build.rs crates/proto/build.rs
-COPY services/ingest/Cargo.toml services/ingest/Cargo.toml
 COPY services/processor/Cargo.toml services/processor/Cargo.toml
 COPY proto proto
 COPY migrations migrations
 
 # Create dummy source files for dependency caching
-RUN mkdir -p apps/api/src crates/api-http-types/src crates/api-policy/src crates/proto/src services/ingest/src services/processor/src && \
+RUN mkdir -p apps/api/src crates/api-http-types/src crates/api-policy/src crates/proto/src services/processor/src && \
     echo "fn main() {}" > apps/api/src/main.rs && \
+    echo "pub fn dummy() {}" > apps/api/src/lib.rs && \
     echo "pub fn dummy() {}" > crates/api-http-types/src/lib.rs && \
     echo "pub fn dummy() {}" > crates/api-policy/src/lib.rs && \
     echo "pub fn dummy() {}" > crates/proto/src/lib.rs && \
-    echo "fn main() {}" > services/ingest/src/main.rs && \
     echo "fn main() {}" > services/processor/src/main.rs
 
 # Build dependencies only (cached layer)
 RUN cargo build --release --workspace && \
-    rm -rf apps/api/src crates/api-http-types/src crates/api-policy/src crates/proto/src services/ingest/src services/processor/src
+    rm -rf apps/api/src crates/api-http-types/src crates/api-policy/src crates/proto/src services/processor/src
 
 # Copy actual source code
 COPY apps/api/src apps/api/src
 COPY crates/api-http-types/src crates/api-http-types/src
 COPY crates/api-policy/src crates/api-policy/src
 COPY crates/proto/src crates/proto/src
-COPY services/ingest/src services/ingest/src
 COPY services/processor/src services/processor/src
 
 # Touch files to invalidate cache for source changes
-RUN touch apps/api/src/main.rs crates/api-http-types/src/lib.rs crates/api-policy/src/lib.rs crates/proto/src/lib.rs services/ingest/src/main.rs services/processor/src/main.rs
+RUN touch apps/api/src/main.rs apps/api/src/lib.rs crates/api-http-types/src/lib.rs crates/api-policy/src/lib.rs crates/proto/src/lib.rs services/processor/src/main.rs
 
 # Build all binaries
 RUN cargo build --release --workspace
@@ -75,23 +73,7 @@ ENV RUST_LOG=info
 CMD ["mlrunx-api"]
 
 # -----------------------------------------------------------------------------
-# Stage 3: Ingest service runtime
-# -----------------------------------------------------------------------------
-FROM debian:bookworm-slim AS ingest
-
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /app/target/release/mlrunx-ingest /usr/local/bin/
-
-EXPOSE 3002 50051
-ENV RUST_LOG=info
-
-CMD ["mlrunx-ingest"]
-
-# -----------------------------------------------------------------------------
-# Stage 4: Processor service runtime
+# Stage 3: Processor service runtime
 # -----------------------------------------------------------------------------
 FROM debian:bookworm-slim AS processor
 

@@ -110,25 +110,26 @@ The current release uses a lightweight, self-contained architecture:
 <summary><b>Planned: Scale-out architecture</b></summary>
 
 The codebase includes scaffolded storage backends (ClickHouse, PostgreSQL, MinIO) and
-service skeletons (ingest, processor) for a future distributed deployment:
+an experimental queued processor path for a future distributed deployment:
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────────┐
-│  Python SDK │────▶│   Ingest    │────▶│   ClickHouse    │
-│  (async +   │     │  (Rust/gRPC)│     │  (metrics/traces)│
+│  Python SDK │────▶│ API Gateway │────▶│   Redis Queue   │
+│  (async +   │     │ (Rust/Axum) │     │  (queued mode)  │
 │   spool)    │     └─────────────┘     └─────────────────┘
-└─────────────┘            │
-                           ▼
-┌─────────────┐     ┌─────────────┐     ┌─────────────────┐
-│   Next.js   │◀───▶│  API Gateway│◀───▶│    Postgres     │
-│     UI      │     │  (Rust/Axum)│     │   (metadata)    │
-└─────────────┘     └─────────────┘     └─────────────────┘
-                           │
-                           ▼
+└─────────────┘            ▲                     │
+                           │                     ▼
                     ┌─────────────┐     ┌─────────────────┐
-                    │  Processor  │     │     MinIO       │
-                    │  (rollups)  │     │   (artifacts)   │
+                    │   Next.js   │     │    Processor    │
+                    │     UI      │     │   (queued v1)   │
                     └─────────────┘     └─────────────────┘
+                                                  │
+                          ┌───────────────────────┼───────────────────────┐
+                          ▼                       ▼                       ▼
+                    ┌──────────┐           ┌──────────┐           ┌──────────┐
+                    │PostgreSQL│           │ClickHouse│           │  MinIO   │
+                    │ metadata │           │  metrics │           │artifacts │
+                    └──────────┘           └──────────┘           └──────────┘
 ```
 
 The Docker Compose stack at `infra/docker/` already provisions ClickHouse, Postgres,
@@ -155,7 +156,7 @@ MinIO, Redis, and an OTEL collector for when these backends are wired in.
 | Framework integrations (Lightning, HF, Optuna callbacks) | Scaffolded |
 | Hyperparameter sweeps + model registry | Planned |
 | ClickHouse / Postgres / MinIO backends | Scaffolded |
-| Distributed ingest + processor services | Scaffolded |
+| Queued processor runtime | Experimental |
 
 ## Project Structure
 
@@ -168,8 +169,7 @@ MLRunX/
 │   ├── python/             # Python SDK (async batching + offline spool)
 │   └── integrations/       # Lightning, Hydra, Optuna, HuggingFace hooks
 ├── services/
-│   ├── ingest/             # [scaffold] Rust ingest service
-│   └── processor/          # [scaffold] Rollups, downsampling
+│   └── processor/          # [experimental] Queued ingest drain + persistence
 ├── crates/
 │   └── proto/              # Protobuf definitions + generated code
 ├── infra/
@@ -238,7 +238,7 @@ docker run -p 3001:3001 -p 50051:50051 -v mlrunx-data:/data mlrunx
 ### Option C: Full Docker Compose stack (for development)
 
 ```bash
-# Starts ClickHouse, Postgres, MinIO, Redis, OTEL collector, API, and UI
+# Starts ClickHouse, Postgres, MinIO, Redis, OTEL collector, API, processor, and UI
 cd infra/docker
 cp .env.example .env    # review and edit secrets
 docker compose up -d
@@ -260,6 +260,7 @@ docker compose up -d
 | **PostgreSQL** | 5432 | Metadata storage (scaffolded) |
 | **MinIO** | 9001 (API), 9002 (Console) | Artifact storage (scaffolded) |
 | **Redis** | 6379 | Queue and cache (scaffolded) |
+| **Processor** | internal | Redis stream consumer for near-real-time persistence |
 | **OTEL Collector** | 4317 (gRPC), 4318 (HTTP) | Telemetry collection |
 
 </details>

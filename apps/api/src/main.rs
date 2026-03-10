@@ -14,24 +14,6 @@
 //! - **Queued mode** (future): Writes through Redis/Kafka for better throughput
 //!   and horizontal scaling.
 
-#![allow(
-    clippy::module_name_repetitions,
-    clippy::must_use_candidate,
-    clippy::missing_errors_doc,
-    clippy::missing_panics_doc,
-    clippy::redundant_pub_crate,
-    clippy::future_not_send,
-    clippy::significant_drop_tightening,
-    clippy::option_if_let_else,
-    dead_code,
-    unused_imports
-)] // Targeted lint exceptions — keep this list minimal.
-
-mod auth;
-mod config;
-mod services;
-mod storage;
-
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
@@ -47,36 +29,47 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tonic::transport::Server as TonicServer;
-use tower_http::{cors::CorsLayer, decompression::RequestDecompressionLayer};
+use tower_http::{
+    compression::CompressionLayer, cors::CorsLayer, decompression::RequestDecompressionLayer,
+};
 use tracing::{info, warn};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use auth::{ApiKeyStore, AuthContext, AuthMode, auth_middleware};
+use mlrunx_api::{
+    auth,
+    auth::{ApiKeyStore, AuthContext, AuthMode, auth_middleware},
+    config::{IngestMode, RuntimeMode, ServerConfig},
+    observability,
+    queue::RedisIngestQueue,
+    services,
+    services::{
+        CardinalityTracker, EventPayload, IdempotencyResult, IdempotencyStore, InMemoryStore,
+        IngestServiceImpl, MetricPayload, ParamPayload, TagPayload, compute_payload_hash,
+    },
+    storage::{
+        self, AuditEventRow, AuthSessionAdminRow, CreateProjectInput, CreateRunInput,
+        MetadataFilter, MetricAliasRow, MetricRow, ProjectRepository, ProjectRow, RunEventInput,
+        RunEventRow, RunFilterCondition, RunFilterExpr, RunFilterOperator, RunFilterTarget,
+        RunListSortField, RunListSortOrder, RunRepository, RunRow, RunStatus as PostgresRunStatus,
+        SqliteStore, UserProjectMembershipRow, UserRow,
+    },
+};
 use mlrunx_api_http_types::{
-    UiAuthLoginRequest, UiAuthLoginResponse, UiAuthLogoutResponse, UiAuthSessionResponse,
+    IngestBatchHttpRequest, IngestBatchHttpResponse, MetricValue, ParamData, QueuedIngestBatch,
+    QueuedLogEventData, QueuedMetricData, TagData, UiAuthLoginRequest, UiAuthLoginResponse,
+    UiAuthLogoutResponse, UiAuthSessionResponse,
 };
 use mlrunx_api_policy::{UiRunOwnerPolicyError, enforce_ui_run_owner};
 use mlrunx_proto::mlrunx::v1::ingest_service_server::IngestServiceServer;
-use services::{
-    CardinalityTracker, EventPayload, IdempotencyResult, IdempotencyStore, IngestServiceImpl,
-    MetricPayload, ParamPayload, TagPayload, compute_payload_hash, ingest::InMemoryStore,
-};
-use storage::{
-    AuditEventRow, AuthSessionAdminRow, CreateProjectInput, CreateRunInput, MetadataFilter,
-    MetricAliasRow, MetricRow, ProjectRepository, ProjectRow, RunEventInput, RunEventRow,
-    RunFilterCondition, RunFilterExpr, RunFilterOperator, RunFilterTarget, RunListSortField,
-    RunListSortOrder, RunRepository, RunRow, RunStatus as PostgresRunStatus, SqliteStore,
-    UserProjectMembershipRow, UserRow,
-};
 
 /// Application state shared across handlers.
 #[derive(Clone)]
 pub struct AppState {
-    store: Arc<InMemoryStore>,
     sqlite_store: Arc<SqliteStore>,
     key_store: Arc<ApiKeyStore>,
     idempotency_store: Arc<IdempotencyStore>,
     cardinality_tracker: Arc<CardinalityTracker>,
+    ingest_queue: Option<Arc<RedisIngestQueue>>,
+    write_rate_limiter: Arc<HttpRateLimiter>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -967,6 +960,24 @@ fn auth_user_id(auth: &AuthContext) -> Option<String> {
         .map(|(_, value)| value.to_string())
 }
 
+fn scoped_write_rate_limit_key(auth: &AuthContext, project_id: Option<&str>) -> String {
+    let scope = project_id.unwrap_or("*");
+    if let Some(user_id) = auth_user_id(auth) {
+        return format!("user:{user_id}:{scope}");
+    }
+    if auth.is_dev_mode {
+        return format!("dev:{scope}");
+    }
+    format!("key:{}:{scope}", auth.api_key.id)
+}
+
+fn rate_limit_error(retry_after: u64) -> (StatusCode, String) {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        format!("Rate limit exceeded. Retry after {retry_after}s."),
+    )
+}
+
 fn audit_actor_ids(auth: &AuthContext) -> (Option<String>, Option<String>) {
     if auth.is_dev_mode {
         return (None, None);
@@ -1300,6 +1311,11 @@ fn require_api_key_run_owner_for_mutation(
 
 fn postgres_metadata_shadow_writes_enabled() -> bool {
     env_flag_default("MLRUNX_POSTGRES_METADATA_SHADOW_WRITES_ENABLED", false)
+        || RuntimeMode::from_env().is_scale_out()
+}
+
+fn queued_ingest_enabled(config: &ServerConfig) -> bool {
+    config.runtime_mode.is_scale_out() || matches!(config.ingest_mode, IngestMode::Queued)
 }
 
 async fn maybe_shadow_write_project_to_postgres(project: &ProjectRow) {
@@ -2991,6 +3007,11 @@ async fn http_init_run(
         Some(&run_id),
     )
     .await?;
+    state
+        .write_rate_limiter
+        .check(&scoped_write_rate_limit_key(&auth, Some(project_id)))
+        .await
+        .map_err(rate_limit_error)?;
 
     let max_tag_value_len = state.cardinality_tracker.config().max_tag_value_length;
     let mut validated_init_tags: Vec<(String, String)> = Vec::new();
@@ -3148,84 +3169,6 @@ async fn http_init_run(
         run_id,
         offline: false,
     }))
-}
-
-/// Request to ingest a batch via HTTP.
-#[derive(Debug, Deserialize)]
-struct IngestBatchHttpRequest {
-    run_id: String,
-    /// SDK-provided batch identifier for idempotency
-    batch_id: Option<String>,
-    /// Sequence number for ordering (optional)
-    seq: Option<i64>,
-    #[serde(default)]
-    metrics: Vec<MetricData>,
-    #[serde(default)]
-    params: Vec<ParamData>,
-    #[serde(default)]
-    tags: Vec<TagData>,
-    #[serde(default)]
-    events: Vec<LogEventData>,
-    #[allow(dead_code)]
-    timestamp: Option<f64>,
-    #[allow(dead_code)]
-    stats: Option<BatchStats>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MetricData {
-    name: String,
-    value: MetricValue,
-    step: i64,
-    timestamp: Option<f64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum MetricValue {
-    Scalar(f64),
-    Array(Vec<f64>),
-}
-
-#[derive(Debug, Deserialize)]
-struct ParamData {
-    name: String,
-    value: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TagData {
-    key: String,
-    value: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct LogEventData {
-    level: Option<String>,
-    source: Option<String>,
-    message: String,
-    step: Option<i64>,
-    timestamp: Option<f64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(clippy::struct_field_names)]
-struct BatchStats {
-    metric_count: Option<i64>,
-    param_count: Option<i64>,
-    tag_count: Option<i64>,
-    coalesced_count: Option<i64>,
-}
-
-#[derive(Debug, Serialize)]
-struct IngestBatchHttpResponse {
-    status: String,
-    accepted: i64,
-    /// Whether this was a duplicate batch
-    duplicate: bool,
-    /// Warnings about the batch (e.g., out of order)
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    warnings: Vec<String>,
 }
 
 fn normalize_run_event_level(raw: Option<&str>) -> String {
@@ -3551,6 +3494,190 @@ fn parse_structured_payload_for_kind(
     }
 }
 
+struct PersistedIngestBatch {
+    accepted_metric_count: usize,
+    accepted_tag_count: usize,
+    accepted_event_count: usize,
+}
+
+async fn persist_ingest_batch_to_sqlite(
+    state: &AppState,
+    run_id: &str,
+    sqlite_metrics: &[MetricRow],
+    validated_params: &[(String, String)],
+    accepted_tags: &[(String, String)],
+    sqlite_events: &[RunEventInput],
+    warnings: &[String],
+) -> Result<PersistedIngestBatch, (StatusCode, String)> {
+    let accepted_metric_count = sqlite_metrics.len();
+    let accepted_tag_pairs: Vec<(String, String)> = accepted_tags
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let accepted_tag_count = accepted_tag_pairs.len();
+    let param_count = validated_params.len();
+
+    if accepted_metric_count > 0 {
+        state
+            .sqlite_store
+            .insert_metrics(run_id, sqlite_metrics)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to persist metrics to SQLite: {e}"),
+                )
+            })?;
+
+        state
+            .sqlite_store
+            .increment_metrics_count(run_id, usize_to_i64_saturating(accepted_metric_count))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to update metrics count in SQLite: {e}"),
+                )
+            })?;
+    }
+
+    if !accepted_tags.is_empty() {
+        state
+            .sqlite_store
+            .set_tags(run_id, accepted_tags)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to persist tags to SQLite: {e}"),
+                )
+            })?;
+    }
+
+    if param_count > 0 {
+        state
+            .sqlite_store
+            .insert_params(run_id, validated_params)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to persist params to SQLite: {e}"),
+                )
+            })?;
+    }
+
+    let mut accepted_event_count = if sqlite_events.is_empty() {
+        0usize
+    } else {
+        state
+            .sqlite_store
+            .insert_run_events(run_id, sqlite_events)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to persist run events to SQLite: {e}"),
+                )
+            })?
+    };
+
+    if !warnings.is_empty() {
+        let warning_events: Vec<RunEventInput> = warnings
+            .iter()
+            .map(|warning| RunEventInput {
+                level: "warn".to_string(),
+                source: "ingest".to_string(),
+                message: warning.clone(),
+                step: None,
+                timestamp: None,
+            })
+            .collect();
+
+        match state
+            .sqlite_store
+            .insert_run_events(run_id, &warning_events)
+            .await
+        {
+            Ok(inserted) => {
+                accepted_event_count += inserted;
+            }
+            Err(e) => {
+                warn!(run_id = %run_id, error = %e, "Failed to persist warning events");
+            }
+        }
+    }
+
+    Ok(PersistedIngestBatch {
+        accepted_metric_count,
+        accepted_tag_count,
+        accepted_event_count,
+    })
+}
+
+fn build_queued_ingest_batch(
+    project_id: &str,
+    run_id: &str,
+    batch_id: &str,
+    payload_hash: &str,
+    seq: i64,
+    sqlite_metrics: &[MetricRow],
+    validated_params: &[(String, String)],
+    accepted_tags: &[(String, String)],
+    sqlite_events: &[RunEventInput],
+    warnings: &[String],
+) -> QueuedIngestBatch {
+    let queued_at_unix_ms = chrono::Utc::now().timestamp_millis();
+
+    let metrics = sqlite_metrics
+        .iter()
+        .map(|metric| QueuedMetricData {
+            name: metric.name.clone(),
+            value: metric.value,
+            step: metric.step,
+            timestamp: metric.timestamp,
+        })
+        .collect();
+    let params = validated_params
+        .iter()
+        .map(|(name, value)| ParamData {
+            name: name.clone(),
+            value: value.clone(),
+        })
+        .collect();
+    let tags = accepted_tags
+        .iter()
+        .map(|(key, value)| TagData {
+            key: key.clone(),
+            value: value.clone(),
+        })
+        .collect();
+    let events = sqlite_events
+        .iter()
+        .map(|event| QueuedLogEventData {
+            level: event.level.clone(),
+            source: event.source.clone(),
+            message: event.message.clone(),
+            step: event.step,
+            timestamp: event.timestamp,
+        })
+        .collect();
+
+    QueuedIngestBatch {
+        project_id: project_id.to_string(),
+        run_id: run_id.to_string(),
+        batch_id: batch_id.to_string(),
+        payload_hash: payload_hash.to_string(),
+        seq,
+        queued_at_unix_ms,
+        metrics,
+        params,
+        tags,
+        events,
+        warnings: warnings.to_vec(),
+    }
+}
+
 /// Ingest a batch of events via HTTP (for SDK HTTP transport).
 #[allow(clippy::too_many_lines)]
 async fn http_ingest_batch(
@@ -3582,6 +3709,11 @@ async fn http_ingest_batch(
     .await?;
     require_ui_run_owner(&auth, &run)?;
     require_api_key_run_owner_for_mutation(&auth, &run, "ingest to")?;
+    state
+        .write_rate_limiter
+        .check(&scoped_write_rate_limit_key(&auth, Some(&run.project_id)))
+        .await
+        .map_err(rate_limit_error)?;
 
     let max_tag_value_len = state.cardinality_tracker.config().max_tag_value_length;
     let mut validated_params: Vec<(String, String)> = Vec::with_capacity(req.params.len());
@@ -3844,55 +3976,11 @@ async fn http_ingest_batch(
     }
 
     let accepted_metric_count = sqlite_metrics.len();
-    let accepted_tag_count = accepted_tags.len();
-
-    // Persist metrics to SQLite.
-    // Fail closed on storage errors to avoid reporting successful ingestion when metrics are missing.
-    if accepted_metric_count > 0 {
-        state
-            .sqlite_store
-            .insert_metrics(&req.run_id, &sqlite_metrics)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to persist metrics to SQLite: {e}"),
-                )
-            })?;
-
-        state
-            .sqlite_store
-            .increment_metrics_count(&req.run_id, usize_to_i64_saturating(accepted_metric_count))
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to update metrics count in SQLite: {e}"),
-                )
-            })?;
-    }
-
-    // Persist tags to SQLite
-    if !accepted_tags.is_empty() {
-        let tag_pairs: Vec<(String, String)> = accepted_tags
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        if let Err(e) = state.sqlite_store.set_tags(&req.run_id, &tag_pairs).await {
-            warn!(error = %e, "Failed to persist tags to SQLite");
-        }
-    }
-
-    // Persist params to SQLite
-    if param_count > 0 {
-        if let Err(e) = state
-            .sqlite_store
-            .insert_params(&req.run_id, &validated_params)
-            .await
-        {
-            warn!(error = %e, "Failed to persist params to SQLite");
-        }
-    }
+    let accepted_tag_pairs: Vec<(String, String)> = accepted_tags
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let accepted_tag_count = accepted_tag_pairs.len();
 
     let mut dropped_event_count = 0usize;
     let sqlite_events: Vec<RunEventInput> = req
@@ -3939,46 +4027,45 @@ async fn http_ingest_batch(
         ));
     }
 
-    let mut accepted_event_count = if sqlite_events.is_empty() {
-        0usize
-    } else {
-        state
-            .sqlite_store
-            .insert_run_events(&req.run_id, &sqlite_events)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to persist run events to SQLite: {e}"),
-                )
-            })?
-    };
-
-    if !warnings.is_empty() {
-        let warning_events: Vec<RunEventInput> = warnings
-            .iter()
-            .map(|warning| RunEventInput {
-                level: "warn".to_string(),
-                source: "ingest".to_string(),
-                message: warning.clone(),
-                step: None,
-                timestamp: None,
-            })
-            .collect();
-
-        match state
-            .sqlite_store
-            .insert_run_events(&req.run_id, &warning_events)
-            .await
-        {
-            Ok(inserted) => {
-                accepted_event_count += inserted;
-            }
-            Err(e) => {
-                warn!(run_id = %req.run_id, error = %e, "Failed to persist warning events");
-            }
+    let persisted_batch = if let Some(queue) = &state.ingest_queue {
+        let queued_batch = build_queued_ingest_batch(
+            &project_id,
+            &req.run_id,
+            &batch_id,
+            &payload_hash,
+            seq,
+            &sqlite_metrics,
+            &validated_params,
+            &accepted_tag_pairs,
+            &sqlite_events,
+            &warnings,
+        );
+        queue.enqueue(&queued_batch).await.map_err(|e| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("Failed to enqueue ingest batch: {e}"),
+            )
+        })?;
+        PersistedIngestBatch {
+            accepted_metric_count,
+            accepted_tag_count,
+            accepted_event_count: sqlite_events.len() + warnings.len(),
         }
-    }
+    } else {
+        persist_ingest_batch_to_sqlite(
+            &state,
+            &req.run_id,
+            &sqlite_metrics,
+            &validated_params,
+            &accepted_tag_pairs,
+            &sqlite_events,
+            &warnings,
+        )
+        .await?
+    };
+    let accepted_metric_count = persisted_batch.accepted_metric_count;
+    let accepted_tag_count = persisted_batch.accepted_tag_count;
+    let accepted_event_count = persisted_batch.accepted_event_count;
 
     if param_count > 0 || accepted_tag_count > 0 {
         let updated_param_names: Vec<String> = validated_params
@@ -4024,7 +4111,8 @@ async fn http_ingest_batch(
         tags = accepted_tag_count,
         events = accepted_event_count,
         dropped = dropped,
-        "HTTP: Ingested batch (SQLite)"
+        queued = state.ingest_queue.is_some(),
+        "HTTP: Ingested batch"
     );
 
     Ok(Json(IngestBatchHttpResponse {
@@ -4076,6 +4164,11 @@ async fn http_finish_run(
     .await?;
     require_ui_run_owner(&auth, &run)?;
     require_api_key_run_owner_for_mutation(&auth, &run, "finish")?;
+    state
+        .write_rate_limiter
+        .check(&scoped_write_rate_limit_key(&auth, Some(&run.project_id)))
+        .await
+        .map_err(rate_limit_error)?;
 
     // Update in SQLite
     state
@@ -4696,7 +4789,7 @@ async fn http_list_keys(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let last_used_at = k.last_used_at.map(|t| {
+            let last_used_at = k.last_used_at.map(|t: std::time::SystemTime| {
                 t.duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs()
@@ -5108,7 +5201,13 @@ async fn http_get_shared_metrics(
     // Query metrics
     let sqlite_series = state
         .sqlite_store
-        .get_metrics(&share.run_id, &names, query.max_points)
+        .get_metrics(
+            &share.run_id,
+            &names,
+            query.max_points,
+            query.start_step,
+            query.end_step,
+        )
         .await
         .map_err(internal_error)?;
 
@@ -5795,7 +5894,13 @@ async fn http_get_metrics(
     // Query metrics from SQLite
     let sqlite_series = state
         .sqlite_store
-        .get_metrics(&run_id, &names, query.max_points)
+        .get_metrics(
+            &run_id,
+            &names,
+            query.max_points,
+            query.start_step,
+            query.end_step,
+        )
         .await
         .map_err(internal_error)?;
 
@@ -6198,7 +6303,7 @@ async fn http_compare_runs(
 
         let sqlite_series = state
             .sqlite_store
-            .get_metrics(run_id, &names, req.max_points)
+            .get_metrics(run_id, &names, req.max_points, None, None)
             .await
             .map_err(internal_error)?;
 
@@ -6395,14 +6500,20 @@ impl HttpRateLimiter {
     }
 
     fn from_env() -> Self {
-        let capacity = std::env::var("MLRUNX_RATE_LIMIT_BURST")
+        Self::from_env_with_prefix("MLRUNX_RATE_LIMIT", 100, 50.0)
+    }
+
+    fn from_env_with_prefix(prefix: &str, default_capacity: u32, default_refill_rate: f64) -> Self {
+        let burst_key = format!("{prefix}_BURST");
+        let refill_key = format!("{prefix}_PER_SECOND");
+        let capacity = std::env::var(&burst_key)
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(100);
-        let refill_rate = std::env::var("MLRUNX_RATE_LIMIT_PER_SECOND")
+            .unwrap_or(default_capacity);
+        let refill_rate = std::env::var(&refill_key)
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(50.0);
+            .unwrap_or(default_refill_rate);
         Self::new(capacity, refill_rate)
     }
 
@@ -6573,6 +6684,7 @@ fn build_http_router(state: AppState) -> Router {
             HeaderName::from_static("x-api-key"),
             HeaderName::from_static("x-csrf-token"),
         ]);
+    let compression = CompressionLayer::new();
     let decompression = RequestDecompressionLayer::new();
 
     // Routes that require authentication
@@ -6741,6 +6853,7 @@ fn build_http_router(state: AppState) -> Router {
         .merge(public_routes)
         .merge(protected_routes)
         .layer(security_and_rate_limit)
+        .layer(compression)
         .layer(decompression)
         .layer(cors)
         .with_state(state)
@@ -6749,16 +6862,11 @@ fn build_http_router(state: AppState) -> Router {
 #[tokio::main]
 async fn main() {
     // Load configuration from environment
-    let server_config = config::ServerConfig::from_env();
+    let server_config = ServerConfig::from_env();
 
     // Initialize tracing
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| server_config.log_level.clone().into()),
-        )
-        .init();
+    observability::init_tracing(&server_config.log_level, "mlrunx-api")
+        .expect("Failed to initialize tracing");
 
     // Log startup configuration
     server_config.log_startup();
@@ -6825,14 +6933,34 @@ Set API_HOST=127.0.0.1 (or ::1) when MLRUNX_AUTH_MODE=disabled."
         );
     }
 
+    let ingest_queue = if queued_ingest_enabled(&server_config) {
+        let queue = Arc::new(
+            RedisIngestQueue::from_env().expect("Failed to initialize Redis ingest queue"),
+        );
+        info!(
+            stream_key = %queue.config().stream_key,
+            consumer_group = %queue.config().consumer_group,
+            "Queued ingest enabled"
+        );
+        Some(queue)
+    } else {
+        None
+    };
+    let write_rate_limiter = Arc::new(HttpRateLimiter::from_env_with_prefix(
+        "MLRUNX_WRITE_RATE_LIMIT",
+        500,
+        200.0,
+    ));
+
     // Create shared state
     let store = Arc::new(InMemoryStore::new());
     let app_state = AppState {
-        store: store.clone(),
         sqlite_store,
         key_store: key_store.clone(),
         idempotency_store,
         cardinality_tracker,
+        ingest_queue,
+        write_rate_limiter,
     };
 
     // Server addresses from config
@@ -6892,7 +7020,6 @@ mod tests {
     use tower::ServiceExt;
 
     async fn test_app() -> Router {
-        let store = Arc::new(InMemoryStore::new());
         // Use in-memory SQLite for tests
         let sqlite_store = Arc::new(
             SqliteStore::new(":memory:")
@@ -6904,11 +7031,12 @@ mod tests {
         let idempotency_store = Arc::new(IdempotencyStore::new());
         let cardinality_tracker = Arc::new(CardinalityTracker::default());
         let state = AppState {
-            store,
             sqlite_store,
             key_store,
             idempotency_store,
             cardinality_tracker,
+            ingest_queue: None,
+            write_rate_limiter: Arc::new(HttpRateLimiter::new(10_000, 10_000.0)),
         };
         build_http_router(state)
     }
@@ -6941,7 +7069,6 @@ mod tests {
     }
 
     async fn ui_session_harness_with_role(role: &str) -> UiSessionHarness {
-        let store = Arc::new(InMemoryStore::new());
         let sqlite_store = Arc::new(
             SqliteStore::new(":memory:")
                 .await
@@ -6981,11 +7108,12 @@ mod tests {
             .expect("Failed to create secondary project");
 
         let state = AppState {
-            store,
             sqlite_store: sqlite_store.clone(),
             key_store: key_store.clone(),
             idempotency_store,
             cardinality_tracker,
+            ingest_queue: None,
+            write_rate_limiter: Arc::new(HttpRateLimiter::new(10_000, 10_000.0)),
         };
 
         UiSessionHarness {
@@ -7153,7 +7281,6 @@ mod tests {
     }
 
     async fn test_app_with_auth_enabled() -> Router {
-        let store = Arc::new(InMemoryStore::new());
         let sqlite_store = Arc::new(
             SqliteStore::new(":memory:")
                 .await
@@ -7163,11 +7290,12 @@ mod tests {
         let idempotency_store = Arc::new(IdempotencyStore::new());
         let cardinality_tracker = Arc::new(CardinalityTracker::default());
         let state = AppState {
-            store,
             sqlite_store,
             key_store,
             idempotency_store,
             cardinality_tracker,
+            ingest_queue: None,
+            write_rate_limiter: Arc::new(HttpRateLimiter::new(10_000, 10_000.0)),
         };
         build_http_router(state)
     }
@@ -7260,7 +7388,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_init_run_http() {
-        let store = Arc::new(InMemoryStore::new());
         let sqlite_store = Arc::new(
             SqliteStore::new(":memory:")
                 .await
@@ -7275,11 +7402,12 @@ mod tests {
         let idempotency_store = Arc::new(IdempotencyStore::new());
         let cardinality_tracker = Arc::new(CardinalityTracker::default());
         let state = AppState {
-            store,
             sqlite_store,
             key_store,
             idempotency_store,
             cardinality_tracker,
+            ingest_queue: None,
+            write_rate_limiter: Arc::new(HttpRateLimiter::new(10_000, 10_000.0)),
         };
         let app = build_http_router(state);
         let response = app
@@ -8781,7 +8909,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_get_run_from_sqlite_after_in_memory_reset() {
-        let store = Arc::new(InMemoryStore::new());
         let sqlite_store = Arc::new(
             SqliteStore::new(":memory:")
                 .await
@@ -8807,11 +8934,12 @@ mod tests {
             .unwrap();
 
         let state = AppState {
-            store,
             sqlite_store,
             key_store,
             idempotency_store,
             cardinality_tracker,
+            ingest_queue: None,
+            write_rate_limiter: Arc::new(HttpRateLimiter::new(10_000, 10_000.0)),
         };
         let app = build_http_router(state);
 
@@ -10645,7 +10773,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_project_key_cannot_delete_run_owned_by_different_key() {
-        let store = Arc::new(InMemoryStore::new());
         let sqlite_store = Arc::new(
             SqliteStore::new(":memory:")
                 .await
@@ -10689,11 +10816,12 @@ mod tests {
             .expect("Failed to create owned run");
 
         let state = AppState {
-            store,
             sqlite_store,
             key_store,
             idempotency_store,
             cardinality_tracker,
+            ingest_queue: None,
+            write_rate_limiter: Arc::new(HttpRateLimiter::new(10_000, 10_000.0)),
         };
         let app = build_http_router(state);
 
@@ -10754,11 +10882,12 @@ mod tests {
         );
 
         let state = AppState {
-            store,
             sqlite_store,
             key_store,
             idempotency_store,
             cardinality_tracker,
+            ingest_queue: None,
+            write_rate_limiter: Arc::new(HttpRateLimiter::new(10_000, 10_000.0)),
         };
         let app = build_http_router(state);
 

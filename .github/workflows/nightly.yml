@@ -28,66 +28,9 @@ jobs:
   test-integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    services:
-      clickhouse:
-        image: clickhouse/clickhouse-server:24.8
-        ports:
-          - 8123:8123
-          - 9000:9000
-        options: >-
-          --health-cmd "clickhouse-client --query 'SELECT 1'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: mlrunx
-          POSTGRES_USER: mlrunx
-          POSTGRES_PASSWORD: mlrunx_dev
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Start MinIO
-        run: |
-          set -euo pipefail
-          docker run -d \
-            --name mlrunx-nightly-minio \
-            -p 9001:9000 \
-            -e MINIO_ROOT_USER=mlrunx \
-            -e MINIO_ROOT_PASSWORD=mlrunx_dev_secret \
-            minio/minio:latest \
-            server /data --console-address ":9001"
-
-          for i in {1..60}; do
-            if curl -fsS http://127.0.0.1:9001/minio/health/ready >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-
-          echo "MinIO failed to become ready in 60s"
-          docker logs mlrunx-nightly-minio || true
-          exit 1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -111,22 +54,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-packages
 
-      - name: Build services
-        run: cargo build --release
+      - name: Build workspace
+        run: cargo build --release --workspace
 
       - name: Run integration tests
         run: make test-integration
-        env:
-          DATABASE_URL: postgres://mlrunx:mlrunx_dev@localhost:5432/mlrunx
-          CLICKHOUSE_URL: http://localhost:8123
-          REDIS_URL: redis://localhost:6379
-          MINIO_ENDPOINT: localhost:9001
-          MINIO_ACCESS_KEY: mlrunx
-          MINIO_SECRET_KEY: mlrunx_dev_secret
-
-      - name: Stop MinIO
-        if: always()
-        run: docker rm -f mlrunx-nightly-minio || true
 
   # ===========================================================================
   # Performance Benchmarks
@@ -217,17 +149,6 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event.inputs.run_benchmarks != 'false' }}
     needs: [test-integration]
-    services:
-      clickhouse:
-        image: clickhouse/clickhouse-server:24.8
-        ports:
-          - 8123:8123
-          - 9000:9000
-
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
 
     steps:
       - uses: actions/checkout@v4

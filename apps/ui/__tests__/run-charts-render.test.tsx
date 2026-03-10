@@ -1,6 +1,6 @@
 import { Suspense, type ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 const {
   getRunMock,
@@ -68,6 +68,120 @@ vi.mock('@/components/charts/UPlotChart', () => ({
 import RunDetailPage from '../src/app/runs/[run_id]/page'
 import { ComparePanel } from '../src/components/ComparePanel'
 
+const allRunMetricSeries = [
+  {
+    name: 'loss',
+    points: [
+      { step: 1, mean: 2.6, min: 2.5, max: 2.7, count: 1 },
+      { step: 2, mean: 2.2, min: 2.1, max: 2.3, count: 1 },
+    ],
+    total_points: 2,
+    downsampled: false,
+  },
+  {
+    name: 'val_loss',
+    points: [
+      { step: 1, mean: 2.8, min: 2.7, max: 2.9, count: 1 },
+      { step: 2, mean: 2.4, min: 2.3, max: 2.5, count: 1 },
+    ],
+    total_points: 2,
+    downsampled: false,
+  },
+  {
+    name: 'learning_rate',
+    points: [
+      { step: 1, mean: 0.001, min: 0.001, max: 0.001, count: 1 },
+      { step: 2, mean: 0.0008, min: 0.0008, max: 0.0008, count: 1 },
+    ],
+    total_points: 2,
+    downsampled: false,
+  },
+  {
+    name: 'accuracy',
+    points: [
+      { step: 1, mean: 0.42, min: 0.42, max: 0.42, count: 1 },
+      { step: 2, mean: 0.54, min: 0.54, max: 0.54, count: 1 },
+    ],
+    total_points: 2,
+    downsampled: false,
+  },
+  {
+    name: 'reward',
+    points: [
+      { step: 1, mean: 0.4, min: 0.35, max: 0.45, count: 1 },
+      { step: 2, mean: 0.55, min: 0.5, max: 0.6, count: 1 },
+    ],
+    total_points: 2,
+    downsampled: false,
+  },
+  {
+    name: 'throughput',
+    points: [
+      { step: 1, mean: 850, min: 840, max: 860, count: 1 },
+      { step: 2, mean: 910, min: 900, max: 920, count: 1 },
+    ],
+    total_points: 2,
+    downsampled: false,
+  },
+  {
+    name: 'epoch_time',
+    points: [
+      { step: 1, mean: 12.2, min: 12.1, max: 12.3, count: 1 },
+      { step: 2, mean: 11.4, min: 11.3, max: 11.5, count: 1 },
+    ],
+    total_points: 2,
+    downsampled: false,
+  },
+  {
+    name: 'grad_norm/layer1',
+    points: [
+      { step: 1, mean: 0.9, min: 0.9, max: 0.9, count: 1 },
+      { step: 2, mean: 0.7, min: 0.7, max: 0.7, count: 1 },
+    ],
+    total_points: 2,
+    downsampled: false,
+  },
+  {
+    name: 'grad_norm/layer2',
+    points: [
+      { step: 1, mean: 1.1, min: 1.1, max: 1.1, count: 1 },
+      { step: 2, mean: 0.95, min: 0.95, max: 0.95, count: 1 },
+    ],
+    total_points: 2,
+    downsampled: false,
+  },
+  {
+    name: 'gpu/memory',
+    points: [
+      { step: 1, mean: 18.4, min: 18.4, max: 18.4, count: 1 },
+      { step: 2, mean: 18.8, min: 18.8, max: 18.8, count: 1 },
+    ],
+    total_points: 2,
+    downsampled: false,
+  },
+  {
+    name: 'gpu/utilization',
+    points: [
+      { step: 1, mean: 72, min: 72, max: 72, count: 1 },
+      { step: 2, mean: 76, min: 76, max: 76, count: 1 },
+    ],
+    total_points: 2,
+    downsampled: false,
+  },
+  {
+    name: 'cpu_utilization',
+    points: [
+      { step: 1, mean: 48, min: 48, max: 48, count: 1 },
+      { step: 2, mean: 53, min: 53, max: 53, count: 1 },
+    ],
+    total_points: 2,
+    downsampled: false,
+  },
+]
+
+const allRunMetricNames = allRunMetricSeries.map((series) => series.name)
+const runMetricSeriesByName = new Map(allRunMetricSeries.map((series) => [series.name, series]))
+
 describe('Run charts rendering', () => {
   beforeEach(() => {
     pushMock.mockReset()
@@ -84,7 +198,7 @@ describe('Run charts rendering', () => {
       project_id: 'project-1',
       name: 'char-gpt-scratch',
       status: 'running',
-      metrics_count: 4,
+      metrics_count: 24,
       params_count: 0,
       tags: {
         model: 'mini-gpt',
@@ -99,30 +213,16 @@ describe('Run charts rendering', () => {
       ],
     })
 
-    getMetricsMock.mockResolvedValue({
-      run_id: 'run-1',
-      available_metrics: ['loss', 'val_loss'],
-      series: [
-        {
-          name: 'loss',
-          points: [
-            { step: 1, mean: 2.6, min: 2.5, max: 2.7, count: 1 },
-            { step: 2, mean: 2.2, min: 2.1, max: 2.3, count: 1 },
-          ],
-          total_points: 2,
-          downsampled: false,
-        },
-        {
-          name: 'val_loss',
-          points: [
-            { step: 1, mean: 2.8, min: 2.7, max: 2.9, count: 1 },
-            { step: 2, mean: 2.4, min: 2.3, max: 2.5, count: 1 },
-          ],
-          total_points: 2,
-          downsampled: false,
-        },
-      ],
-    })
+    getMetricsMock.mockImplementation(async (runId: string, params?: { names?: string[]; maxPoints?: number }) => ({
+      run_id: runId,
+      available_metrics: allRunMetricNames,
+      metric_aliases: {
+        learning_rate: 'lr',
+      },
+      series: (params?.names?.length ? params.names : allRunMetricNames)
+        .map((name) => runMetricSeriesByName.get(name))
+        .filter((series) => Boolean(series)),
+    }))
 
     getRunEventsMock.mockResolvedValue({
       run_id: 'run-1',
@@ -143,7 +243,7 @@ describe('Run charts rendering', () => {
     })
   })
 
-  it('loads run-detail metrics and renders per-metric line charts without area fill', async () => {
+  it('loads run-detail metrics and renders compact reference-style charts without area fill', async () => {
     await act(async () => {
       render(
         <Suspense fallback={<div>Loading run route...</div>}>
@@ -153,22 +253,132 @@ describe('Run charts rendering', () => {
     })
 
     await screen.findByRole('heading', { name: 'char-gpt-scratch' })
-    await screen.findByText('Metric Groups')
+    await screen.findByText('Chart Controls')
+    await screen.findByRole('button', { name: 'Loss Metrics (2)' })
     await screen.findAllByTestId('uplot-chart')
 
     await waitFor(() => {
       expect(getRunMock).toHaveBeenCalledWith('run-1')
-      expect(getMetricsMock).toHaveBeenCalledWith('run-1', { maxPoints: 1200 })
+      expect(getMetricsMock).toHaveBeenCalledWith('run-1', {
+        names: ['loss', 'val_loss'],
+        maxPoints: 1200,
+      })
       expect(getRunEventsMock).toHaveBeenCalledWith('run-1', { afterId: undefined, limit: 200 })
     })
 
-    const runMetricChartCalls = uPlotChartMock.mock.calls
-      .map(([props]) => props as { yLabel?: string; areaFill?: boolean })
-      .filter((props) => props.yLabel === 'loss' || props.yLabel === 'val_loss')
+    expect(screen.getAllByTestId('uplot-chart')).toHaveLength(2)
 
-    expect(runMetricChartCalls.length).toBeGreaterThanOrEqual(2)
-    runMetricChartCalls.forEach((props) => {
-      expect(props.areaFill).toBe(false)
+    const chartCalls = uPlotChartMock.mock.calls
+      .map(([props]) => props as {
+        areaFill?: boolean
+        dashedGrid?: boolean
+        lineWidth?: number
+        showLegend?: boolean
+        showXAxisLabel?: boolean
+        showYAxisLabel?: boolean
+        variant?: string
+        xLabel?: string
+        yLabel?: string
+      })
+
+    const heroLossCall = chartCalls.find((props) => props.yLabel === 'loss' && props.showYAxisLabel === true)
+    const valLossCall = chartCalls.find((props) => props.yLabel === 'val_loss')
+
+    expect(heroLossCall).toBeDefined()
+    expect(valLossCall).toBeDefined()
+    expect(heroLossCall).toMatchObject({
+      areaFill: false,
+      dashedGrid: true,
+      lineWidth: 1.9,
+      showLegend: false,
+      showXAxisLabel: true,
+      showYAxisLabel: true,
+      variant: 'reference',
+      xLabel: 'step',
+    })
+    expect(valLossCall).toMatchObject({
+      areaFill: false,
+      dashedGrid: true,
+      showLegend: false,
+      showXAxisLabel: false,
+      showYAxisLabel: false,
+      variant: 'reference',
+    })
+  })
+
+  it('loads additional metric groups on demand, reuses cached groups, and batches all-metrics rendering', async () => {
+    await act(async () => {
+      render(
+        <Suspense fallback={<div>Loading run route...</div>}>
+          <RunDetailPage params={Promise.resolve({ run_id: 'run-1' })} />
+        </Suspense>
+      )
+    })
+
+    await screen.findByRole('button', { name: 'Loss Metrics (2)' })
+    await waitFor(() => {
+      expect(getMetricsMock).toHaveBeenCalledTimes(1)
+    })
+    expect(screen.getAllByTestId('uplot-chart')).toHaveLength(2)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Learning Rate (1)' }))
+    })
+
+    await waitFor(() => {
+      expect(getMetricsMock).toHaveBeenCalledWith('run-1', {
+        names: ['learning_rate'],
+        maxPoints: 1200,
+      })
+    })
+    await waitFor(() => {
+      expect(screen.getAllByTestId('uplot-chart')).toHaveLength(1)
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Loss Metrics (2)' }))
+    })
+    await waitFor(() => {
+      expect(screen.getAllByTestId('uplot-chart')).toHaveLength(2)
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Learning Rate (1)' }))
+    })
+    await waitFor(() => {
+      expect(screen.getAllByTestId('uplot-chart')).toHaveLength(1)
+    })
+    expect(getMetricsMock).toHaveBeenCalledTimes(2)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'All (12)' }))
+    })
+
+    await waitFor(() => {
+      expect(getMetricsMock).toHaveBeenCalledWith('run-1', {
+        names: [
+          'accuracy',
+          'reward',
+          'throughput',
+          'epoch_time',
+          'grad_norm/layer1',
+          'grad_norm/layer2',
+          'gpu/memory',
+          'gpu/utilization',
+          'cpu_utilization',
+        ],
+        maxPoints: 1200,
+      })
+    })
+
+    const showMoreButton = await screen.findByRole('button', { name: 'Show 3 more charts' })
+    expect(screen.getAllByTestId('uplot-chart')).toHaveLength(9)
+    await act(async () => {
+      fireEvent.click(showMoreButton)
+    })
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId('uplot-chart')).toHaveLength(12)
     })
   })
 

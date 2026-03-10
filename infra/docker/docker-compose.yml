@@ -12,6 +12,7 @@
 #   - minio: Object storage for artifacts (ports 9001/9002)
 #   - redis: Caching (port 6379)
 #   - api: HTTP API + gRPC server (ports 3001/50051)
+#   - processor: Redis stream consumer for queued ingest persistence
 #   - ui: Web dashboard (port 3000)
 # =============================================================================
 
@@ -156,11 +157,16 @@ services:
     ports:
       - "3001:3001"   # HTTP API
       - "50051:50051" # gRPC
+    volumes:
+      - sqlite-data:/data
     environment:
       RUST_LOG: ${RUST_LOG:-info,mlrunx_api=debug}
       API_HOST: "0.0.0.0"
       API_HTTP_PORT: "3001"
       API_GRPC_PORT: "50051"
+      MLRUNX_SQLITE_PATH: /data/mlrunx.db
+      MLRUNX_RUNTIME_MODE: ${MLRUNX_RUNTIME_MODE:-standalone}
+      INGEST_MODE: ${INGEST_MODE:-direct}
       MLRUNX_AUTH_MODE: ${MLRUNX_AUTH_MODE:-api_key}
       MLRUNX_AUTH_DISABLED: ${MLRUNX_AUTH_DISABLED:-false}
       MLRUNX_ALLOW_INSECURE_LOCAL_DEV: ${MLRUNX_ALLOW_INSECURE_LOCAL_DEV:-false}
@@ -176,10 +182,20 @@ services:
       CLICKHOUSE_USER: mlrunx
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-mlrunx_dev}
       REDIS_URL: redis://redis:6379
+      MLRUNX_INGEST_STREAM_KEY: ${MLRUNX_INGEST_STREAM_KEY:-mlrunx:ingest}
+      MLRUNX_INGEST_STREAM_GROUP: ${MLRUNX_INGEST_STREAM_GROUP:-mlrunx-processor}
+      MLRUNX_INGEST_STREAM_READ_COUNT: ${MLRUNX_INGEST_STREAM_READ_COUNT:-32}
+      MLRUNX_INGEST_STREAM_BLOCK_MS: ${MLRUNX_INGEST_STREAM_BLOCK_MS:-1000}
+      MLRUNX_INGEST_STREAM_MAXLEN: ${MLRUNX_INGEST_STREAM_MAXLEN:-100000}
+      MLRUNX_POSTGRES_METADATA_SHADOW_WRITES_ENABLED: ${MLRUNX_POSTGRES_METADATA_SHADOW_WRITES_ENABLED:-false}
+      MLRUNX_WRITE_RATE_LIMIT_BURST: ${MLRUNX_WRITE_RATE_LIMIT_BURST:-500}
+      MLRUNX_WRITE_RATE_LIMIT_PER_SECOND: ${MLRUNX_WRITE_RATE_LIMIT_PER_SECOND:-200}
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-mlrunx}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-mlrunx_dev_secret}
       MINIO_BUCKET: ${MINIO_BUCKET:-mlrunx-artifacts}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-mlrunx-api}
     depends_on:
       postgres:
         condition: service_healthy
@@ -194,6 +210,42 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+    networks:
+      - mlrunx-network
+
+  processor:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.rust
+      target: processor
+      args:
+        RUST_VERSION: ${RUST_VERSION:-1.88}
+    container_name: mlrunx-processor
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,mlrunx_processor=debug,mlrunx_api=debug}
+      MLRUNX_SQLITE_PATH: /data/mlrunx.db
+      DATABASE_URL: postgres://mlrunx:${POSTGRES_PASSWORD:-mlrunx_dev}@postgres:5432/mlrunx
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: mlrunx
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-mlrunx_dev}
+      REDIS_URL: redis://redis:6379
+      MLRUNX_INGEST_STREAM_KEY: ${MLRUNX_INGEST_STREAM_KEY:-mlrunx:ingest}
+      MLRUNX_INGEST_STREAM_GROUP: ${MLRUNX_INGEST_STREAM_GROUP:-mlrunx-processor}
+      MLRUNX_INGEST_STREAM_CONSUMER: ${MLRUNX_INGEST_STREAM_CONSUMER:-processor-1}
+      MLRUNX_INGEST_STREAM_READ_COUNT: ${MLRUNX_INGEST_STREAM_READ_COUNT:-32}
+      MLRUNX_INGEST_STREAM_BLOCK_MS: ${MLRUNX_INGEST_STREAM_BLOCK_MS:-1000}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-mlrunx-processor}
+    volumes:
+      - sqlite-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - mlrunx-network
@@ -237,3 +289,4 @@ volumes:
   postgres-data:
   minio-data:
   redis-data:
+  sqlite-data:

@@ -116,10 +116,10 @@ jobs:
         run: npm --prefix apps/ui audit --audit-level=high --omit=dev
 
   # ---------------------------------------------------------------------------
-  # Rust API: lint + build + test
+  # Rust workspace: lint + build + test
   # ---------------------------------------------------------------------------
-  api:
-    name: API (Rust)
+  rust:
+    name: Rust (Workspace)
     runs-on: ubuntu-latest
     needs: [hygiene, security-guards, contracts]
     steps:
@@ -144,13 +144,13 @@ jobs:
         run: cargo fmt --check
 
       - name: Rust clippy (correctness/suspicious/perf)
-        run: cargo clippy -p mlrunx-api -- -D clippy::correctness -D clippy::suspicious -D clippy::perf
+        run: cargo clippy --workspace --all-targets -- -D clippy::correctness -D clippy::suspicious -D clippy::perf
 
       - name: Build
-        run: cargo build --release --bin mlrunx-api
+        run: cargo build --release --workspace
 
       - name: Run tests
-        run: cargo test --release --bin mlrunx-api
+        run: cargo test --release --workspace
 
   # ---------------------------------------------------------------------------
   # Python SDK: lint + typecheck + tests

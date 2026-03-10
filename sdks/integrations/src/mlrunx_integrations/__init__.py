@@ -16,11 +16,17 @@ Example usage:
 """
 
 __version__ = "0.1.3"
+
+from mlrunx_integrations.huggingface import PublishError, PublishResult, publish_to_huggingface
+
 __all__ = [
     "MLRunXLogger",
     "MLRunXCallback",
     "MLRunXOptunaCallback",
     "MLRunXHydraCallback",
+    "PublishError",
+    "PublishResult",
+    "publish_to_huggingface",
     "__version__",
 ]
 

@@ -1,12 +1,12 @@
 'use client';
 
 import Link from 'next/link';
-import { use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { startTransition, use, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { api, MetricSeries, RunDetail, RunEvent } from '@/lib/api';
 import { formatDuration, formatFixed } from '@/lib/format';
 import { groupMetrics } from '@/lib/metricGroups';
-import { UPlotChart, type ChartSeries } from '@/components/charts/UPlotChart';
+import { UPlotChart, type ChartPhaseMarker, type ChartSeries } from '@/components/charts/UPlotChart';
 import { useTheme } from '@/components/ThemeProvider';
 import { useAutoRefresh } from '@/lib/useAutoRefresh';
 import { computeDerivedSeries, derivedModeLabel, type DerivedSeriesMode } from '@/lib/computedSeries';
@@ -55,11 +55,13 @@ type MetricChartView = {
 type MetricChartGroup = {
   groupKey: string;
   title: string;
-  charts: MetricChartView[];
+  metricNames: string[];
 };
 
+const INITIAL_PRIORITY_METRICS_LIMIT = 6;
 const METRIC_FETCH_MAX_POINTS = 1200;
 const RUN_EVENTS_FETCH_LIMIT = 200;
+const SECONDARY_CHART_BATCH_SIZE = 8;
 
 const TRAIN_LOSS_CANDIDATES = ['train/loss', 'loss', 'train.loss', 'training/loss'];
 const VAL_LOSS_CANDIDATES = ['val/loss', 'val_loss', 'validation/loss', 'eval/loss'];
@@ -259,6 +261,126 @@ function parseNumeric(value: string | undefined): number | undefined {
   return parsed;
 }
 
+function parseCompactNumber(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim().replace(/[,_]/g, '');
+  const match = trimmed.match(/^(-?\d+(?:\.\d+)?)\s*([kmbt])?$/i);
+  if (!match) return undefined;
+
+  const numeric = Number(match[1]);
+  if (!Number.isFinite(numeric)) return undefined;
+
+  const suffix = match[2]?.toLowerCase();
+  const multiplier =
+    suffix === 'k'
+      ? 1_000
+      : suffix === 'm'
+        ? 1_000_000
+        : suffix === 'b'
+          ? 1_000_000_000
+          : suffix === 't'
+            ? 1_000_000_000_000
+            : 1;
+
+  return numeric * multiplier;
+}
+
+function createCompactUnitFormatter(maxValue: number): (value: number) => string {
+  const units = [
+    { divisor: 1_000_000_000_000, suffix: 'T' },
+    { divisor: 1_000_000_000, suffix: 'B' },
+    { divisor: 1_000_000, suffix: 'M' },
+    { divisor: 1_000, suffix: 'K' },
+  ];
+  const unit = units.find((entry) => maxValue >= entry.divisor) || { divisor: 1, suffix: '' };
+
+  return (value: number) => {
+    if (!Number.isFinite(value)) return '';
+    if (unit.divisor === 1) return Math.round(value).toLocaleString();
+
+    const scaled = value / unit.divisor;
+    const rounded = Math.round(scaled * 10) / 10;
+    const text =
+      Math.abs(rounded - Math.round(rounded)) < 0.05
+        ? `${Math.round(rounded)}`
+        : rounded.toFixed(1).replace(/\.0$/, '');
+    return `${text}${unit.suffix}`;
+  };
+}
+
+function inferXAxisPresentation(
+  tags: Record<string, string>,
+  xData: number[]
+): { label: string; formatter?: (value: number) => string } {
+  if (xData.length === 0) {
+    return { label: 'step' };
+  }
+
+  const normalizedTags = buildTagIndex(tags);
+  const tokenAxisKeys = [
+    'x_axis',
+    'x_axis_unit',
+    'axis_x_unit',
+    'step_unit',
+    'horizontal_axis',
+    'horizontal_axis_unit',
+  ];
+  const explicitlyTokenAxis = tokenAxisKeys.some((key) => {
+    const value = normalizedTags.get(normalizeKey(key));
+    return value ? /token/i.test(value) : false;
+  });
+  const maxValue = xData[xData.length - 1] ?? 0;
+
+  if (explicitlyTokenAxis || maxValue >= 1_000_000_000) {
+    return {
+      label: 'tokens',
+      formatter: createCompactUnitFormatter(maxValue),
+    };
+  }
+
+  return { label: 'step' };
+}
+
+function extractPhaseMarkers(tags: Record<string, string>): ChartPhaseMarker[] {
+  const phases = new Map<string, { label?: string; value?: number }>();
+
+  Object.entries(tags).forEach(([rawKey, rawValue]) => {
+    const key = normalizeKey(rawKey);
+    const labelMatch = key.match(/^phase_?(\d+)_(label|name|title)$/);
+    if (labelMatch) {
+      const phaseId = labelMatch[1];
+      const existing = phases.get(phaseId) || {};
+      existing.label = rawValue.trim();
+      phases.set(phaseId, existing);
+      return;
+    }
+
+    const valueMatch =
+      key.match(/^phase_?(\d+)_(start|step|steps|at|token|tokens)$/) ||
+      key.match(/^phase_?(\d+)$/);
+    if (!valueMatch) return;
+
+    const numericValue = parseCompactNumber(rawValue);
+    if (numericValue === undefined) return;
+
+    const phaseId = valueMatch[1];
+    const existing = phases.get(phaseId) || {};
+    existing.value = numericValue;
+    phases.set(phaseId, existing);
+  });
+
+  return Array.from(phases.entries())
+    .map(([phaseId, entry]) => {
+      if (entry.value === undefined) return null;
+      return {
+        label: entry.label || `phase ${phaseId}`,
+        value: entry.value,
+      };
+    })
+    .filter((entry): entry is ChartPhaseMarker => Boolean(entry))
+    .sort((left, right) => left.value - right.value);
+}
+
 function pickSeriesByCandidates(
   allMetrics: MetricSeries[],
   exactCandidates: string[],
@@ -279,6 +401,85 @@ function pickSeriesByCandidates(
     }
   }
   return undefined;
+}
+
+function dedupeMetricNames(names: Iterable<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+
+  for (const rawName of names) {
+    if (!rawName) continue;
+    const name = rawName.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    unique.push(name);
+  }
+
+  return unique;
+}
+
+function pickMetricNameByCandidates(
+  metricNames: string[],
+  exactCandidates: string[],
+  containsCandidates: string[] = []
+): string | undefined {
+  const exactLower = exactCandidates.map((value) => value.toLowerCase());
+  const containsLower = containsCandidates.map((value) => value.toLowerCase());
+
+  for (const metricName of metricNames) {
+    if (exactLower.includes(metricName.toLowerCase())) {
+      return metricName;
+    }
+  }
+  for (const metricName of metricNames) {
+    const lowered = metricName.toLowerCase();
+    if (containsLower.some((needle) => lowered.includes(needle))) {
+      return metricName;
+    }
+  }
+
+  return undefined;
+}
+
+function priorityMetricNamesFromRun(run: RunDetail | null): string[] {
+  if (!run) return [];
+
+  const summaryNames = run.metrics_summary.map((metric) => metric.name);
+  return dedupeMetricNames([
+    pickMetricNameByCandidates(summaryNames, TRAIN_LOSS_CANDIDATES, ['loss']),
+    pickMetricNameByCandidates(summaryNames, VAL_LOSS_CANDIDATES, ['val', 'eval']),
+    pickMetricNameByCandidates(summaryNames, THROUGHPUT_CANDIDATES, ['token', 'throughput', 'tps']),
+    ...summaryNames.slice(0, INITIAL_PRIORITY_METRICS_LIMIT),
+  ]);
+}
+
+function pickDefaultMetricGroup(groups: MetricChartGroup[]): string {
+  if (groups.length === 0) return 'all';
+  if (groups.some((group) => group.groupKey === 'loss')) return 'loss';
+  return groups.find((group) => group.groupKey !== 'other')?.groupKey ?? groups[0].groupKey;
+}
+
+function metricNamesForGroup(
+  activeGroup: string,
+  groups: MetricChartGroup[],
+  allMetricNames: string[]
+): string[] {
+  if (!activeGroup) return [];
+  if (activeGroup === 'all') return allMetricNames;
+  return groups.find((group) => group.groupKey === activeGroup)?.metricNames ?? allMetricNames;
+}
+
+function mergeMetricSeriesByName(
+  current: Record<string, MetricSeries>,
+  incoming: MetricSeries[]
+): Record<string, MetricSeries> {
+  if (incoming.length === 0) return current;
+
+  const next = { ...current };
+  incoming.forEach((series) => {
+    next[series.name] = series;
+  });
+  return next;
 }
 
 function getMetricStats(series: MetricSeries | undefined): MetricStats {
@@ -511,12 +712,12 @@ function SummaryCard({
   emphasize?: boolean;
 }) {
   return (
-    <div className="border-r border-border px-5 py-4 last:border-r-0">
-      <div className="text-[11px] uppercase tracking-[0.08em] text-text-muted">{label}</div>
-      <div className={`mt-2 font-mono text-3xl font-semibold tracking-[-0.03em] ${emphasize ? 'text-[var(--badge-finished-text)]' : 'text-text-primary'}`}>
+    <div className="border-r border-border px-4 py-3.5 last:border-r-0 sm:px-5">
+      <div className="text-[10px] uppercase tracking-[0.14em] text-text-muted">{label}</div>
+      <div className={`mt-1.5 font-mono text-[1.75rem] font-semibold tracking-[-0.04em] sm:text-[2rem] ${emphasize ? 'text-[var(--badge-finished-text)]' : 'text-text-primary'}`}>
         {value}
       </div>
-      {subtext && <div className="mt-1 text-xs text-text-muted">{subtext}</div>}
+      {subtext && <div className="mt-1 text-[11px] text-text-muted">{subtext}</div>}
     </div>
   );
 }
@@ -533,6 +734,21 @@ function MetaChip({
       <span className="text-text-muted">{icon}</span>
       {children}
     </span>
+  );
+}
+
+function MetricMiniStat({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-full border border-border bg-background/70 px-3 py-1.5 backdrop-blur-sm">
+      <div className="text-[10px] uppercase tracking-[0.14em] text-text-muted">{label}</div>
+      <div className="mt-0.5 font-mono text-sm font-medium text-text-primary">{value}</div>
+    </div>
   );
 }
 
@@ -571,23 +787,39 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
   const [run, setRun] = useState<RunDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [metrics, setMetrics] = useState<MetricSeries[]>([]);
+  const [metricSeriesByName, setMetricSeriesByName] = useState<Record<string, MetricSeries>>({});
   const [metricAliases, setMetricAliases] = useState<Record<string, string>>({});
   const [availableMetrics, setAvailableMetrics] = useState<string[]>([]);
+  const [loadedMetricNames, setLoadedMetricNames] = useState<string[]>([]);
+  const [pendingMetricNames, setPendingMetricNames] = useState<string[]>([]);
   const [metricsLoading, setMetricsLoading] = useState(true);
+  const [metricsInitialized, setMetricsInitialized] = useState(false);
   const [metricsError, setMetricsError] = useState<string | null>(null);
   const [runEvents, setRunEvents] = useState<RunEvent[]>([]);
   const [eventsLoading, setEventsLoading] = useState(true);
   const [eventsError, setEventsError] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [activeMetricGroup, setActiveMetricGroup] = useState('all');
+  const [activeMetricGroup, setActiveMetricGroup] = useState('');
+  const [visibleSecondaryChartCount, setVisibleSecondaryChartCount] = useState(SECONDARY_CHART_BATCH_SIZE);
   const [derivedMode, setDerivedMode] = useState<DerivedSeriesMode>('none');
   const [derivedWindow, setDerivedWindow] = useState(16);
   const [showRawSeries, setShowRawSeries] = useState(true);
   const [eventLevelFilter, setEventLevelFilter] = useState<EventLevelFilter>('all');
+  const initialMetricsRequestedRef = useRef(false);
+  const loadedMetricNamesRef = useRef<Set<string>>(new Set());
+  const pendingMetricNamesRef = useRef<Set<string>>(new Set());
+  const didAutoSelectMetricGroupRef = useRef(false);
   const eventsCursorRef = useRef<number | null>(null);
   const compareSelection = useCompareSelectionState();
+  const metrics = useMemo(
+    () =>
+      loadedMetricNames
+        .map((name) => metricSeriesByName[name])
+        .filter((series): series is MetricSeries => Boolean(series)),
+    [loadedMetricNames, metricSeriesByName]
+  );
+  const priorityMetricNames = useMemo(() => priorityMetricNamesFromRun(run), [run]);
 
   const workspaceView = parseWorkspaceView(searchParams.get('view'));
   const quickCompareTarget = getQuickCompareTarget(runId, compareSelection);
@@ -625,6 +857,30 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     setCompareCandidate(runId);
   }, [runId]);
 
+  const setActiveMetricGroupWithTransition = useCallback((nextGroup: string) => {
+    startTransition(() => {
+      setActiveMetricGroup(nextGroup);
+      setVisibleSecondaryChartCount(SECONDARY_CHART_BATCH_SIZE);
+    });
+  }, []);
+
+  useEffect(() => {
+    initialMetricsRequestedRef.current = false;
+    loadedMetricNamesRef.current = new Set();
+    pendingMetricNamesRef.current = new Set();
+    didAutoSelectMetricGroupRef.current = false;
+    setMetricSeriesByName({});
+    setMetricAliases({});
+    setAvailableMetrics([]);
+    setLoadedMetricNames([]);
+    setPendingMetricNames([]);
+    setMetricsLoading(true);
+    setMetricsInitialized(false);
+    setMetricsError(null);
+    setActiveMetricGroup('');
+    setVisibleSecondaryChartCount(SECONDARY_CHART_BATCH_SIZE);
+  }, [runId]);
+
   const fetchRun = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     if (!silent) {
       setLoading(true);
@@ -633,8 +889,10 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     try {
       const data = await api.getRun(runId);
       setRun(data);
+      return data;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load run');
+      return null;
     } finally {
       if (!silent) {
         setLoading(false);
@@ -642,24 +900,80 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     }
   }, [runId]);
 
-  const fetchMetrics = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
-    if (!silent) {
+  const fetchMetrics = useCallback(async ({
+    names,
+    silent = false,
+    refresh = false,
+  }: {
+    names?: string[];
+    silent?: boolean;
+    refresh?: boolean;
+  } = {}) => {
+    const normalizedNames = names === undefined ? undefined : dedupeMetricNames(names);
+    const shouldFetchAll = normalizedNames === undefined;
+    const namesToRequest = shouldFetchAll
+      ? []
+      : normalizedNames.filter((name) => {
+          if (pendingMetricNamesRef.current.has(name)) return false;
+          return refresh || !loadedMetricNamesRef.current.has(name);
+        });
+
+    if (!shouldFetchAll && namesToRequest.length === 0) {
+      if (!metricsInitialized && loadedMetricNamesRef.current.size === 0) {
+        startTransition(() => {
+          setMetricsInitialized(true);
+          setMetricsLoading(false);
+        });
+      }
+      return;
+    }
+
+    if (!silent || !metricsInitialized) {
       setMetricsLoading(true);
     }
     setMetricsError(null);
-    try {
-      const response = await api.getMetrics(runId, { maxPoints: METRIC_FETCH_MAX_POINTS });
-      setAvailableMetrics(response.available_metrics);
-      setMetricAliases(response.metric_aliases ?? {});
-      setMetrics(response.series);
-    } catch (err) {
-      setMetricsError(err instanceof Error ? err.message : 'Failed to load metrics');
-    } finally {
-      if (!silent) {
-        setMetricsLoading(false);
-      }
+
+    if (!shouldFetchAll) {
+      namesToRequest.forEach((name) => pendingMetricNamesRef.current.add(name));
+      startTransition(() => {
+        setPendingMetricNames(Array.from(pendingMetricNamesRef.current));
+      });
     }
-  }, [runId]);
+
+    try {
+      const response = await api.getMetrics(runId, {
+        ...(shouldFetchAll ? {} : { names: namesToRequest }),
+        maxPoints: METRIC_FETCH_MAX_POINTS,
+      });
+
+      if (!shouldFetchAll) {
+        namesToRequest.forEach((name) => pendingMetricNamesRef.current.delete(name));
+      }
+      response.series.forEach((series) => loadedMetricNamesRef.current.add(series.name));
+
+      startTransition(() => {
+        setAvailableMetrics(response.available_metrics);
+        setMetricAliases((current) => ({
+          ...current,
+          ...(response.metric_aliases ?? {}),
+        }));
+        setMetricSeriesByName((current) => mergeMetricSeriesByName(current, response.series));
+        setLoadedMetricNames(Array.from(loadedMetricNamesRef.current));
+        setPendingMetricNames(Array.from(pendingMetricNamesRef.current));
+        setMetricsInitialized(true);
+        setMetricsLoading(false);
+      });
+    } catch (err) {
+      if (!shouldFetchAll) {
+        namesToRequest.forEach((name) => pendingMetricNamesRef.current.delete(name));
+        startTransition(() => {
+          setPendingMetricNames(Array.from(pendingMetricNamesRef.current));
+        });
+      }
+      setMetricsError(err instanceof Error ? err.message : 'Failed to load metrics');
+      setMetricsLoading(false);
+    }
+  }, [metricsInitialized, runId]);
 
   const fetchRunEvents = useCallback(
     async ({
@@ -697,19 +1011,44 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
 
   useEffect(() => {
     void fetchRun();
-    void fetchMetrics();
     void fetchRunEvents({ reset: true });
-  }, [fetchRun, fetchMetrics, fetchRunEvents]);
+  }, [fetchRun, fetchRunEvents]);
+
+  useEffect(() => {
+    if (!run || initialMetricsRequestedRef.current) return;
+
+    initialMetricsRequestedRef.current = true;
+    if (run.metrics_count === 0) {
+      startTransition(() => {
+        setMetricsInitialized(true);
+        setMetricsLoading(false);
+      });
+      return;
+    }
+
+    void fetchMetrics({ names: priorityMetricNames.length > 0 ? priorityMetricNames : undefined });
+  }, [fetchMetrics, priorityMetricNames, run]);
 
   const shouldAutoRefresh = run?.status === 'running'
-    || (!!run && run.metrics_count > 0 && availableMetrics.length === 0);
+    || (!!run && run.metrics_count > 0 && loadedMetricNames.length === 0);
 
   useAutoRefresh(
     async () => {
-      await Promise.all([
-        fetchRun({ silent: true }),
-        fetchMetrics({ silent: true }),
+      const nextRun = await fetchRun({ silent: true });
+      const refreshNames = dedupeMetricNames([
+        ...priorityMetricNamesFromRun(nextRun ?? run),
+        ...loadedMetricNamesRef.current,
       ]);
+
+      if ((nextRun ?? run)?.metrics_count === 0 && refreshNames.length === 0) {
+        return;
+      }
+
+      await fetchMetrics({
+        silent: true,
+        names: refreshNames.length > 0 ? refreshNames : undefined,
+        refresh: true,
+      });
     },
     { intervalMs: 15000, enabled: shouldAutoRefresh, runOnMount: false }
   );
@@ -727,62 +1066,88 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     }
   }, [derivedMode]);
 
-  const perMetricCharts = useMemo<MetricChartView[]>(() => {
-    return metrics.map((series) => {
-      const displayName = metricDisplayName(series.name, metricAliases);
-      const aligned = alignSeriesForChart([series]);
-      const rawSeries = aligned.series[0];
-      const chartSeries: ChartSeries[] = [];
-      if (showRawSeries || derivedMode === 'none') {
-        chartSeries.push({ ...rawSeries, label: displayName });
-      }
-      if (derivedMode !== 'none') {
-        chartSeries.push({
-          label: `${displayName} ${derivedModeLabel(derivedMode, derivedWindow)}`,
-          data: computeDerivedSeries(rawSeries.data, derivedMode, derivedWindow),
-        });
-      }
-      return {
-        name: series.name,
-        displayName,
-        yLabel: metricYAxisLabel(displayName, derivedMode, derivedWindow, showRawSeries),
-        xData: aligned.xData,
-        series: chartSeries,
-      };
-    });
-  }, [derivedMode, derivedWindow, metricAliases, metrics, showRawSeries]);
-
   const metricChartGroups = useMemo<MetricChartGroup[]>(() => {
-    if (perMetricCharts.length === 0) return [];
-    const chartByName = new Map(perMetricCharts.map((chart) => [chart.name, chart]));
-    return groupMetrics(perMetricCharts.map((chart) => chart.name))
-      .map((group) => ({
-        groupKey: group.groupKey,
-        title: group.title,
-        charts: group.metrics
-          .map((metricName) => chartByName.get(metricName))
-          .filter((chart): chart is MetricChartView => Boolean(chart)),
-      }))
-      .filter((group) => group.charts.length > 0);
-  }, [perMetricCharts]);
+    if (availableMetrics.length === 0) return [];
+    return groupMetrics(availableMetrics).map((group) => ({
+      groupKey: group.groupKey,
+      title: group.title,
+      metricNames: group.metrics,
+    }));
+  }, [availableMetrics]);
+
+  const activeMetricNames = useMemo(
+    () => metricNamesForGroup(activeMetricGroup, metricChartGroups, availableMetrics),
+    [activeMetricGroup, availableMetrics, metricChartGroups]
+  );
+
+  const pendingMetricNameSet = useMemo(() => new Set(pendingMetricNames), [pendingMetricNames]);
+
+  const activePendingMetricCount = useMemo(
+    () => activeMetricNames.filter((metricName) => pendingMetricNameSet.has(metricName)).length,
+    [activeMetricNames, pendingMetricNameSet]
+  );
+
+  useEffect(() => {
+    if (metricChartGroups.length === 0) return;
+
+    const defaultGroup = pickDefaultMetricGroup(metricChartGroups);
+    const hasActiveGroup = activeMetricGroup === 'all'
+      || metricChartGroups.some((group) => group.groupKey === activeMetricGroup);
+
+    if (!hasActiveGroup) {
+      didAutoSelectMetricGroupRef.current = true;
+      setActiveMetricGroupWithTransition(defaultGroup);
+      return;
+    }
+
+    if (!didAutoSelectMetricGroupRef.current && activeMetricGroup === 'all' && defaultGroup !== 'all') {
+      didAutoSelectMetricGroupRef.current = true;
+      setActiveMetricGroupWithTransition(defaultGroup);
+    }
+  }, [activeMetricGroup, metricChartGroups, setActiveMetricGroupWithTransition]);
+
+  useEffect(() => {
+    if (!metricsInitialized || activeMetricNames.length === 0) return;
+
+    const missingMetricNames = activeMetricNames.filter(
+      (metricName) => !loadedMetricNamesRef.current.has(metricName)
+    );
+    if (missingMetricNames.length === 0) return;
+
+    void fetchMetrics({ names: missingMetricNames, silent: true });
+  }, [activeMetricNames, fetchMetrics, metricsInitialized]);
 
   const activeMetricCharts = useMemo<MetricChartView[]>(() => {
-    if (activeMetricGroup === 'all') return perMetricCharts;
-    const selected = metricChartGroups.find((group) => group.groupKey === activeMetricGroup);
-    return selected?.charts ?? perMetricCharts;
-  }, [activeMetricGroup, metricChartGroups, perMetricCharts]);
+    return activeMetricNames
+      .map((metricName) => metricSeriesByName[metricName])
+      .filter((series): series is MetricSeries => Boolean(series))
+      .map((series) => {
+        const displayName = metricDisplayName(series.name, metricAliases);
+        const aligned = alignSeriesForChart([series]);
+        const rawSeries = aligned.series[0];
+        const chartSeries: ChartSeries[] = [];
+        if (showRawSeries || derivedMode === 'none') {
+          chartSeries.push({ ...rawSeries, label: displayName });
+        }
+        if (derivedMode !== 'none') {
+          chartSeries.push({
+            label: `${displayName} ${derivedModeLabel(derivedMode, derivedWindow)}`,
+            data: computeDerivedSeries(rawSeries.data, derivedMode, derivedWindow),
+          });
+        }
+        return {
+          name: series.name,
+          displayName,
+          yLabel: metricYAxisLabel(displayName, derivedMode, derivedWindow, showRawSeries),
+          xData: aligned.xData,
+          series: chartSeries,
+        };
+      });
+  }, [activeMetricNames, derivedMode, derivedWindow, metricAliases, metricSeriesByName, showRawSeries]);
 
   const activeMetricGroupTitle = useMemo(() => {
     if (activeMetricGroup === 'all') return 'All Metrics';
-    return metricChartGroups.find((group) => group.groupKey === activeMetricGroup)?.title ?? 'All Metrics';
-  }, [activeMetricGroup, metricChartGroups]);
-
-  useEffect(() => {
-    if (activeMetricGroup === 'all') return;
-    const exists = metricChartGroups.some((group) => group.groupKey === activeMetricGroup);
-    if (!exists) {
-      setActiveMetricGroup('all');
-    }
+    return metricChartGroups.find((group) => group.groupKey === activeMetricGroup)?.title ?? 'Metrics';
   }, [activeMetricGroup, metricChartGroups]);
 
   const totalSteps = useMemo(() => {
@@ -805,6 +1170,28 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     if (!run) return undefined;
     return getThroughputValue(run, metrics);
   }, [run, metrics]);
+
+  const orderedActiveMetricCharts = useMemo(() => {
+    if (!trainLossSeries) return activeMetricCharts;
+
+    const preferredLossName = trainLossSeries.name;
+    return [...activeMetricCharts].sort((left, right) => {
+      if (left.name === preferredLossName) return -1;
+      if (right.name === preferredLossName) return 1;
+      return left.displayName.localeCompare(right.displayName);
+    });
+  }, [activeMetricCharts, trainLossSeries]);
+
+  const deferredActiveMetricCharts = useDeferredValue(orderedActiveMetricCharts);
+  const primaryMetricChart = orderedActiveMetricCharts[0] ?? null;
+  const secondaryMetricCharts = deferredActiveMetricCharts.slice(
+    1,
+    visibleSecondaryChartCount + 1
+  );
+  const remainingSecondaryChartCount = Math.max(
+    deferredActiveMetricCharts.length - 1 - visibleSecondaryChartCount,
+    0
+  );
 
   const runTags = useMemo(() => run?.tags ?? {}, [run]);
 
@@ -837,6 +1224,36 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
     return buildProgressSteps(run, runTags, totalSteps);
   }, [run, runTags, totalSteps]);
 
+  const primaryChartXAxis = useMemo(
+    () => inferXAxisPresentation(runTags, primaryMetricChart?.xData ?? []),
+    [runTags, primaryMetricChart]
+  );
+
+  const primaryChartPhaseMarkers = useMemo(
+    () => extractPhaseMarkers(runTags),
+    [runTags]
+  );
+
+  const primaryIsLoss = !!trainLossSeries && primaryMetricChart?.name === trainLossSeries.name;
+  const primaryMetricStats = useMemo(() => {
+    if (!primaryMetricChart) return {};
+    return getMetricStats(metrics.find((series) => series.name === primaryMetricChart.name));
+  }, [metrics, primaryMetricChart]);
+
+  const primaryChartSeries = useMemo(() => {
+    if (!primaryMetricChart) return [];
+
+    return primaryMetricChart.series.map((entry, index) => ({
+      ...entry,
+      color:
+        primaryIsLoss
+          ? index === 0
+            ? '#53a8ff'
+            : '#8ac7ff'
+          : entry.color,
+    }));
+  }, [primaryMetricChart, primaryIsLoss]);
+
   const filteredRunEvents = useMemo(() => {
     if (eventLevelFilter === 'all') return runEvents;
     return runEvents.filter((event) => normalizeEventLevel(event.level) === eventLevelFilter);
@@ -858,6 +1275,16 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
       setDeleting(false);
     }
   }, [runId, router]);
+
+  const chartShellClass = isDark
+    ? 'border-[color:rgba(138,154,178,0.18)] bg-[#01040a] shadow-[0_0_0_1px_rgba(255,255,255,0.02)]'
+    : 'border-border bg-surface';
+  const chartCardClass = isDark
+    ? 'border-[color:rgba(138,154,178,0.14)] bg-[#02060d]'
+    : 'border-border bg-surface';
+  const chartInsetClass = isDark
+    ? 'border-[color:rgba(138,154,178,0.12)] bg-black'
+    : 'border-border bg-background';
 
   if (loading) {
     return (
@@ -890,9 +1317,9 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
   }
 
   return (
-    <main className="min-h-screen bg-[var(--page-gradient)] px-5 py-8 sm:px-8">
-      <div className="mx-auto max-w-[1360px]">
-        <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+    <main className="min-h-screen bg-[var(--page-gradient)] px-4 py-5 sm:px-6 sm:py-6">
+      <div className="mx-auto max-w-[1520px]">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <Link
             href="/"
             className="inline-flex items-center gap-1.5 text-sm font-medium text-text-muted transition-colors hover:text-accent"
@@ -987,9 +1414,9 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
           </div>
         </div>
 
-        <div className="mb-5">
-          <div className="mb-2 flex flex-wrap items-center gap-3">
-            <h1 className="text-4xl font-semibold tracking-[-0.03em] text-text-primary">
+        <div className="mb-4">
+          <div className="mb-1.5 flex flex-wrap items-center gap-3">
+            <h1 className="text-[clamp(1.9rem,3vw,2.8rem)] font-semibold tracking-[-0.04em] text-text-primary">
               {run.name || 'Unnamed Run'}
             </h1>
             <span
@@ -1002,7 +1429,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
             </span>
           </div>
 
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-text-secondary">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-text-secondary">
             <MetaChip icon={<IdIcon />}>
               ID: <span className="rounded-md border border-border bg-background px-2 py-0.5 font-mono text-xs text-text-muted">{shortenRunId(run.run_id)}</span>
             </MetaChip>
@@ -1021,7 +1448,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
           </div>
         </div>
 
-        <div className="mb-4 overflow-hidden rounded-2xl border border-border bg-surface">
+        <div className={`mb-3 overflow-hidden rounded-[1.35rem] border ${chartShellClass}`}>
           <div className="grid grid-cols-1 divide-y divide-border sm:grid-cols-2 sm:divide-x sm:divide-y-0 lg:grid-cols-4">
             <SummaryCard
               label="Total Steps"
@@ -1055,8 +1482,8 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
           </div>
         </div>
 
-        <div className="mb-4">
-          <div className="inline-flex rounded-lg border border-border bg-surface p-0.5">
+        <div className="mb-3">
+          <div className={`inline-flex rounded-xl border p-0.5 ${chartCardClass}`}>
             <button
               type="button"
               onClick={() => setWorkspaceView('charts')}
@@ -1091,29 +1518,110 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
             )}
 
             {metricsLoading ? (
-              <div className="mb-4 rounded-2xl border border-border bg-surface p-4">
-                <div className="h-[280px] rounded-xl border border-border bg-background">
+              <div className={`mb-4 rounded-[1.75rem] border p-3 ${chartShellClass}`}>
+                <div className={`h-[360px] rounded-[1.35rem] border ${chartInsetClass}`}>
                   <LoadingSpinner />
                 </div>
               </div>
-            ) : perMetricCharts.length === 0 ? (
-              <div className="mb-4 flex h-[280px] items-center justify-center rounded-2xl border border-border bg-surface text-sm text-text-muted">
+            ) : metrics.length === 0 ? (
+              <div className={`mb-4 flex h-[320px] items-center justify-center rounded-[1.75rem] border text-sm text-text-muted ${chartShellClass}`}>
                 {run.metrics_count > 0
                   ? 'Metrics are still syncing for this run.'
                   : 'No metrics recorded for this run.'}
               </div>
             ) : (
               <>
-                <section className="mb-4 rounded-2xl border border-border bg-surface px-4 py-3">
-                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                    <h2 className="text-sm font-semibold uppercase tracking-[0.06em] text-text-muted">
-                      Chart Analysis
-                    </h2>
-                    <span className="text-xs text-text-muted">
-                      Derived mode: {derivedModeLabel(derivedMode, derivedWindow)}
-                    </span>
+                {primaryMetricChart && (
+                  <section className={`mb-3 overflow-hidden rounded-[1.9rem] border ${chartShellClass}`}>
+                    <div className="flex flex-wrap items-start justify-between gap-3 px-4 py-3 sm:px-5">
+                      <div>
+                        <div className="text-[11px] uppercase tracking-[0.18em] text-text-muted">
+                          {primaryMetricChart.displayName}
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-text-muted">
+                          <span>{primaryChartXAxis.label} axis</span>
+                          <span className="h-1 w-1 rounded-full bg-border" />
+                          <span>{primaryMetricChart.xData.length.toLocaleString()} points</span>
+                          <span className="h-1 w-1 rounded-full bg-border" />
+                          <span>derived: {derivedModeLabel(derivedMode, derivedWindow)}</span>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <MetricMiniStat
+                          label="last"
+                          value={primaryMetricStats.lastValue !== undefined ? formatFixed(primaryMetricStats.lastValue, 3) : '-'}
+                        />
+                        <MetricMiniStat
+                          label="best"
+                          value={primaryMetricStats.bestValue !== undefined ? formatFixed(primaryMetricStats.bestValue, 3) : '-'}
+                        />
+                        <MetricMiniStat
+                          label={primaryIsLoss ? 'val' : 'best @'}
+                          value={
+                            primaryIsLoss
+                              ? valLossStats.lastValue !== undefined
+                                ? formatFixed(valLossStats.lastValue, 3)
+                                : '-'
+                              : primaryMetricStats.bestStep !== undefined
+                                ? primaryMetricStats.bestStep.toLocaleString()
+                                : '-'
+                          }
+                        />
+                        <MetricMiniStat
+                          label={throughputValue !== undefined ? 'tok/s' : 'points'}
+                          value={
+                            throughputValue !== undefined
+                              ? formatLargeNumber(throughputValue)
+                              : primaryMetricChart.xData.length.toLocaleString()
+                          }
+                        />
+                      </div>
+                    </div>
+                    <div className="px-1 pb-1 sm:px-2">
+                      <UPlotChart
+                        xData={primaryMetricChart.xData}
+                        series={primaryChartSeries}
+                        xLabel={primaryChartXAxis.label}
+                        yLabel={primaryMetricChart.yLabel}
+                        height={430}
+                        interactive={true}
+                        darkTheme={isDark}
+                        showLegend={primaryChartSeries.length > 1}
+                        smoothing={0.06}
+                        areaFill={false}
+                        xTickFormatter={primaryChartXAxis.formatter}
+                        phaseMarkers={primaryIsLoss ? primaryChartPhaseMarkers : []}
+                        lineWidth={1.9}
+                        showXAxisLabel={true}
+                        showYAxisLabel={true}
+                        dashedGrid={true}
+                        variant="reference"
+                      />
+                    </div>
+                  </section>
+                )}
+
+                <section className={`mb-3 rounded-[1.35rem] border px-3 py-3 sm:px-4 ${chartCardClass}`}>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h2 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-text-muted">
+                        Chart Controls
+                      </h2>
+                      <p className="mt-1 text-sm text-text-secondary">
+                        {activeMetricGroupTitle} ({activeMetricNames.length})
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
+                      <span>Derived mode: {derivedModeLabel(derivedMode, derivedWindow)}</span>
+                      {activePendingMetricCount > 0 && (
+                        <span>
+                          Loading {activePendingMetricCount} more metric{activePendingMetricCount === 1 ? '' : 's'}
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex flex-wrap items-end gap-2">
+
+                  <div className="mt-3 flex flex-wrap items-end gap-2">
                     <label className="text-xs text-text-muted">
                       Derived Series
                       <select
@@ -1156,81 +1664,98 @@ export default function RunDetailPage({ params }: { params: Promise<{ run_id: st
                       Show raw lines
                     </label>
                   </div>
-                </section>
 
-                <section className="mb-4 rounded-2xl border border-border bg-surface px-4 py-3">
-                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                    <h2 className="text-sm font-semibold uppercase tracking-[0.06em] text-text-muted">
-                      Metric Groups
-                    </h2>
-                    <span className="text-sm text-text-secondary">
-                      {activeMetricGroupTitle} ({activeMetricCharts.length})
-                    </span>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
+                  <div className="mt-3 flex flex-wrap gap-2">
                     <button
                       type="button"
-                      onClick={() => setActiveMetricGroup('all')}
+                      onClick={() => setActiveMetricGroupWithTransition('all')}
                       className={`rounded-full border px-3 py-1.5 text-sm font-medium ${
                         activeMetricGroup === 'all'
                           ? 'border-accent bg-accent-subtle text-accent'
                           : 'border-border bg-surface-secondary text-text-secondary hover:text-text-primary'
                       }`}
                     >
-                      All ({perMetricCharts.length})
+                      All ({availableMetrics.length})
                     </button>
                     {metricChartGroups.map((group) => (
                       <button
                         key={group.groupKey}
                         type="button"
-                        onClick={() => setActiveMetricGroup(group.groupKey)}
+                        onClick={() => setActiveMetricGroupWithTransition(group.groupKey)}
                         className={`rounded-full border px-3 py-1.5 text-sm font-medium ${
                           activeMetricGroup === group.groupKey
                             ? 'border-accent bg-accent-subtle text-accent'
                             : 'border-border bg-surface-secondary text-text-secondary hover:text-text-primary'
                         }`}
                       >
-                        {group.title} ({group.charts.length})
+                        {group.title} ({group.metricNames.length})
                       </button>
                     ))}
                   </div>
                 </section>
 
-                <div className="mb-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
-                  {activeMetricCharts.map((chart) => (
-                    <section key={chart.name} className="rounded-2xl border border-border bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.01)]">
-                      <div className="flex items-center gap-2.5 border-b border-border px-5 py-3">
-                        <div className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-accent-subtle text-accent">
-                          <CompareIcon />
+                {!primaryMetricChart && activePendingMetricCount > 0 && (
+                  <div className={`mb-4 flex h-[220px] items-center justify-center rounded-[1.75rem] border text-sm text-text-muted ${chartShellClass}`}>
+                    Loading the selected metric group...
+                  </div>
+                )}
+
+                {secondaryMetricCharts.length > 0 && (
+                  <div className="mb-4 grid grid-cols-1 gap-3 xl:grid-cols-2">
+                    {secondaryMetricCharts.map((chart) => (
+                      <section key={chart.name} className={`overflow-hidden rounded-[1.35rem] border ${chartCardClass}`}>
+                        <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                          <div className="min-w-0">
+                            <h2 className="truncate text-sm font-medium text-text-primary">
+                              {chart.displayName}
+                            </h2>
+                            {chart.displayName !== chart.name && (
+                              <p className="mt-0.5 truncate font-mono text-[11px] text-text-muted">
+                                {chart.name}
+                              </p>
+                            )}
+                          </div>
                         </div>
-                        <h2 className="text-lg font-semibold text-text-primary">
-                          {chart.displayName}
-                          {chart.displayName !== chart.name && (
-                            <span className="ml-2 rounded border border-border bg-surface-secondary px-2 py-0.5 font-mono text-xs font-normal text-text-muted">
-                              {chart.name}
-                            </span>
-                          )}
-                        </h2>
-                      </div>
-                      <div className="p-4">
-                        <div className="overflow-hidden rounded-xl border border-border">
+                        <div className={`overflow-hidden border-t ${chartInsetClass}`}>
                           <UPlotChart
                             xData={chart.xData}
                             series={chart.series}
-                            xLabel="Step"
+                            xLabel="step"
                             yLabel={chart.yLabel}
-                            height={280}
+                            height={236}
                             interactive={true}
                             darkTheme={isDark}
-                            showLegend={true}
+                            showLegend={chart.series.length > 1}
                             smoothing={0.06}
                             areaFill={false}
+                            showXAxisLabel={false}
+                            showYAxisLabel={false}
+                            dashedGrid={true}
+                            variant="reference"
                           />
                         </div>
-                      </div>
-                    </section>
-                  ))}
-                </div>
+                      </section>
+                    ))}
+                  </div>
+                )}
+
+                {remainingSecondaryChartCount > 0 && (
+                  <div className="mb-4 flex justify-center">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        startTransition(() => {
+                          setVisibleSecondaryChartCount(
+                            (current) => current + SECONDARY_CHART_BATCH_SIZE
+                          );
+                        });
+                      }}
+                      className="rounded-full border border-border bg-surface px-4 py-2 text-sm font-medium text-text-secondary transition-colors hover:bg-surface-hover hover:text-text-primary"
+                    >
+                      Show {Math.min(SECONDARY_CHART_BATCH_SIZE, remainingSecondaryChartCount)} more charts
+                    </button>
+                  </div>
+                )}
               </>
             )}
           </section>

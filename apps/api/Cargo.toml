@@ -37,11 +37,13 @@ serde_json.workspace = true
 clickhouse = { workspace = true, optional = true }
 rusqlite.workspace = true
 tokio-postgres.workspace = true
+redis.workspace = true
 
 # Observability
 tracing.workspace = true
 tracing-subscriber.workspace = true
 opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
 tracing-opentelemetry.workspace = true
 

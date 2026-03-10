@@ -11,7 +11,7 @@ pub use idempotency::{
     EventPayload, IdempotencyResult, IdempotencyStore, MetricPayload, ParamPayload,
     SharedIdempotencyStore, TagPayload, compute_payload_hash,
 };
-pub use ingest::IngestServiceImpl;
+pub use ingest::{InMemoryStore, IngestServiceImpl};
 pub use limits::{CardinalityTracker, LimitsConfig, SharedCardinalityTracker, ValidationResult};
 pub use metrics::{
     AggregatedPoint, MetricPoint, MetricSeries, MetricsQueryRequest, MetricsQueryResponse,

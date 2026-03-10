@@ -47,7 +47,7 @@ class SpoolReplaySendResult:
     error_retryable: bool | None = None
 
     @classmethod
-    def synced(cls, run_id: str | None, event_count: int) -> "SpoolReplaySendResult":
+    def synced(cls, run_id: str | None, event_count: int) -> SpoolReplaySendResult:
         return cls(
             success=True,
             outcome="synced",
@@ -64,7 +64,7 @@ class SpoolReplaySendResult:
         error_message: str,
         error_status_code: int | None,
         error_retryable: bool,
-    ) -> "SpoolReplaySendResult":
+    ) -> SpoolReplaySendResult:
         return cls(
             success=True,
             outcome="dropped_terminal",
@@ -84,7 +84,7 @@ class SpoolReplaySendResult:
         error_message: str | None,
         error_status_code: int | None,
         error_retryable: bool | None,
-    ) -> "SpoolReplaySendResult":
+    ) -> SpoolReplaySendResult:
         return cls(
             success=False,
             outcome="failed",
@@ -548,14 +548,3 @@ class SpoolSyncer:
             except Exception as e:
                 logger.exception(f"Error syncing spool file {spool_path}: {e}")
                 # Continue to next file
-
-
-def get_spool_dir() -> Path:
-    """Get the default spool directory.
-
-    Returns:
-        Path to spool directory
-    """
-    spool_dir = Path.home() / ".mlrunx" / "spool"
-    spool_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    return spool_dir

@@ -1823,6 +1823,8 @@ impl SqliteStore {
         run_id: &str,
         names: &[String],
         max_points: usize,
+        start_step: Option<i64>,
+        end_step: Option<i64>,
     ) -> Result<Vec<MetricSeriesRow>, SqliteError> {
         let conn = self.conn.lock().await;
 
@@ -1841,17 +1843,28 @@ impl SqliteStore {
         for name in &names_to_query {
             // Get total points for this metric
             let total_points: usize = conn.query_row(
-                "SELECT COUNT(*) FROM metrics WHERE run_id = ?1 AND name = ?2",
-                params![run_id, name],
+                r"SELECT COUNT(*)
+                  FROM metrics
+                  WHERE run_id = ?1
+                    AND name = ?2
+                    AND (?3 IS NULL OR step >= ?3)
+                    AND (?4 IS NULL OR step <= ?4)",
+                params![run_id, name, start_step, end_step],
                 |row| row.get(0),
             )?;
 
             let points = if total_points <= max_points {
                 // No downsampling needed
                 let mut stmt = conn.prepare(
-                    "SELECT step, value FROM metrics WHERE run_id = ?1 AND name = ?2 ORDER BY step",
+                    r"SELECT step, value
+                      FROM metrics
+                      WHERE run_id = ?1
+                        AND name = ?2
+                        AND (?3 IS NULL OR step >= ?3)
+                        AND (?4 IS NULL OR step <= ?4)
+                      ORDER BY step",
                 )?;
-                let rows = stmt.query_map(params![run_id, name], |row| {
+                let rows = stmt.query_map(params![run_id, name, start_step, end_step], |row| {
                     Ok(AggregatedPointRow {
                         step: row.get(0)?,
                         mean: row.get(1)?,
@@ -1867,8 +1880,13 @@ impl SqliteStore {
 
                 // Get step range
                 let (min_step, max_step): (i64, i64) = conn.query_row(
-                    "SELECT MIN(step), MAX(step) FROM metrics WHERE run_id = ?1 AND name = ?2",
-                    params![run_id, name],
+                    r"SELECT MIN(step), MAX(step)
+                      FROM metrics
+                      WHERE run_id = ?1
+                        AND name = ?2
+                        AND (?3 IS NULL OR step >= ?3)
+                        AND (?4 IS NULL OR step <= ?4)",
+                    params![run_id, name, start_step, end_step],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )?;
 
@@ -1883,7 +1901,10 @@ impl SqliteStore {
                         MAX(value) as max_val,
                         COUNT(*) as cnt
                     FROM metrics
-                    WHERE run_id = ?1 AND name = ?2
+                    WHERE run_id = ?1
+                      AND name = ?2
+                      AND (?6 IS NULL OR step >= ?6)
+                      AND (?7 IS NULL OR step <= ?7)
                     GROUP BY bucket_step
                     ORDER BY bucket_step
                     LIMIT ?5")?;
@@ -1894,7 +1915,9 @@ impl SqliteStore {
                         name,
                         min_step,
                         bucket_size as i64,
-                        bucket_count as i64
+                        bucket_count as i64,
+                        start_step,
+                        end_step
                     ],
                     |row| {
                         Ok(AggregatedPointRow {
@@ -3141,7 +3164,7 @@ mod tests {
             assert_eq!(run.name, Some("Persisted Run".to_string()));
 
             let metrics = reopened
-                .get_metrics("run-persist-123", &["loss".to_string()], 1000)
+                .get_metrics("run-persist-123", &["loss".to_string()], 1000, None, None)
                 .await
                 .unwrap();
             assert_eq!(metrics.len(), 1);
@@ -3174,14 +3197,14 @@ mod tests {
         store.insert_metrics("run-123", &metrics).await.unwrap();
 
         // Query without downsampling
-        let series = store.get_metrics("run-123", &[], 200).await.unwrap();
+        let series = store.get_metrics("run-123", &[], 200, None, None).await.unwrap();
         assert_eq!(series.len(), 1);
         assert_eq!(series[0].name, "loss");
         assert_eq!(series[0].points.len(), 100);
         assert!(!series[0].downsampled);
 
         // Query with downsampling
-        let series = store.get_metrics("run-123", &[], 10).await.unwrap();
+        let series = store.get_metrics("run-123", &[], 10, None, None).await.unwrap();
         assert_eq!(series.len(), 1);
         assert!(series[0].points.len() <= 10);
         assert!(series[0].downsampled);

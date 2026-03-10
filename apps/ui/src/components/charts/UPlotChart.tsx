@@ -15,6 +15,12 @@ export interface ChartSeries {
   lower?: number[];
 }
 
+export interface ChartPhaseMarker {
+  label: string;
+  value: number;
+  color?: string;
+}
+
 export interface UPlotChartProps {
   /** X-axis values (typically step or time) */
   xData: number[];
@@ -46,7 +52,30 @@ export interface UPlotChartProps {
   yMax?: number;
   /** Show area fill under lines */
   areaFill?: boolean;
+  /** Format x-axis tick labels */
+  xTickFormatter?: (value: number) => string;
+  /** Format y-axis tick labels */
+  yTickFormatter?: (value: number) => string;
+  /** Overlay vertical phase markers on the plot area */
+  phaseMarkers?: ChartPhaseMarker[];
+  /** Explicit line width */
+  lineWidth?: number;
+  /** Show the x-axis label */
+  showXAxisLabel?: boolean;
+  /** Show the y-axis label */
+  showYAxisLabel?: boolean;
+  /** Use dashed grid lines */
+  dashedGrid?: boolean;
+  /** Chart styling variant */
+  variant?: 'default' | 'reference';
 }
+
+type PhaseOverlayMarker = ChartPhaseMarker & {
+  height: number;
+  left: number;
+  top: number;
+  visible: boolean;
+};
 
 // Apply exponential moving average smoothing
 function smoothData(data: number[], factor: number): number[] {
@@ -71,6 +100,61 @@ function smoothData(data: number[], factor: number): number[] {
   return smoothed;
 }
 
+function formatAxisSplits(
+  splits: number[],
+  formatter?: (value: number) => string
+): Array<string | number | null> | undefined {
+  if (!formatter) return undefined;
+  return splits.map((split) => formatter(Number(split)));
+}
+
+function buildPhaseOverlayMarkers(
+  plot: uPlot,
+  phaseMarkers: ChartPhaseMarker[]
+): PhaseOverlayMarker[] {
+  if (phaseMarkers.length === 0) return [];
+
+  const pxRatio = uPlot.pxRatio || 1;
+  const plotLeft = plot.bbox.left / pxRatio;
+  const plotTop = plot.bbox.top / pxRatio;
+  const plotHeight = plot.bbox.height / pxRatio;
+  const xMin = plot.scales.x.min ?? Number.NEGATIVE_INFINITY;
+  const xMax = plot.scales.x.max ?? Number.POSITIVE_INFINITY;
+
+  return phaseMarkers.map((marker) => ({
+    ...marker,
+    height: plotHeight,
+    left: plotLeft + plot.valToPos(marker.value, 'x'),
+    top: plotTop,
+    visible: marker.value >= xMin && marker.value <= xMax,
+  }));
+}
+
+function samePhaseOverlayMarkers(
+  previous: PhaseOverlayMarker[],
+  next: PhaseOverlayMarker[]
+): boolean {
+  if (previous.length !== next.length) return false;
+
+  for (let index = 0; index < previous.length; index += 1) {
+    const prev = previous[index];
+    const current = next[index];
+    if (
+      prev.label !== current.label ||
+      prev.color !== current.color ||
+      prev.value !== current.value ||
+      prev.visible !== current.visible ||
+      Math.abs(prev.left - current.left) > 0.5 ||
+      Math.abs(prev.top - current.top) > 0.5 ||
+      Math.abs(prev.height - current.height) > 0.5
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 export function UPlotChart({
   xData,
   series,
@@ -87,17 +171,35 @@ export function UPlotChart({
   yMin,
   yMax,
   areaFill = false,
+  xTickFormatter,
+  yTickFormatter,
+  phaseMarkers = [],
+  lineWidth,
+  showXAxisLabel = true,
+  showYAxisLabel = false,
+  dashedGrid = false,
+  variant = 'default',
 }: UPlotChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<uPlot | null>(null);
   const [dimensions, setDimensions] = useState({ width: 0, height });
   const [hoveredSeries, setHoveredSeries] = useState<number | null>(null);
+  const [phaseOverlayMarkers, setPhaseOverlayMarkers] = useState<PhaseOverlayMarker[]>([]);
 
   // Keep chart theme tied directly to the theme state to avoid DOM class timing races on toggle.
+  const referenceVariant = variant === 'reference';
   const bgColor = darkTheme ? '#000000' : '#ffffff';
-  const gridColor = darkTheme ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.06)';
-  const axisColor = darkTheme ? '#8a909b' : '#9ca3af';
-  const textColor = darkTheme ? '#dce2ea' : '#374151';
+  const gridColor = darkTheme
+    ? (referenceVariant ? 'rgba(174,190,213,0.16)' : 'rgba(255,255,255,0.05)')
+    : 'rgba(0,0,0,0.06)';
+  const axisColor = darkTheme
+    ? (referenceVariant ? '#c7ceda' : '#8a909b')
+    : '#9ca3af';
+  const textColor = darkTheme
+    ? (referenceVariant ? '#dfe6ef' : '#dce2ea')
+    : '#374151';
+  const phaseMarkerColor = darkTheme ? '#4a99ff' : '#2563eb';
+  const gridDash = dashedGrid || referenceVariant ? [5, 5] : undefined;
   const seriesColorScale = useMemo(
     () => createSeriesColorScale(series.map((entry, index) => entry.label || `series-${index}`), darkTheme),
     [series, darkTheme]
@@ -132,6 +234,12 @@ export function UPlotChart({
     if (wrapperEl) observer.observe(wrapperEl);
     return () => observer.disconnect();
   }, [height, showLegend, series.length]);
+
+  useEffect(() => {
+    if (phaseMarkers.length === 0) {
+      setPhaseOverlayMarkers([]);
+    }
+  }, [phaseMarkers]);
 
   // Create/update chart
   useEffect(() => {
@@ -169,7 +277,7 @@ export function UPlotChart({
       seriesConfig.push({
         label: s.label,
         stroke: color,
-        width: 1.1,
+        width: lineWidth ?? (referenceVariant ? 1.8 : 1.1),
         points: { show: false },
         alpha: isActive ? 1 : 0.3,
         fill: areaFill ? `${color}15` : undefined,
@@ -213,6 +321,26 @@ export function UPlotChart({
     });
 
     const data: uPlot.AlignedData = dataArrays as uPlot.AlignedData;
+    const syncPhaseOverlays = (plot: uPlot) => {
+      if (phaseMarkers.length === 0) {
+        setPhaseOverlayMarkers([]);
+        return;
+      }
+
+      const next = buildPhaseOverlayMarkers(plot, phaseMarkers);
+      setPhaseOverlayMarkers((previous) => (samePhaseOverlayMarkers(previous, next) ? previous : next));
+    };
+
+    const setScaleHooks: NonNullable<uPlot.Hooks.Arrays['setScale']> = [];
+    if (interactive && onViewportChange) {
+      setScaleHooks.push((u, key) => {
+        if (key === 'x') {
+          const min = u.scales.x.min ?? 0;
+          const max = u.scales.x.max ?? 0;
+          onViewportChange(min, max);
+        }
+      });
+    }
 
     // Chart options
     const opts: uPlot.Options = {
@@ -232,32 +360,45 @@ export function UPlotChart({
       axes: [
         {
           // X-axis — show tick values only, label at far right
-          label: xLabel,
-          labelSize: 14,
-          labelFont: '10px system-ui, sans-serif',
-          font: '11px system-ui, sans-serif',
+          label: showXAxisLabel ? xLabel : undefined,
+          labelSize: showXAxisLabel ? (referenceVariant ? 18 : 14) : 0,
+          labelGap: showXAxisLabel ? 8 : 0,
+          labelFont: referenceVariant ? '12px system-ui, sans-serif' : '10px system-ui, sans-serif',
+          font: referenceVariant ? '12px system-ui, sans-serif' : '11px system-ui, sans-serif',
           stroke: axisColor,
-          size: 32,
+          size: referenceVariant ? 36 : 32,
           gap: 4,
+          values: xTickFormatter
+            ? (_u, splits) => formatAxisSplits(splits, xTickFormatter) ?? []
+            : undefined,
           grid: {
             show: true,
             stroke: gridColor,
-            width: 1,
+            width: referenceVariant ? 1.1 : 1,
+            dash: gridDash,
           },
           ticks: {
             show: false,
           },
         },
         {
-          // Y-axis — tick values only, no label
-          font: '11px system-ui, sans-serif',
+          // Y-axis — tick values only by default, with optional label in reference layouts
+          label: showYAxisLabel ? yLabel : undefined,
+          labelSize: showYAxisLabel ? (referenceVariant ? 24 : 18) : 0,
+          labelGap: showYAxisLabel ? 10 : 0,
+          labelFont: referenceVariant ? '12px system-ui, sans-serif' : '10px system-ui, sans-serif',
+          font: referenceVariant ? '12px system-ui, sans-serif' : '11px system-ui, sans-serif',
           stroke: axisColor,
-          size: 48,
-          gap: 8,
+          size: showYAxisLabel ? (referenceVariant ? 62 : 54) : 48,
+          gap: referenceVariant ? 10 : 8,
+          values: yTickFormatter
+            ? (_u, splits) => formatAxisSplits(splits, yTickFormatter) ?? []
+            : undefined,
           grid: {
             show: true,
             stroke: gridColor,
-            width: 1,
+            width: referenceVariant ? 1.1 : 1,
+            dash: gridDash,
           },
           ticks: {
             show: false,
@@ -276,23 +417,18 @@ export function UPlotChart({
       legend: {
         show: false,
       },
-      hooks: interactive && onViewportChange
-        ? {
-            setScale: [
-              (u, key) => {
-                if (key === 'x') {
-                  const min = u.scales.x.min ?? 0;
-                  const max = u.scales.x.max ?? 0;
-                  onViewportChange(min, max);
-                }
-              },
-            ],
-          }
-        : undefined,
+      hooks:
+        setScaleHooks.length > 0 || phaseMarkers.length > 0
+          ? {
+              draw: phaseMarkers.length > 0 ? [syncPhaseOverlays] : undefined,
+              setScale: setScaleHooks.length > 0 ? setScaleHooks : undefined,
+            }
+          : undefined,
     };
 
     // Create chart
     chartRef.current = new uPlot(opts, data, containerRef.current);
+    syncPhaseOverlays(chartRef.current);
 
     return () => {
       if (chartRef.current) {
@@ -300,7 +436,7 @@ export function UPlotChart({
         chartRef.current = null;
       }
     };
-  }, [xData, resolvedSeries, title, xLabel, yLabel, dimensions, interactive, onViewportChange, darkTheme, smoothing, bgColor, gridColor, axisColor, textColor, hoveredSeries, logScale, yMin, yMax, areaFill]);
+  }, [xData, resolvedSeries, title, xLabel, yLabel, dimensions, interactive, onViewportChange, darkTheme, smoothing, bgColor, gridColor, axisColor, textColor, hoveredSeries, logScale, yMin, yMax, areaFill, xTickFormatter, yTickFormatter, phaseMarkers, lineWidth, showXAxisLabel, showYAxisLabel, dashedGrid, referenceVariant, gridDash]);
 
   // Get last value for each series
   const getLastValue = useCallback((data: number[]): string => {
@@ -315,16 +451,42 @@ export function UPlotChart({
   return (
     <div className="h-full rounded-lg overflow-hidden flex flex-col bg-chart-bg">
       {/* Chart container */}
-      <div
-        ref={containerRef}
-        className="w-full flex-shrink-0"
-        style={{ height: dimensions.height || height, backgroundColor: bgColor }}
-      />
+      <div className="relative w-full flex-shrink-0">
+        <div
+          ref={containerRef}
+          className="w-full flex-shrink-0"
+          style={{ height: dimensions.height || height, backgroundColor: bgColor }}
+        />
+        {phaseOverlayMarkers.length > 0 && (
+          <div className="pointer-events-none absolute inset-0">
+            {phaseOverlayMarkers
+              .filter((marker) => marker.visible)
+              .map((marker) => (
+                <div
+                  key={`${marker.label}-${marker.value}`}
+                  className="absolute"
+                  style={{ height: marker.height, left: marker.left, top: marker.top }}
+                >
+                  <div
+                    className="absolute inset-y-0 left-0 border-l border-dashed"
+                    style={{ borderColor: marker.color || phaseMarkerColor }}
+                  />
+                  <div
+                    className="absolute left-[6px] top-[10px] origin-top-left -rotate-90 whitespace-nowrap text-[11px] tracking-[0.08em]"
+                    style={{ color: marker.color || phaseMarkerColor }}
+                  >
+                    {marker.label}
+                  </div>
+                </div>
+              ))}
+          </div>
+        )}
+      </div>
 
       {/* Custom Legend */}
       {showLegend && series.length > 0 && (
-        <div className="px-4 py-3 border-t border-border">
-          <div className="flex flex-wrap gap-x-5 gap-y-1.5">
+        <div className={`border-t border-border ${referenceVariant ? 'px-3 py-2.5' : 'px-4 py-3'}`}>
+          <div className={`flex flex-wrap ${referenceVariant ? 'gap-x-4 gap-y-1' : 'gap-x-5 gap-y-1.5'}`}>
             {resolvedSeries.map((s, i) => {
               const color = s.resolvedColor;
               const lastVal = getLastValue(s.data);

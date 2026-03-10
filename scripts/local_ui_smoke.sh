@@ -16,9 +16,9 @@ set -euo pipefail
 #   UI_BASE_URL=http://127.0.0.1:3000
 #   MLRUNX_SQLITE_PATH=/tmp/mlrunx-local.db
 #   MLRUNX_JWT_SECRET=local-dev-jwt-secret
-#   JWT_SUBJECT=ibra-ui-test
-#   JWT_EMAIL=you@ibra-niang.com
-#   JWT_NAME=Ibra
+#   JWT_SUBJECT=example-ui-test
+#   JWT_EMAIL=you@example.com
+#   JWT_NAME=Example User
 #   PROJECT_NAME=demo
 #   VERBOSE=1
 
@@ -26,9 +26,9 @@ API_BASE_URL="${API_BASE_URL:-http://127.0.0.1:3001}"
 UI_BASE_URL="${UI_BASE_URL:-http://127.0.0.1:3000}"
 SQLITE_PATH="${MLRUNX_SQLITE_PATH:-/tmp/mlrunx-local.db}"
 JWT_SECRET="${MLRUNX_JWT_SECRET:-local-dev-jwt-secret}"
-JWT_SUBJECT="${JWT_SUBJECT:-ibra-ui-test}"
-JWT_EMAIL="${JWT_EMAIL:-you@ibra-niang.com}"
-JWT_NAME="${JWT_NAME:-Ibra}"
+JWT_SUBJECT="${JWT_SUBJECT:-example-ui-test}"
+JWT_EMAIL="${JWT_EMAIL:-you@example.com}"
+JWT_NAME="${JWT_NAME:-Example User}"
 PROJECT_NAME="${PROJECT_NAME:-demo}"
 VERBOSE="${VERBOSE:-0}"
 

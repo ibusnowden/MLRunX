@@ -27,7 +27,7 @@ help:
 	@echo "  make dev          - Start development environment"
 	@echo "  make dev-ui       - Start UI development server"
 	@echo "  make dev-api      - Start API server"
-	@echo "  make dev-ingest   - Start ingest server"
+	@echo "  make dev-processor - Start queued processor"
 	@echo ""
 	@echo "Testing:"
 	@echo "  make check        - Run all checks (lint + test)"
@@ -66,7 +66,7 @@ build: build-rust build-ui build-sdk
 
 build-rust:
 	@echo "Building Rust services..."
-	cargo build --release
+	cargo build --release --workspace
 
 build-ui:
 	@echo "Building Next.js UI..."
@@ -132,18 +132,15 @@ proto-check: proto-lint
 
 dev: infra-up
 	@echo "Development environment ready"
-	@echo "  API:    http://localhost:3001"
-	@echo "  Ingest: http://localhost:3002 (gRPC: 50051)"
-	@echo "  UI:     http://localhost:3000"
+	@echo "  API:       http://localhost:3001"
+	@echo "  UI:        http://localhost:3000"
+	@echo "  Processor: optional in queued mode (make dev-processor)"
 
 dev-ui:
 	cd apps/ui && npm run dev
 
 dev-api:
 	cargo run --bin mlrunx-api
-
-dev-ingest:
-	cargo run --bin mlrunx-ingest
 
 dev-processor:
 	cargo run --bin mlrunx-processor
@@ -159,7 +156,7 @@ lint: lint-rust lint-python lint-ui proto-lint
 lint-rust:
 	@echo "Linting Rust..."
 	cargo fmt --check
-	cargo clippy -- -D warnings
+	cargo clippy --workspace --all-targets -- -D clippy::correctness -D clippy::suspicious -D clippy::perf
 
 lint-python:
 	@echo "Linting Python..."
@@ -184,7 +181,7 @@ test: test-rust test-python test-ui
 
 test-rust:
 	@echo "Testing Rust..."
-	cargo test
+	cargo test --workspace
 
 test-python:
 	@echo "Testing Python..."

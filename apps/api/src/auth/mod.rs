@@ -13,13 +13,12 @@ use argon2::{
 };
 use axum::{
     extract::{ConnectInfo, Request, State},
-    http::{Method, StatusCode, request::Parts},
+    http::{HeaderValue, Method, StatusCode, header, request::Parts},
     middleware::Next,
     response::Response,
 };
 use hmac::{Hmac, Mac};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
-use rand::Rng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
@@ -690,7 +689,6 @@ impl ApiKeyStore {
         }
     }
 
-    #[cfg(test)]
     pub fn new_with_sqlite_and_ui_jwt(sqlite_store: Arc<SqliteStore>, jwt_secret: &str) -> Self {
         let (auth_hmac_secret, auth_hmac_secret_source) = load_auth_hmac_secret();
         let bootstrap_key_ttl_seconds = bootstrap_key_ttl_seconds_from_env();
@@ -2141,7 +2139,8 @@ enum RequestCredential {
     Bearer(String),
     UiSession {
         session_token: String,
-        csrf_token: Option<String>,
+        csrf_header_token: Option<String>,
+        csrf_cookie_token: Option<String>,
         require_csrf: bool,
     },
     Missing,
@@ -2179,8 +2178,9 @@ fn extract_request_credential(
         if let Some(session_token) = extract_cookie(parts, key_store.ui_session_cookie_name()) {
             return RequestCredential::UiSession {
                 session_token,
-                csrf_token: extract_header_token(parts, "x-csrf-token"),
-                require_csrf: requires_csrf(method),
+                csrf_header_token: extract_header_token(parts, "x-csrf-token"),
+                csrf_cookie_token: extract_cookie(parts, key_store.ui_csrf_cookie_name()),
+                require_csrf: requires_csrf(method, parts.uri.path()),
             };
         }
     }
@@ -2306,11 +2306,91 @@ fn extract_user_agent(parts: &Parts) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-const fn requires_csrf(method: &Method) -> bool {
-    matches!(
+fn requires_csrf(method: &Method, path: &str) -> bool {
+    if !matches!(
         *method,
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE
-    )
+    ) {
+        return false;
+    }
+
+    // Read-only compare endpoints use POST for complex request bodies.
+    if matches!(path, "/api/v1/runs/compare" | "/api/v1/runs/compare/charts") {
+        return false;
+    }
+
+    true
+}
+
+fn build_cookie_value(
+    name: &str,
+    value: &str,
+    ttl_seconds: u64,
+    http_only: bool,
+    secure: bool,
+    same_site: &str,
+    domain: Option<&str>,
+) -> Option<HeaderValue> {
+    let mut cookie = format!("{name}={value}; Path=/; Max-Age={ttl_seconds}; SameSite={same_site}");
+    if let Some(domain) = domain {
+        cookie.push_str("; Domain=");
+        cookie.push_str(domain);
+    }
+    if http_only {
+        cookie.push_str("; HttpOnly");
+    }
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    HeaderValue::from_str(&cookie).ok()
+}
+
+fn append_ui_session_refresh_cookies(
+    response: &mut Response,
+    key_store: &ApiKeyStore,
+    session_token: &str,
+    csrf_token: &str,
+) {
+    if session_token.is_empty() || csrf_token.is_empty() {
+        return;
+    }
+
+    let ttl = key_store.ui_session_ttl_seconds();
+    let secure = key_store.ui_cookie_secure();
+    let same_site = key_store.ui_cookie_same_site();
+    let domain = key_store.ui_cookie_domain();
+
+    if let Some(session_cookie) = build_cookie_value(
+        key_store.ui_session_cookie_name(),
+        session_token,
+        ttl,
+        true,
+        secure,
+        same_site,
+        domain,
+    ) {
+        response
+            .headers_mut()
+            .append(header::SET_COOKIE, session_cookie);
+    } else {
+        warn!("Failed to build refreshed UI session cookie header");
+    }
+
+    if let Some(csrf_cookie) = build_cookie_value(
+        key_store.ui_csrf_cookie_name(),
+        csrf_token,
+        ttl,
+        false,
+        secure,
+        same_site,
+        domain,
+    ) {
+        response
+            .headers_mut()
+            .append(header::SET_COOKIE, csrf_cookie);
+    } else {
+        warn!("Failed to build refreshed UI CSRF cookie header");
+    }
 }
 
 /// Middleware for API key authentication.
@@ -2361,121 +2441,128 @@ pub async fn auth_middleware(
         ));
     }
 
-    let (api_key, auth_mode, allowed_project_ids, is_platform_admin) = match raw_key {
-        RequestCredential::Missing => {
-            return Err((
-                AuthError::MissingKey.status_code(),
-                AuthError::MissingKey.message().to_string(),
-            ));
-        }
-        RequestCredential::ApiKey(raw_key) => {
-            let Some(api_key) = key_store.validate_key(&raw_key).await else {
-                warn!(key_prefix = %raw_key.chars().take(8).collect::<String>(), "Invalid API key");
-                key_store
-                    .record_auth_failure(
-                        client_ip.as_deref(),
-                        user_agent.as_deref(),
-                        &request_path,
-                        &request_method,
-                        "invalid_api_key",
-                        "x-api-key",
-                    )
-                    .await;
+    let (api_key, auth_mode, allowed_project_ids, is_platform_admin, ui_cookie_refresh_tokens) =
+        match raw_key {
+            RequestCredential::Missing => {
                 return Err((
-                    AuthError::InvalidKey.status_code(),
-                    AuthError::InvalidKey.message().to_string(),
+                    AuthError::MissingKey.status_code(),
+                    AuthError::MissingKey.message().to_string(),
                 ));
-            };
-            (api_key, AuthMode::ApiKey, None, false)
-        }
-        RequestCredential::Bearer(raw_token) => {
-            // Preserve existing SDK compatibility: first treat Bearer as API key.
-            if let Some(api_key) = key_store.validate_key(&raw_token).await {
-                (api_key, AuthMode::ApiKey, None, false)
-            } else if key_store.is_ui_jwt_enabled() {
-                match key_store.authenticate_ui_jwt(&raw_token).await {
-                    Ok((api_key, allowed_projects, platform_admin)) => (
+            }
+            RequestCredential::ApiKey(raw_key) => {
+                let Some(api_key) = key_store.validate_key(&raw_key).await else {
+                    warn!(key_prefix = %raw_key.chars().take(8).collect::<String>(), "Invalid API key");
+                    key_store
+                        .record_auth_failure(
+                            client_ip.as_deref(),
+                            user_agent.as_deref(),
+                            &request_path,
+                            &request_method,
+                            "invalid_api_key",
+                            "x-api-key",
+                        )
+                        .await;
+                    return Err((
+                        AuthError::InvalidKey.status_code(),
+                        AuthError::InvalidKey.message().to_string(),
+                    ));
+                };
+                (api_key, AuthMode::ApiKey, None, false, None)
+            }
+            RequestCredential::Bearer(raw_token) => {
+                // Preserve existing SDK compatibility: first treat Bearer as API key.
+                if let Some(api_key) = key_store.validate_key(&raw_token).await {
+                    (api_key, AuthMode::ApiKey, None, false, None)
+                } else if key_store.is_ui_jwt_enabled() {
+                    match key_store.authenticate_ui_jwt(&raw_token).await {
+                        Ok((api_key, allowed_projects, platform_admin)) => (
+                            api_key,
+                            AuthMode::UiJwt,
+                            Some(allowed_projects),
+                            platform_admin,
+                            None,
+                        ),
+                        Err(err) => {
+                            warn!("Invalid UI JWT token: {err}");
+                            key_store
+                                .record_auth_failure(
+                                    client_ip.as_deref(),
+                                    user_agent.as_deref(),
+                                    &request_path,
+                                    &request_method,
+                                    "invalid_ui_jwt",
+                                    "bearer_jwt",
+                                )
+                                .await;
+                            return Err((
+                                AuthError::InvalidKey.status_code(),
+                                AuthError::InvalidKey.message().to_string(),
+                            ));
+                        }
+                    }
+                } else {
+                    warn!(key_prefix = %raw_token.chars().take(8).collect::<String>(), "Invalid API key");
+                    key_store
+                        .record_auth_failure(
+                            client_ip.as_deref(),
+                            user_agent.as_deref(),
+                            &request_path,
+                            &request_method,
+                            "invalid_bearer_token",
+                            "bearer",
+                        )
+                        .await;
+                    return Err((
+                        AuthError::InvalidKey.status_code(),
+                        AuthError::InvalidKey.message().to_string(),
+                    ));
+                }
+            }
+            RequestCredential::UiSession {
+                session_token,
+                csrf_header_token,
+                csrf_cookie_token,
+                require_csrf,
+            } => match key_store
+                .authenticate_ui_session(&session_token, csrf_header_token.as_deref(), require_csrf)
+                .await
+            {
+                Ok((api_key, allowed_projects, platform_admin)) => {
+                    let csrf_refresh_token = csrf_cookie_token.or(csrf_header_token);
+                    (
                         api_key,
                         AuthMode::UiJwt,
                         Some(allowed_projects),
                         platform_admin,
-                    ),
-                    Err(err) => {
-                        warn!("Invalid UI JWT token: {err}");
-                        key_store
-                            .record_auth_failure(
-                                client_ip.as_deref(),
-                                user_agent.as_deref(),
-                                &request_path,
-                                &request_method,
-                                "invalid_ui_jwt",
-                                "bearer_jwt",
-                            )
-                            .await;
-                        return Err((
-                            AuthError::InvalidKey.status_code(),
-                            AuthError::InvalidKey.message().to_string(),
-                        ));
+                        csrf_refresh_token.map(|csrf| (session_token, csrf)),
+                    )
+                }
+                Err(err) => {
+                    warn!("Invalid UI session: {err}");
+                    key_store
+                        .record_auth_failure(
+                            client_ip.as_deref(),
+                            user_agent.as_deref(),
+                            &request_path,
+                            &request_method,
+                            if err.contains("CSRF") {
+                                "invalid_csrf_token"
+                            } else {
+                                "invalid_ui_session"
+                            },
+                            "ui_session",
+                        )
+                        .await;
+                    if err.contains("CSRF") {
+                        return Err((StatusCode::FORBIDDEN, "Invalid CSRF token.".to_string()));
                     }
+                    return Err((
+                        AuthError::InvalidKey.status_code(),
+                        AuthError::InvalidKey.message().to_string(),
+                    ));
                 }
-            } else {
-                warn!(key_prefix = %raw_token.chars().take(8).collect::<String>(), "Invalid API key");
-                key_store
-                    .record_auth_failure(
-                        client_ip.as_deref(),
-                        user_agent.as_deref(),
-                        &request_path,
-                        &request_method,
-                        "invalid_bearer_token",
-                        "bearer",
-                    )
-                    .await;
-                return Err((
-                    AuthError::InvalidKey.status_code(),
-                    AuthError::InvalidKey.message().to_string(),
-                ));
-            }
-        }
-        RequestCredential::UiSession {
-            session_token,
-            csrf_token,
-            require_csrf,
-        } => match key_store
-            .authenticate_ui_session(&session_token, csrf_token.as_deref(), require_csrf)
-            .await
-        {
-            Ok((api_key, allowed_projects, platform_admin)) => (
-                api_key,
-                AuthMode::UiJwt,
-                Some(allowed_projects),
-                platform_admin,
-            ),
-            Err(err) => {
-                warn!("Invalid UI session: {err}");
-                key_store
-                    .record_auth_failure(
-                        client_ip.as_deref(),
-                        user_agent.as_deref(),
-                        &request_path,
-                        &request_method,
-                        if err.contains("CSRF") {
-                            "invalid_csrf_token"
-                        } else {
-                            "invalid_ui_session"
-                        },
-                        "ui_session",
-                    )
-                    .await;
-                if err.contains("CSRF") {
-                    return Err((StatusCode::FORBIDDEN, "Invalid CSRF token.".to_string()));
-                }
-                return Err((
-                    AuthError::InvalidKey.status_code(),
-                    AuthError::InvalidKey.message().to_string(),
-                ));
-            }
-        },
-    };
+            },
+        };
 
     key_store.record_auth_success(client_ip.as_deref()).await;
 
@@ -2498,7 +2585,21 @@ pub async fn auth_middleware(
         user_agent,
     });
 
-    Ok(next.run(request).await)
+    let mut response = next.run(request).await;
+
+    // Sliding session cookies: refresh browser cookie Max-Age on each authenticated request.
+    if request_path != "/api/v1/ui-auth/logout" {
+        if let Some((session_token, csrf_token)) = ui_cookie_refresh_tokens.as_ref() {
+            append_ui_session_refresh_cookies(
+                &mut response,
+                key_store.as_ref(),
+                session_token,
+                csrf_token,
+            );
+        }
+    }
+
+    Ok(response)
 }
 
 /// Extractor for getting `AuthContext` from request extensions.
@@ -2593,6 +2694,13 @@ CvrQ6l/UcBWpzmXrG9Ai5G0dcQc/4aL4tMiSvvemsRaEAGF+tUDTe6zH3A==
             normalize_cookie_domain(" mlrunx.example.com "),
             Some("mlrunx.example.com".to_string())
         );
+    }
+
+    #[test]
+    fn test_requires_csrf_exempts_compare_post_endpoints() {
+        assert!(!requires_csrf(&Method::POST, "/api/v1/runs/compare"));
+        assert!(!requires_csrf(&Method::POST, "/api/v1/runs/compare/charts"));
+        assert!(requires_csrf(&Method::POST, "/api/v1/keys"));
     }
 
     #[test]

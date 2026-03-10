@@ -5,6 +5,40 @@
 use std::net::SocketAddr;
 use tracing::info;
 
+/// Runtime mode determines the storage/control-plane topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuntimeMode {
+    /// Standalone mode keeps SQLite in the hot path and is the default local setup.
+    #[default]
+    Standalone,
+    /// Scale-out mode enables queue-driven ingest and external data stores.
+    ScaleOut,
+}
+
+impl RuntimeMode {
+    pub fn from_env() -> Self {
+        std::env::var("MLRUNX_RUNTIME_MODE")
+            .ok()
+            .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+                "standalone" => Some(Self::Standalone),
+                "scaleout" | "scale-out" | "scale_out" => Some(Self::ScaleOut),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standalone => "standalone",
+            Self::ScaleOut => "scaleout",
+        }
+    }
+
+    pub const fn is_scale_out(self) -> bool {
+        matches!(self, Self::ScaleOut)
+    }
+}
+
 /// Ingest mode determines how data flows through the system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IngestMode {
@@ -46,6 +80,8 @@ pub struct ServerConfig {
     pub http_addr: SocketAddr,
     /// gRPC server address
     pub grpc_addr: SocketAddr,
+    /// Runtime mode (standalone or scale-out)
+    pub runtime_mode: RuntimeMode,
     /// Ingest mode (direct or queued)
     pub ingest_mode: IngestMode,
     /// Log level
@@ -57,6 +93,7 @@ impl Default for ServerConfig {
         Self {
             http_addr: "0.0.0.0:3001".parse().unwrap(),
             grpc_addr: "0.0.0.0:50051".parse().unwrap(),
+            runtime_mode: RuntimeMode::Standalone,
             ingest_mode: IngestMode::Direct,
             log_level: "info,mlrunx_api=debug".to_string(),
         }
@@ -81,6 +118,7 @@ impl ServerConfig {
         Self {
             http_addr: format!("{host}:{http_port}").parse().unwrap(),
             grpc_addr: format!("{host}:{grpc_port}").parse().unwrap(),
+            runtime_mode: RuntimeMode::from_env(),
             ingest_mode: IngestMode::from_env(),
             log_level: std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "info,mlrunx_api=debug".to_string()),
@@ -92,6 +130,14 @@ impl ServerConfig {
         info!("MLRunX API Configuration:");
         info!("  HTTP Server: {}", self.http_addr);
         info!("  gRPC Server: {}", self.grpc_addr);
+        info!(
+            "  Runtime Mode: {} ({})",
+            self.runtime_mode.as_str(),
+            match self.runtime_mode {
+                RuntimeMode::Standalone => "SQLite-first local mode",
+                RuntimeMode::ScaleOut => "queue + external stores enabled",
+            }
+        );
         info!(
             "  Ingest Mode: {} ({})",
             self.ingest_mode.as_str(),
@@ -112,6 +158,7 @@ mod tests {
         let config = ServerConfig::default();
         assert_eq!(config.http_addr.port(), 3001);
         assert_eq!(config.grpc_addr.port(), 50051);
+        assert_eq!(config.runtime_mode, RuntimeMode::Standalone);
         assert_eq!(config.ingest_mode, IngestMode::Direct);
     }
 
@@ -123,5 +170,12 @@ mod tests {
 
         // Default is direct
         assert_eq!(IngestMode::default(), IngestMode::Direct);
+    }
+
+    #[test]
+    fn test_runtime_mode_parsing() {
+        assert_eq!(RuntimeMode::Standalone.as_str(), "standalone");
+        assert_eq!(RuntimeMode::ScaleOut.as_str(), "scaleout");
+        assert_eq!(RuntimeMode::default(), RuntimeMode::Standalone);
     }
 }
