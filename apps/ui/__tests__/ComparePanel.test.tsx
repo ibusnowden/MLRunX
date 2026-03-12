@@ -78,6 +78,29 @@ const compareResponse = {
   alignment: 'step',
 }
 
+const compareRunMetadata = {
+  'run-rloo': {
+    run_id: 'run-rloo',
+    name: 'RLOO',
+    status: 'finished',
+    tags: {
+      model_name: 'Qwen/Qwen3-1.7B',
+      dataset_name: 'gsm8k',
+      learning_rate: '5e-6',
+    },
+  },
+  'run-ppo': {
+    run_id: 'run-ppo',
+    name: 'PPO',
+    status: 'finished',
+    tags: {
+      model: 'Qwen/Qwen3-1.7B',
+      dataset: 'math',
+      seed: '42',
+    },
+  },
+}
+
 describe('ComparePanel', () => {
   beforeEach(() => {
     compareRunsMock.mockReset()
@@ -86,7 +109,7 @@ describe('ComparePanel', () => {
   })
 
   it('renders multi-run chart data with alphabetically-first metric selected by default', async () => {
-    render(<ComparePanel runIds={['run-rloo', 'run-ppo']} />)
+    render(<ComparePanel runIds={['run-rloo', 'run-ppo']} runMetadataById={compareRunMetadata} />)
 
     await screen.findByText('Compare Runs')
     await screen.findAllByText('RLOO')
@@ -109,17 +132,42 @@ describe('ComparePanel', () => {
 
     const chartProps = uPlotChartMock.mock.calls.at(-1)?.[0] as {
       xData: number[];
-      series: Array<{ label: string; data: Array<number | null> }>;
+      tooltipVariant: string;
+      series: Array<{
+        label: string;
+        data: Array<number | null>;
+        tooltipLabel?: string;
+        hoverMeta?: Array<{ label: string; value: string }>;
+      }>;
     }
     expect(chartProps.xData).toEqual([1, 2])
+    expect(chartProps.tooltipVariant).toBe('compare')
     expect(chartProps.series).toMatchObject([
-      { label: 'RLOO', data: [0.4, 0.35] },
-      { label: 'PPO', data: [0.3, 0.25] },
+      {
+        label: 'RLOO',
+        data: [0.4, 0.35],
+        tooltipLabel: 'RLOO',
+        hoverMeta: [
+          { label: 'Model', value: 'Qwen/Qwen3-1.7B' },
+          { label: 'Dataset', value: 'gsm8k' },
+          { label: 'LR', value: '5e-6' },
+        ],
+      },
+      {
+        label: 'PPO',
+        data: [0.3, 0.25],
+        tooltipLabel: 'PPO',
+        hoverMeta: [
+          { label: 'Model', value: 'Qwen/Qwen3-1.7B' },
+          { label: 'Dataset', value: 'math' },
+          { label: 'Seed', value: '42' },
+        ],
+      },
     ])
   })
 
   it('updates overlay when selecting a different metric', async () => {
-    render(<ComparePanel runIds={['run-rloo', 'run-ppo']} />)
+    render(<ComparePanel runIds={['run-rloo', 'run-ppo']} runMetadataById={compareRunMetadata} />)
 
     const metricSelect = (await screen.findByRole('combobox', { name: 'Metric' })) as HTMLSelectElement
     expect(metricSelect.value).toBe('loss')
@@ -143,8 +191,49 @@ describe('ComparePanel', () => {
     })
   })
 
+  it('keeps hover metadata on derived series', async () => {
+    render(<ComparePanel runIds={['run-rloo', 'run-ppo']} runMetadataById={compareRunMetadata} />)
+
+    const derivedSelect = (await screen.findByRole('combobox', { name: 'Derived Series' })) as HTMLSelectElement
+    fireEvent.change(derivedSelect, { target: { value: 'ema' } })
+
+    const showRawCheckbox = await screen.findByRole('checkbox', { name: 'Show raw lines' })
+    fireEvent.click(showRawCheckbox)
+
+    await waitFor(() => {
+      const chartProps = uPlotChartMock.mock.calls.at(-1)?.[0] as {
+        series: Array<{
+          label: string;
+          tooltipLabel?: string;
+          hoverMeta?: Array<{ label: string; value: string }>;
+        }>;
+      }
+
+      expect(chartProps.series).toMatchObject([
+        {
+          label: 'RLOO EMA(16)',
+          tooltipLabel: 'RLOO EMA(16)',
+          hoverMeta: [
+            { label: 'Model', value: 'Qwen/Qwen3-1.7B' },
+            { label: 'Dataset', value: 'gsm8k' },
+            { label: 'LR', value: '5e-6' },
+          ],
+        },
+        {
+          label: 'PPO EMA(16)',
+          tooltipLabel: 'PPO EMA(16)',
+          hoverMeta: [
+            { label: 'Model', value: 'Qwen/Qwen3-1.7B' },
+            { label: 'Dataset', value: 'math' },
+            { label: 'Seed', value: '42' },
+          ],
+        },
+      ])
+    })
+  })
+
   it('renders head-to-head delta rows for two-run comparison', async () => {
-    render(<ComparePanel runIds={['run-rloo', 'run-ppo']} />)
+    render(<ComparePanel runIds={['run-rloo', 'run-ppo']} runMetadataById={compareRunMetadata} />)
 
     await screen.findByText('Selected metric head-to-head (loss)')
     const objectiveSelect = (await screen.findByRole('combobox', { name: 'Metric Objective' })) as HTMLSelectElement
@@ -158,7 +247,7 @@ describe('ComparePanel', () => {
   })
 
   it('allows overriding metric objective per metric', async () => {
-    render(<ComparePanel runIds={['run-rloo', 'run-ppo']} />)
+    render(<ComparePanel runIds={['run-rloo', 'run-ppo']} runMetadataById={compareRunMetadata} />)
 
     const objectiveSelect = (await screen.findByRole('combobox', { name: 'Metric Objective' })) as HTMLSelectElement
     expect(objectiveSelect.value).toBe('lower')
@@ -189,6 +278,7 @@ describe('ComparePanel', () => {
       <ComparePanel
         runIds={['run-rloo', 'run-ppo']}
         onMetricObjectiveOverridesChange={onMetricObjectiveOverridesChange}
+        runMetadataById={compareRunMetadata}
       />
     )
 
@@ -259,7 +349,13 @@ describe('ComparePanel', () => {
 
   it('swaps baseline and candidate order when swap is clicked', async () => {
     const onRunIdsChange = vi.fn()
-    render(<ComparePanel runIds={['run-rloo', 'run-ppo']} onRunIdsChange={onRunIdsChange} />)
+    render(
+      <ComparePanel
+        runIds={['run-rloo', 'run-ppo']}
+        onRunIdsChange={onRunIdsChange}
+        runMetadataById={compareRunMetadata}
+      />
+    )
 
     const swapButton = await screen.findByRole('button', { name: 'Swap A/B' })
     fireEvent.click(swapButton)

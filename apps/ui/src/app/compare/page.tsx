@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { api, Run } from '@/lib/api';
-import { ComparePanel } from '@/components/ComparePanel';
+import { ComparePanel, type CompareRunMetadata } from '@/components/ComparePanel';
 import { formatDuration } from '@/lib/format';
 import { useAutoRefresh } from '@/lib/useAutoRefresh';
 import {
@@ -101,6 +101,20 @@ function ComparePageContent() {
     () => new Map(runs.map((run) => [run.run_id, run])),
     [runs]
   );
+  const compareRunMetadataById = useMemo<Record<string, CompareRunMetadata>>(() => {
+    const metadata: Record<string, CompareRunMetadata> = {};
+    selectedRunIds.forEach((runId) => {
+      const run = runIndex.get(runId);
+      if (!run) return;
+      metadata[runId] = {
+        run_id: run.run_id,
+        name: run.name,
+        status: run.status,
+        tags: run.tags,
+      };
+    });
+    return metadata;
+  }, [runIndex, selectedRunIds]);
 
   useEffect(() => {
     const normalizedSelection = normalizeRunIdSet(selectedRunIds);
@@ -448,6 +462,7 @@ function ComparePageContent() {
               onRunIdsChange={applyRunSelection}
               metricObjectiveOverrides={metricObjectiveOverrides}
               onMetricObjectiveOverridesChange={handleMetricObjectiveOverridesChange}
+              runMetadataById={compareRunMetadataById}
             />
           </div>
         </div>

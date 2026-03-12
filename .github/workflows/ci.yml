@@ -153,10 +153,10 @@ jobs:
         run: cargo test --release --workspace
 
   # ---------------------------------------------------------------------------
-  # Python SDK: lint + typecheck + tests
+  # Python SDK: lint + typecheck + core tests
   # ---------------------------------------------------------------------------
-  python-sdk:
-    name: SDK (Python)
+  sdk-python:
+    name: SDK (Python core)
     runs-on: ubuntu-latest
     needs: [hygiene, security-guards, contracts]
     steps:
@@ -170,6 +170,12 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock') }}
+
       - name: Install workspace dependencies
         run: uv sync --all-packages
 
@@ -177,12 +183,40 @@ jobs:
         run: uv run ruff check sdks/
 
       - name: Mypy
-        run: uv run mypy sdks/python/src sdks/integrations/src
+        run: uv run mypy sdks/
 
-      - name: SDK tests
-        run: |
-          uv run pytest sdks/python/tests -q
-          uv run pytest sdks/integrations/tests -q
+      - name: Tests
+        run: uv run pytest sdks/python/tests -q
+
+  # ---------------------------------------------------------------------------
+  # Integrations SDK: tests
+  # ---------------------------------------------------------------------------
+  sdk-integrations:
+    name: SDK (Integrations)
+    runs-on: ubuntu-latest
+    needs: [hygiene, security-guards, contracts]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock') }}
+
+      - name: Install workspace dependencies
+        run: uv sync --all-packages
+
+      - name: Tests
+        run: uv run pytest sdks/integrations/tests -q
 
   # ---------------------------------------------------------------------------
   # UI: build check

@@ -2,8 +2,9 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { api, MetricSeries } from '@/lib/api';
-import { UPlotChart } from '@/components/charts/UPlotChart';
+import { UPlotChart, type ChartSeries } from '@/components/charts/UPlotChart';
 import { createSeriesColorScale } from '@/components/charts/chartColors';
+import { buildCompareTooltipMetadata } from '@/components/charts/compareTooltip';
 import { useTheme } from '@/components/ThemeProvider';
 import { formatFixed, safeMinMax } from '@/lib/format';
 import { useAutoRefresh } from '@/lib/useAutoRefresh';
@@ -37,11 +38,19 @@ interface CompareData {
   metric_aliases?: Record<string, string>;
 }
 
+export interface CompareRunMetadata {
+  run_id: string;
+  name: string | null;
+  status: string;
+  tags: Record<string, string>;
+}
+
 interface ComparePanelProps {
   runIds: string[];
   onRunIdsChange?: (runIds: string[]) => void;
   metricObjectiveOverrides?: Record<string, MetricObjective>;
   onMetricObjectiveOverridesChange?: (overrides: Record<string, MetricObjective>) => void;
+  runMetadataById?: Record<string, CompareRunMetadata>;
 }
 
 type PairwiseWinner = 'baseline' | 'candidate' | 'tie' | 'unknown';
@@ -168,6 +177,7 @@ export function ComparePanel({
   onRunIdsChange,
   metricObjectiveOverrides,
   onMetricObjectiveOverridesChange,
+  runMetadataById = {},
 }: ComparePanelProps) {
   const { isDark } = useTheme();
   const [runs, setRuns] = useState<CompareData[]>([]);
@@ -366,10 +376,12 @@ export function ComparePanel({
   // Get series for selected metric from each run
   const comparisonData = runs.map((run, idx) => {
     const label = run.run_name || run.run_id.slice(0, 8);
+    const resolvedRunMetadata = runMetadataById[run.run_id];
     return {
       ...run,
       label,
       color: runColorScale(label, idx),
+      hoverMeta: buildCompareTooltipMetadata(resolvedRunMetadata?.tags ?? {}),
       metricSeries: run.series.find((s) => s.name === selectedMetric),
     };
   });
@@ -512,7 +524,7 @@ export function ComparePanel({
   });
   const sortedSteps = Array.from(allSteps).sort((a, b) => a - b);
   const stepToIndex = new Map(sortedSteps.map((step, idx) => [step, idx]));
-  const chartSeries = comparisonData.flatMap((run) => {
+  const chartSeries = comparisonData.flatMap<ChartSeries>((run) => {
     const points = run.metricSeries?.points ?? [];
     const data = new Array<number>(sortedSteps.length).fill(Number.NaN);
     const upper = new Array<number>(sortedSteps.length).fill(Number.NaN);
@@ -525,19 +537,15 @@ export function ComparePanel({
         lower[idx] = point.min;
       }
     });
-    const entries: Array<{
-      label: string;
-      color: string;
-      data: number[];
-      upper?: number[];
-      lower?: number[];
-    }> = [];
+    const entries: ChartSeries[] = [];
 
     if (showRawSeries || derivedMode === 'none') {
       entries.push({
         label: run.label,
         color: run.color,
         data,
+        hoverMeta: run.hoverMeta,
+        tooltipLabel: run.label,
         upper,
         lower,
       });
@@ -549,6 +557,8 @@ export function ComparePanel({
         label: `${run.label} ${computedLabel}`,
         color: run.color,
         data: derivedData,
+        hoverMeta: run.hoverMeta,
+        tooltipLabel: `${run.label} ${computedLabel}`,
       });
     }
 
@@ -759,6 +769,7 @@ export function ComparePanel({
               interactive={true}
               darkTheme={isDark}
               showLegend={true}
+              tooltipVariant="compare"
             />
             {/* Expand button overlay */}
             <button
@@ -951,7 +962,7 @@ function ExpandedChart({
   title: string;
   yLabel: string;
   sortedSteps: number[];
-  chartSeries: { label: string; color: string; data: number[]; upper?: number[]; lower?: number[] }[];
+  chartSeries: ChartSeries[];
   isDark: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -984,6 +995,7 @@ function ExpandedChart({
         interactive={true}
         darkTheme={isDark}
         showLegend={true}
+        tooltipVariant="compare"
       />
     </div>
   );
