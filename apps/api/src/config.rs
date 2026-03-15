@@ -5,6 +5,11 @@
 use std::net::SocketAddr;
 use tracing::info;
 
+const DEFAULT_HTTP_PORT: u16 = 3001;
+const DEFAULT_GRPC_PORT: u16 = 50051;
+const DEFAULT_API_HOST: &str = "0.0.0.0";
+const DEFAULT_RUST_LOG: &str = "info,mlrunx_api=debug";
+
 /// Runtime mode determines the storage/control-plane topology.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RuntimeMode {
@@ -88,41 +93,81 @@ pub struct ServerConfig {
     pub log_level: String,
 }
 
+fn parse_optional_value<T>(name: &str, value: Option<&str>) -> Result<Option<T>, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<T>()
+                .map_err(|err| format!("invalid {name} value '{value}': {err}"))
+        })
+        .transpose()
+}
+
+fn parse_bind_addr(host: &str, port: u16, label: &str) -> Result<SocketAddr, String> {
+    format!("{host}:{port}")
+        .parse()
+        .map_err(|err| format!("invalid {label} address '{host}:{port}': {err}"))
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            http_addr: "0.0.0.0:3001".parse().unwrap(),
-            grpc_addr: "0.0.0.0:50051".parse().unwrap(),
+            http_addr: SocketAddr::from(([0, 0, 0, 0], DEFAULT_HTTP_PORT)),
+            grpc_addr: SocketAddr::from(([0, 0, 0, 0], DEFAULT_GRPC_PORT)),
             runtime_mode: RuntimeMode::Standalone,
             ingest_mode: IngestMode::Direct,
-            log_level: "info,mlrunx_api=debug".to_string(),
+            log_level: DEFAULT_RUST_LOG.to_string(),
         }
     }
 }
 
 impl ServerConfig {
+    fn build(
+        host: Option<String>,
+        http_port: Option<u16>,
+        grpc_port: Option<u16>,
+        runtime_mode: RuntimeMode,
+        ingest_mode: IngestMode,
+        log_level: Option<String>,
+    ) -> Result<Self, String> {
+        let resolved_host = host
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_API_HOST);
+        let resolved_http_port = http_port.unwrap_or(DEFAULT_HTTP_PORT);
+        let resolved_grpc_port = grpc_port.unwrap_or(DEFAULT_GRPC_PORT);
+
+        Ok(Self {
+            http_addr: parse_bind_addr(resolved_host, resolved_http_port, "HTTP bind")?,
+            grpc_addr: parse_bind_addr(resolved_host, resolved_grpc_port, "gRPC bind")?,
+            runtime_mode,
+            ingest_mode,
+            log_level: log_level.unwrap_or_else(|| DEFAULT_RUST_LOG.to_string()),
+        })
+    }
+
     /// Load configuration from environment variables.
-    pub fn from_env() -> Self {
-        let http_port: u16 = std::env::var("API_HTTP_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(3001);
+    pub fn from_env() -> Result<Self, String> {
+        let host = std::env::var("API_HOST").ok();
+        let http_port_raw = std::env::var("API_HTTP_PORT").ok();
+        let grpc_port_raw = std::env::var("API_GRPC_PORT").ok();
+        let log_level = std::env::var("RUST_LOG").ok();
 
-        let grpc_port: u16 = std::env::var("API_GRPC_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(50051);
-
-        let host = std::env::var("API_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-
-        Self {
-            http_addr: format!("{host}:{http_port}").parse().unwrap(),
-            grpc_addr: format!("{host}:{grpc_port}").parse().unwrap(),
-            runtime_mode: RuntimeMode::from_env(),
-            ingest_mode: IngestMode::from_env(),
-            log_level: std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "info,mlrunx_api=debug".to_string()),
-        }
+        Self::build(
+            host,
+            parse_optional_value("API_HTTP_PORT", http_port_raw.as_deref())?,
+            parse_optional_value("API_GRPC_PORT", grpc_port_raw.as_deref())?,
+            RuntimeMode::from_env(),
+            IngestMode::from_env(),
+            log_level,
+        )
     }
 
     /// Log the configuration at startup.
@@ -156,10 +201,47 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = ServerConfig::default();
-        assert_eq!(config.http_addr.port(), 3001);
-        assert_eq!(config.grpc_addr.port(), 50051);
+        assert_eq!(config.http_addr.port(), DEFAULT_HTTP_PORT);
+        assert_eq!(config.grpc_addr.port(), DEFAULT_GRPC_PORT);
         assert_eq!(config.runtime_mode, RuntimeMode::Standalone);
         assert_eq!(config.ingest_mode, IngestMode::Direct);
+    }
+
+    #[test]
+    fn test_build_uses_defaults() {
+        let config = ServerConfig::build(
+            None,
+            None,
+            None,
+            RuntimeMode::Standalone,
+            IngestMode::Direct,
+            None,
+        )
+        .expect("expected default config");
+        assert_eq!(config.http_addr, SocketAddr::from(([0, 0, 0, 0], DEFAULT_HTTP_PORT)));
+        assert_eq!(config.grpc_addr, SocketAddr::from(([0, 0, 0, 0], DEFAULT_GRPC_PORT)));
+        assert_eq!(config.log_level, DEFAULT_RUST_LOG);
+    }
+
+    #[test]
+    fn test_parse_optional_value_rejects_invalid_port() {
+        let err = parse_optional_value::<u16>("API_HTTP_PORT", Some("not-a-port"))
+            .expect_err("expected invalid API_HTTP_PORT");
+        assert!(err.contains("API_HTTP_PORT"));
+    }
+
+    #[test]
+    fn test_build_rejects_invalid_host() {
+        let err = ServerConfig::build(
+            Some("bad host name".to_string()),
+            Some(DEFAULT_HTTP_PORT),
+            None,
+            RuntimeMode::Standalone,
+            IngestMode::Direct,
+            None,
+        )
+        .expect_err("expected invalid API_HOST");
+        assert!(err.contains("HTTP bind"));
     }
 
     #[test]

@@ -315,6 +315,7 @@ class TestModuleAPI:
 
         run = mlrunx.init(project_id=TEST_PROJECT_ID)
         assert run is not None
+        assert mlrunx.get_run() is run
 
         # Should work via module-level API
         mlrunx.log({"loss": 0.5})
@@ -328,15 +329,33 @@ class TestModuleAPI:
         mlrunx.log_artifact(path="model.bin", name="model")
 
         mlrunx.finish()
+        assert mlrunx.get_run() is None
 
     @pytest.mark.unit
-    def test_log_without_init_raises(self) -> None:
-        """Test that logging without init raises an error."""
+    @pytest.mark.parametrize(
+        ("method_name", "args", "kwargs"),
+        [
+            ("log", ({"loss": 0.5},), {}),
+            ("log_params", ({"lr": 0.001},), {}),
+            ("log_event", ("training started",), {}),
+            ("log_image", ("sample", "plot.png"), {}),
+            ("log_chart", ("line", {"x": [1], "y": [2]}), {}),
+            ("log_artifact", ("model.bin",), {}),
+            ("finish", (), {}),
+        ],
+    )
+    def test_module_api_without_init_raises(
+        self,
+        method_name: str,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> None:
+        """All module-level helpers should fail consistently without init."""
         # Reset any active run
         mlrunx._active_run = None
 
         with pytest.raises(RuntimeError, match="No active run"):
-            mlrunx.log({"loss": 0.5})
+            getattr(mlrunx, method_name)(*args, **kwargs)
 
 
 class TestNonBlocking:

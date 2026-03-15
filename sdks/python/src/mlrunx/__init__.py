@@ -62,6 +62,13 @@ __all__ = [
 _active_run: Run | None = None
 
 
+def _require_active_run() -> Run:
+    """Return the active run or raise a consistent module-level error."""
+    if _active_run is None:
+        raise RuntimeError("No active run. Call mlrunx.init() first.")
+    return _active_run
+
+
 def _shutdown_active_run() -> None:
     """Best-effort flush for interpreter shutdown."""
     global _active_run
@@ -150,9 +157,7 @@ def log(data: dict[str, float | int], step: int | None = None) -> None:
     Raises:
         RuntimeError: If no active run exists
     """
-    if _active_run is None:
-        raise RuntimeError("No active run. Call mlrunx.init() first.")
-    _active_run.log(data, step=step)
+    _require_active_run().log(data, step=step)
 
 
 def log_params(params: dict[str, Any]) -> None:
@@ -164,9 +169,7 @@ def log_params(params: dict[str, Any]) -> None:
     Raises:
         RuntimeError: If no active run exists
     """
-    if _active_run is None:
-        raise RuntimeError("No active run. Call mlrunx.init() first.")
-    _active_run.log_params(params)
+    _require_active_run().log_params(params)
 
 
 def log_event(
@@ -176,9 +179,7 @@ def log_event(
     source: str = "sdk",
 ) -> None:
     """Log a structured event to the active run (convenience function)."""
-    if _active_run is None:
-        raise RuntimeError("No active run. Call mlrunx.init() first.")
-    _active_run.log_event(message, level=level, step=step, source=source)
+    _require_active_run().log_event(message, level=level, step=step, source=source)
 
 
 def log_image(
@@ -189,9 +190,13 @@ def log_image(
     metadata: dict[str, Any] | None = None,
 ) -> None:
     """Log image metadata to the active run (convenience function)."""
-    if _active_run is None:
-        raise RuntimeError("No active run. Call mlrunx.init() first.")
-    _active_run.log_image(name=name, path=path, step=step, caption=caption, metadata=metadata)
+    _require_active_run().log_image(
+        name=name,
+        path=path,
+        step=step,
+        caption=caption,
+        metadata=metadata,
+    )
 
 
 def log_chart(
@@ -205,9 +210,7 @@ def log_chart(
     metadata: dict[str, Any] | None = None,
 ) -> None:
     """Log chart payload to the active run (convenience function)."""
-    if _active_run is None:
-        raise RuntimeError("No active run. Call mlrunx.init() first.")
-    _active_run.log_chart(
+    _require_active_run().log_chart(
         name=name,
         data=data,
         chart_type=chart_type,
@@ -226,9 +229,7 @@ def log_artifact(
     metadata: dict[str, Any] | None = None,
 ) -> None:
     """Log artifact metadata to the active run (convenience function)."""
-    if _active_run is None:
-        raise RuntimeError("No active run. Call mlrunx.init() first.")
-    _active_run.log_artifact(
+    _require_active_run().log_artifact(
         path=path,
         name=name,
         artifact_type=artifact_type,
@@ -243,9 +244,7 @@ def finish() -> None:
         RuntimeError: If no active run exists
     """
     global _active_run
-    if _active_run is None:
-        raise RuntimeError("No active run. Call mlrunx.init() first.")
-    _active_run.finish()
+    _require_active_run().finish()
     _active_run = None
 
 

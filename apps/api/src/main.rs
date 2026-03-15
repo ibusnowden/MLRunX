@@ -6862,7 +6862,7 @@ fn build_http_router(state: AppState) -> Router {
 #[tokio::main]
 async fn main() {
     // Load configuration from environment
-    let server_config = ServerConfig::from_env();
+    let server_config = ServerConfig::from_env().expect("Invalid server configuration");
 
     // Initialize tracing
     observability::init_tracing(&server_config.log_level, "mlrunx-api")
