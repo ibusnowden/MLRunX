@@ -127,7 +127,7 @@ jobs:
           }
           trap cleanup EXIT INT TERM
 
-          for i in {1..60}; do
+          for _i in {1..60}; do
             if curl -fsS http://127.0.0.1:3001/health >/dev/null; then
               break
             fi
@@ -192,7 +192,7 @@ jobs:
           }
           trap cleanup EXIT INT TERM
 
-          for i in {1..60}; do
+          for _i in {1..60}; do
             if curl -fsS http://127.0.0.1:3001/health >/dev/null; then
               break
             fi
@@ -271,7 +271,7 @@ jobs:
           }
           trap cleanup EXIT INT TERM
 
-          for i in {1..60}; do
+          for _i in {1..60}; do
             if curl -fsS http://127.0.0.1:3001/health >/dev/null; then
               break
             fi
@@ -300,14 +300,16 @@ jobs:
     steps:
       - name: Summary
         run: |
-          echo "## Nightly Build Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Integration Tests | ${{ needs.test-integration.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Benchmark W1 | ${{ needs.bench-w1.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Benchmark W2 | ${{ needs.bench-w2.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Benchmark W3 | ${{ needs.bench-w3.result }} |" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Nightly Build Results"
+            echo ""
+            echo "| Job | Status |"
+            echo "|-----|--------|"
+            echo "| Integration Tests | ${{ needs.test-integration.result }} |"
+            echo "| Benchmark W1 | ${{ needs.bench-w1.result }} |"
+            echo "| Benchmark W2 | ${{ needs.bench-w2.result }} |"
+            echo "| Benchmark W3 | ${{ needs.bench-w3.result }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check for failures
         if: |
