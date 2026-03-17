@@ -39,11 +39,13 @@ from typing import Any
 from mlrunx.autodebug import AutoDebugHelper
 from mlrunx.config import Config, configure, get_config
 from mlrunx.run import Run
+from mlrunx.system_monitor import SystemMonitor
 
 __all__ = [
     "__version__",
     "init",
     "Run",
+    "SystemMonitor",
     "AutoDebugHelper",
     "Config",
     "configure",
@@ -93,6 +95,7 @@ def init(
     run_id: str | None = None,
     tags: dict[str, str] | None = None,
     config: dict[str, Any] | None = None,
+    monitor_system: bool | None = None,
 ) -> Run:
     """Initialize a new run.
 
@@ -143,6 +146,12 @@ def init(
         tags=tags,
         config=config,
     )
+
+    if monitor_system is not None:
+        if monitor_system:
+            _active_run.start_system_monitor()
+        else:
+            _active_run.stop_system_monitor()
 
     return _active_run
 

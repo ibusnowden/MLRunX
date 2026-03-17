@@ -58,6 +58,15 @@ class Config:
     health_check_interval_ms: int = 10000  # Health check interval (10s)
     connection_timeout_ms: int = 5000  # Connection timeout (5s)
 
+    # System monitoring
+    monitor_system: bool = False
+    monitor_interval_secs: float = 15.0
+    monitor_gpu: bool = True
+    monitor_cpu: bool = True
+    monitor_memory: bool = True
+    monitor_disk_io: bool = False
+    monitor_network_io: bool = False
+
     # Debug
     debug: bool = False
 
@@ -105,6 +114,10 @@ class Config:
             ),
             connection_timeout_ms=int(
                 os.getenv("MLRUNX_CONNECTION_TIMEOUT_MS", "5000")
+            ),
+            monitor_system=os.getenv("MLRUNX_MONITOR_SYSTEM", "").lower() in truthy,
+            monitor_interval_secs=float(
+                os.getenv("MLRUNX_MONITOR_INTERVAL_SECS", "15.0")
             ),
             debug=os.getenv("MLRUNX_DEBUG", "").lower() in truthy,
         )

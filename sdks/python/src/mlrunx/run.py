@@ -10,7 +10,10 @@ import json
 import logging
 import time
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from mlrunx.system_monitor import SystemMonitor
 
 from mlrunx.config import Config, get_config
 from mlrunx.queue import Event, EventQueue, EventType
@@ -111,6 +114,11 @@ class Run:
 
         # Start the background worker
         self._worker.start()
+
+        # System monitor (started after worker is up)
+        self._system_monitor: SystemMonitor | None = None
+        if self._sdk_config.monitor_system:
+            self.start_system_monitor()
 
         # Initialize run on server unless explicit offline mode is requested.
         if self._sdk_config.offline_mode:
@@ -573,6 +581,70 @@ class Run:
             f"Unsupported run bucket '{bucket}'. Use one of: parameters, params, tags."
         )
 
+    def _log_system_metrics(self, data: dict[str, float], step: int) -> None:
+        """Enqueue system metric events without touching the training step counter."""
+        if self._finished:
+            return
+        ts = time.time()
+        for name, value in data.items():
+            event = Event(
+                type=EventType.METRIC,
+                run_id=self._run_id,
+                timestamp=ts,
+                data={"name": name, "value": float(value), "step": step, "timestamp": ts},
+            )
+            if not self._queue.put(event):
+                logger.debug("Queue full, system metric dropped: %s", name)
+
+    def start_system_monitor(
+        self,
+        interval_secs: float | None = None,
+        gpu: bool | None = None,
+        cpu: bool | None = None,
+        memory: bool | None = None,
+        disk_io: bool | None = None,
+        network_io: bool | None = None,
+    ) -> None:
+        """Start the background system metrics monitor.
+
+        Calling this when a monitor is already running is a no-op.
+
+        Args:
+            interval_secs: Collection interval in seconds (uses config default if None)
+            gpu: Collect GPU metrics (uses config default if None)
+            cpu: Collect CPU metrics (uses config default if None)
+            memory: Collect memory metrics (uses config default if None)
+            disk_io: Collect disk I/O metrics (uses config default if None)
+            network_io: Collect network I/O metrics (uses config default if None)
+        """
+        if self._system_monitor is not None:
+            return  # Already running
+
+        from mlrunx.system_monitor import SystemMonitor
+
+        self._system_monitor = SystemMonitor(
+            run=self,
+            interval_secs=(
+                interval_secs
+                if interval_secs is not None
+                else self._sdk_config.monitor_interval_secs
+            ),
+            gpu=gpu if gpu is not None else self._sdk_config.monitor_gpu,
+            cpu=cpu if cpu is not None else self._sdk_config.monitor_cpu,
+            memory=memory if memory is not None else self._sdk_config.monitor_memory,
+            disk_io=disk_io if disk_io is not None else self._sdk_config.monitor_disk_io,
+            network_io=(
+                network_io if network_io is not None else self._sdk_config.monitor_network_io
+            ),
+        )
+        self._system_monitor.start()
+
+    def stop_system_monitor(self) -> None:
+        """Stop the background system metrics monitor."""
+        if self._system_monitor is not None:
+            self._system_monitor.stop()
+            self._system_monitor = None
+
     def finish(self, status: str = "finished") -> None:
         """Finish the run and flush all pending data.
 
@@ -586,6 +658,9 @@ class Run:
         duration = time.time() - self._start_time
 
         logger.info(f"Finishing run: {self._run_id}")
+
+        # Stop system monitor before flushing
+        self.stop_system_monitor()
 
         # Flush remaining events
         self._worker.flush()
