@@ -690,7 +690,7 @@ export function UPlotChart({
                 <span>Name</span>
               </div>
               <div className="max-h-[220px] overflow-y-auto py-1">
-                {compareTooltip.rows.map((row, index) => {
+                {compareTooltip.rows.map((row) => {
                   const fullMetaLine = formatCompareTooltipMetaLine(row.hoverMeta);
                   const truncatedMetaLine = formatCompareTooltipMetaLine(
                     row.hoverMeta.map((entry) => ({

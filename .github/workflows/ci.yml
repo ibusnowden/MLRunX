@@ -13,12 +13,16 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ---------------------------------------------------------------------------
   # Repository hygiene
   # ---------------------------------------------------------------------------
   hygiene:
-    name: Hygiene (No Merge Markers)
+    name: Hygiene (Merge Markers + Workflows)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +33,9 @@ jobs:
             echo "::error::Found unresolved merge conflict markers."
             exit 1
           fi
+
+      - name: Lint GitHub Actions workflows
+        uses: rhysd/actionlint@v1
 
   # ---------------------------------------------------------------------------
   # Security guardrails
@@ -153,12 +160,24 @@ jobs:
         run: cargo test --release --workspace
 
   # ---------------------------------------------------------------------------
-  # Python SDK: lint + typecheck + core tests
+  # Python SDKs: package-scoped lint + typecheck + tests
   # ---------------------------------------------------------------------------
-  sdk-python:
-    name: SDK (Python core)
+  sdk:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     needs: [hygiene, security-guards, contracts]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: SDK (Python core)
+            sync_args: --package mlrunx --group dev
+            lint_target: lint-sdk-core
+            test_target: test-sdk-core
+          - name: SDK (Integrations)
+            sync_args: --package mlrunx-integrations --group dev
+            lint_target: lint-sdk-integrations
+            test_target: test-sdk-integrations
     steps:
       - uses: actions/checkout@v4
 
@@ -176,47 +195,14 @@ jobs:
           path: ~/.cache/uv
           key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock') }}
 
-      - name: Install workspace dependencies
-        run: uv sync --all-packages
+      - name: Install package dependencies
+        run: uv sync ${{ matrix.sync_args }} --frozen
 
-      - name: Ruff
-        run: uv run ruff check sdks/
-
-      - name: Mypy
-        run: uv run mypy sdks/
+      - name: Lint and typecheck
+        run: make ${{ matrix.lint_target }}
 
       - name: Tests
-        run: uv run pytest sdks/python/tests -q
-
-  # ---------------------------------------------------------------------------
-  # Integrations SDK: tests
-  # ---------------------------------------------------------------------------
-  sdk-integrations:
-    name: SDK (Integrations)
-    runs-on: ubuntu-latest
-    needs: [hygiene, security-guards, contracts]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Cache uv
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/uv
-          key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock') }}
-
-      - name: Install workspace dependencies
-        run: uv sync --all-packages
-
-      - name: Tests
-        run: uv run pytest sdks/integrations/tests -q
+        run: make ${{ matrix.test_target }}
 
   # ---------------------------------------------------------------------------
   # UI: build check

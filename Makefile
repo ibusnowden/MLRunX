@@ -2,8 +2,9 @@
 .PHONY: proto proto-lint proto-breaking proto-gen proto-check
 .PHONY: test-contract test-integration ci
 .PHONY: infra-up infra-down infra-logs
-.PHONY: bench-w1 bench-w2 bench-w3 bench-w1-full bench-w2-full bench-w3-full
+.PHONY: bench-w1 bench-w2 bench-w3 bench-all bench-w1-full bench-w2-full bench-w3-full bench-all-full
 .PHONY: bench-phase4-scale deploy-preflight
+.PHONY: lint-sdk-core lint-sdk-integrations test-sdk-core test-sdk-integrations lint-workflows
 .PHONY: version version-check release-tag
 
 # Default target
@@ -32,6 +33,7 @@ help:
 	@echo "Testing:"
 	@echo "  make check        - Run all checks (lint + test)"
 	@echo "  make lint         - Run linters"
+	@echo "  make lint-workflows - Lint GitHub Actions workflows"
 	@echo "  make fmt          - Format code"
 	@echo "  make test         - Run unit tests"
 	@echo "  make test-contract    - Run contract tests (proto validation)"
@@ -40,9 +42,14 @@ help:
 	@echo ""
 	@echo "Benchmarks:"
 	@echo "  make bench-w1     - Run W1 benchmark checks (nightly scale)"
-	@echo "  make bench-phase4-scale - Run Phase 4 W1 checks (release: 10k runs)"
 	@echo "  make bench-w2     - Run W2 benchmark (high-freq ingest)"
 	@echo "  make bench-w3     - Run W3 benchmark (mixed dashboard)"
+	@echo "  make bench-all    - Run the full nightly benchmark suite"
+	@echo "  make bench-w1-full - Run W1 benchmark (release scale)"
+	@echo "  make bench-w2-full - Run W2 benchmark (release scale)"
+	@echo "  make bench-w3-full - Run W3 benchmark (release scale)"
+	@echo "  make bench-all-full - Run the full release benchmark suite"
+	@echo "  make bench-phase4-scale - Run legacy W1 release checks"
 	@echo ""
 	@echo "Release:"
 	@echo "  make version      - Show current version"
@@ -160,13 +167,27 @@ lint-rust:
 
 lint-python:
 	@echo "Linting Python..."
-	uv run ruff check sdks/
-	uv run mypy sdks/python/src sdks/integrations/src
+	@$(MAKE) lint-sdk-core
+	@$(MAKE) lint-sdk-integrations
+
+lint-sdk-core:
+	@echo "Linting Python SDK core..."
+	uv run ruff check sdks/python
+	uv run mypy sdks/python/src
+
+lint-sdk-integrations:
+	@echo "Linting Python SDK integrations..."
+	uv run ruff check sdks/integrations
+	uv run mypy sdks/integrations/src
 
 lint-ui:
 	@echo "Linting UI..."
 	cd apps/ui && npm run lint
 	cd apps/ui && npm run typecheck
+
+lint-workflows:
+	@command -v actionlint >/dev/null 2>&1 || { echo "actionlint not found. Install with: brew install actionlint"; exit 1; }
+	actionlint
 
 fmt: fmt-rust fmt-python
 
@@ -185,7 +206,16 @@ test-rust:
 
 test-python:
 	@echo "Testing Python..."
-	uv run pytest sdks/
+	@$(MAKE) test-sdk-core
+	@$(MAKE) test-sdk-integrations
+
+test-sdk-core:
+	@echo "Testing Python SDK core..."
+	uv run pytest sdks/python/tests -q
+
+test-sdk-integrations:
+	@echo "Testing Python SDK integrations..."
+	uv run pytest sdks/integrations/tests -q
 
 test-ui:
 	@echo "Testing UI..."
@@ -205,10 +235,19 @@ test-contract: proto-check
 
 test-integration:
 	@echo "Running integration tests..."
-	@TMP_DB="/tmp/mlrunx-integration-$$RANDOM.db"; \
-	LOG_FILE="/tmp/mlrunx-api-integration.log"; \
+	@TMP_DB="$${MLRUNX_TEST_DB_PATH:-/tmp/mlrunx-integration-$$RANDOM.db}"; \
+	LOG_FILE="$${MLRUNX_API_LOG_FILE:-/tmp/mlrunx-api-integration.log}"; \
+	API_BIN="$${MLRUNX_API_BIN:-}"; \
+	API_URL="$${MLRUNX_TEST_API_URL:-http://localhost:3001}"; \
+	HEALTH_TIMEOUT="$${MLRUNX_API_HEALTH_TIMEOUT_SECS:-120}"; \
 	rm -f "$$TMP_DB" "$$TMP_DB-shm" "$$TMP_DB-wal"; \
-	MLRUNX_AUTH_DISABLED=true MLRUNX_AUTH_HMAC_SECRET=test-integration-hmac-secret MLRUNX_ALLOW_INSECURE_LOCAL_DEV=true MLRUNX_SQLITE_PATH="$$TMP_DB" cargo run --bin mlrunx-api > "$$LOG_FILE" 2>&1 & \
+	if [ -n "$$API_BIN" ]; then \
+		echo "Starting integration API from $$API_BIN"; \
+		MLRUNX_AUTH_DISABLED=true MLRUNX_AUTH_HMAC_SECRET=test-integration-hmac-secret MLRUNX_ALLOW_INSECURE_LOCAL_DEV=true MLRUNX_SQLITE_PATH="$$TMP_DB" API_HOST=127.0.0.1 API_HTTP_PORT=3001 API_GRPC_PORT=50051 "$$API_BIN" > "$$LOG_FILE" 2>&1 & \
+	else \
+		echo "Starting integration API via cargo run"; \
+		MLRUNX_AUTH_DISABLED=true MLRUNX_AUTH_HMAC_SECRET=test-integration-hmac-secret MLRUNX_ALLOW_INSECURE_LOCAL_DEV=true MLRUNX_SQLITE_PATH="$$TMP_DB" API_HOST=127.0.0.1 API_HTTP_PORT=3001 API_GRPC_PORT=50051 cargo run --bin mlrunx-api > "$$LOG_FILE" 2>&1 & \
+	fi; \
 	API_PID=$$!; \
 	cleanup() { \
 		kill "$$API_PID" >/dev/null 2>&1 || true; \
@@ -216,15 +255,22 @@ test-integration:
 		rm -f "$$TMP_DB" "$$TMP_DB-shm" "$$TMP_DB-wal"; \
 	}; \
 	trap cleanup EXIT INT TERM; \
-	sleep 5; \
-	uv run --with requests python tests/integration/runner.py --api-url http://localhost:3001 --timeout 60
+	set +e; \
+	uv run --with requests python tests/integration/runner.py --api-url "$$API_URL" --timeout "$$HEALTH_TIMEOUT"; \
+	STATUS=$$?; \
+	set -e; \
+	if [ "$$STATUS" -ne 0 ]; then \
+		echo "Integration tests failed. Recent API logs:" >&2; \
+		tail -n 80 "$$LOG_FILE" >&2 || true; \
+		exit "$$STATUS"; \
+	fi
 	@echo "Integration tests complete"
 
 # =============================================================================
 # CI Target (Local)
 # =============================================================================
 
-ci: lint test test-contract proto-breaking
+ci: lint lint-workflows test test-contract proto-breaking
 	@echo "All CI checks passed!"
 
 # =============================================================================
@@ -233,37 +279,29 @@ ci: lint test test-contract proto-breaking
 
 # Scaled-down benchmarks (nightly)
 bench-w1:
-	./scripts/perf/run_w1_scale_check.sh --scale nightly
+	./scripts/perf/run_benchmark_check.sh --workload w1 --scale nightly
 
 bench-w2:
-	@echo "Running W2 benchmark (high-freq ingest - scaled down)..."
-	@echo "Target: p95 < 500ms log-to-visible latency"
-	# Placeholder: actual benchmark implementation in BENCH-000
-	@echo "W2 benchmark not implemented yet"
+	./scripts/perf/run_benchmark_check.sh --workload w2 --scale nightly
 
 bench-w3:
-	@echo "Running W3 benchmark (mixed dashboard - scaled down)..."
-	@echo "Target: p95 < 300ms for dashboard queries"
-	# Placeholder: actual benchmark implementation in BENCH-000
-	@echo "W3 benchmark not implemented yet"
+	./scripts/perf/run_benchmark_check.sh --workload w3 --scale nightly
+
+bench-all: bench-w1 bench-w2 bench-w3
 
 # Full-scale benchmarks (release)
 bench-w1-full:
-	./scripts/perf/run_w1_scale_check.sh --scale release
+	./scripts/perf/run_benchmark_check.sh --workload w1 --scale release
 
 bench-phase4-scale: bench-w1-full
 
 bench-w2-full:
-	@echo "Running W2 benchmark (high-freq ingest - full)..."
-	@echo "Target: p95 < 500ms at 100k metrics/sec"
-	# Placeholder: actual benchmark implementation in BENCH-000
-	@echo "W2 full benchmark not implemented yet"
+	./scripts/perf/run_benchmark_check.sh --workload w2 --scale release
 
 bench-w3-full:
-	@echo "Running W3 benchmark (mixed dashboard - full)..."
-	@echo "Target: p95 < 300ms with 50 concurrent users"
-	# Placeholder: actual benchmark implementation in BENCH-000
-	@echo "W3 full benchmark not implemented yet"
+	./scripts/perf/run_benchmark_check.sh --workload w3 --scale release
+
+bench-all-full: bench-w1-full bench-w2-full bench-w3-full
 
 # =============================================================================
 # Infrastructure targets

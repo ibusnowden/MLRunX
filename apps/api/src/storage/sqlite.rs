@@ -3197,14 +3197,20 @@ mod tests {
         store.insert_metrics("run-123", &metrics).await.unwrap();
 
         // Query without downsampling
-        let series = store.get_metrics("run-123", &[], 200, None, None).await.unwrap();
+        let series = store
+            .get_metrics("run-123", &[], 200, None, None)
+            .await
+            .unwrap();
         assert_eq!(series.len(), 1);
         assert_eq!(series[0].name, "loss");
         assert_eq!(series[0].points.len(), 100);
         assert!(!series[0].downsampled);
 
         // Query with downsampling
-        let series = store.get_metrics("run-123", &[], 10, None, None).await.unwrap();
+        let series = store
+            .get_metrics("run-123", &[], 10, None, None)
+            .await
+            .unwrap();
         assert_eq!(series.len(), 1);
         assert!(series[0].points.len() <= 10);
         assert!(series[0].downsampled);

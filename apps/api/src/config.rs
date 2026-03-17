@@ -218,8 +218,14 @@ mod tests {
             None,
         )
         .expect("expected default config");
-        assert_eq!(config.http_addr, SocketAddr::from(([0, 0, 0, 0], DEFAULT_HTTP_PORT)));
-        assert_eq!(config.grpc_addr, SocketAddr::from(([0, 0, 0, 0], DEFAULT_GRPC_PORT)));
+        assert_eq!(
+            config.http_addr,
+            SocketAddr::from(([0, 0, 0, 0], DEFAULT_HTTP_PORT))
+        );
+        assert_eq!(
+            config.grpc_addr,
+            SocketAddr::from(([0, 0, 0, 0], DEFAULT_GRPC_PORT))
+        );
         assert_eq!(config.log_level, DEFAULT_RUST_LOG);
     }
 
