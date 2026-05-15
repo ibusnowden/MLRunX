@@ -7,8 +7,9 @@ import argparse
 import json
 import random
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from bench.workloads.common import ApiClient, Timer, load_scale_config, summarize_ms, utc_now_iso
 

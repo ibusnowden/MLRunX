@@ -171,7 +171,7 @@ class ApiClient:
 class Timer:
     """Small helper for measuring elapsed wall-clock time."""
 
-    def __enter__(self) -> "Timer":
+    def __enter__(self) -> Timer:
         self._start = time.perf_counter()
         return self
 

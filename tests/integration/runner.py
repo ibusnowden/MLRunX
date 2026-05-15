@@ -20,7 +20,6 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -520,10 +519,9 @@ def main() -> int:
 
     client = MLRunTestClient(args.api_url)
 
-    if not args.no_wait:
-        if not wait_for_api(client, timeout=args.timeout):
-            print(f"ERROR: API did not become healthy within {args.timeout}s")
-            return 1
+    if not args.no_wait and not wait_for_api(client, timeout=args.timeout):
+        print(f"ERROR: API did not become healthy within {args.timeout}s")
+        return 1
 
     results = run_tests(client, test_names=args.tests)
     return print_summary(results)

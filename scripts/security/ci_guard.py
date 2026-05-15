@@ -63,9 +63,7 @@ def is_text_file(path: pathlib.Path) -> bool:
         data = path.read_bytes()
     except OSError:
         return False
-    if b"\x00" in data:
-        return False
-    return True
+    return b"\x00" not in data
 
 
 def main() -> int:

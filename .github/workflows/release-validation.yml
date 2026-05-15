@@ -1,26 +1,17 @@
-# MLRunX Nightly CI Pipeline
-# Runs integration tests and nightly-scale benchmarks
-# See: /docs/testing.md for test strategy
+# MLRunX manual release validation
+# Runs integration tests and release-scale benchmarks before tagging
 
-name: Nightly
+name: Release Validation
 
 on:
-  schedule:
-    - cron: '0 2 * * *'
   workflow_dispatch:
-    inputs:
-      run_benchmarks:
-        description: 'Run performance benchmarks'
-        required: false
-        default: true
-        type: boolean
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 concurrency:
-  group: nightly-${{ github.workflow }}-${{ github.ref }}
+  group: release-validation-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -60,24 +51,23 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-integration
+          name: release-validation-integration
           path: /tmp/mlrunx-api-integration.log
           if-no-files-found: warn
 
   benchmarks:
     name: ${{ matrix.label }}
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_benchmarks != 'false' }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - workload: w1
-            label: Benchmark W1 (Query at Scale)
+            label: Release Benchmark W1 (Query at Scale)
           - workload: w2
-            label: Benchmark W2 (High-Freq Ingest)
+            label: Release Benchmark W2 (High-Freq Ingest)
           - workload: w3
-            label: Benchmark W3 (Mixed Dashboard)
+            label: Release Benchmark W3 (Mixed Dashboard)
 
     steps:
       - uses: actions/checkout@v4
@@ -113,10 +103,10 @@ jobs:
       - name: Build API
         run: cargo build --release --bin mlrunx-api
 
-      - name: Run benchmark
+      - name: Run release benchmark
         id: benchmark
         continue-on-error: true
-        run: ./scripts/perf/run_benchmark_check.sh --workload ${{ matrix.workload }} --scale nightly --api-bin ./target/release/mlrunx-api --health-timeout 120
+        run: ./scripts/perf/run_benchmark_check.sh --workload ${{ matrix.workload }} --scale release --api-bin ./target/release/mlrunx-api --health-timeout 120
 
       - name: Capture benchmark status
         if: always()
@@ -130,10 +120,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-bench-${{ matrix.workload }}
+          name: release-validation-bench-${{ matrix.workload }}
           path: |
-            bench/results/${{ matrix.workload }}_nightly.json
-            /tmp/mlrunx-api-${{ matrix.workload }}-nightly.log
+            bench/results/${{ matrix.workload }}_release.json
+            /tmp/mlrunx-api-${{ matrix.workload }}-release.log
             benchmark-status/status-${{ matrix.workload }}.json
           if-no-files-found: warn
 
@@ -141,8 +131,8 @@ jobs:
         if: steps.benchmark.outcome != 'success'
         run: exit 1
 
-  nightly-summary:
-    name: Nightly Summary
+  release-validation-summary:
+    name: Release Validation Summary
     runs-on: ubuntu-latest
     needs: [test-integration, benchmarks]
     if: always()
@@ -154,8 +144,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: nightly-bench-*
-          path: nightly-artifacts
+          pattern: release-validation-bench-*
+          path: release-validation-artifacts
           merge-multiple: true
 
       - name: Summary
@@ -166,18 +156,18 @@ jobs:
           from pathlib import Path
 
           labels = {
-              "w1": "Benchmark W1 (Query at Scale)",
-              "w2": "Benchmark W2 (High-Freq Ingest)",
-              "w3": "Benchmark W3 (Mixed Dashboard)",
+              "w1": "Release Benchmark W1 (Query at Scale)",
+              "w2": "Release Benchmark W2 (High-Freq Ingest)",
+              "w3": "Release Benchmark W3 (Mixed Dashboard)",
           }
           statuses = {workload: "skipped" for workload in labels}
-          for path in Path("nightly-artifacts").glob("status-*.json"):
+          for path in Path("release-validation-artifacts").glob("status-*.json"):
               payload = json.loads(path.read_text(encoding="utf-8"))
               statuses[payload["workload"]] = payload["status"]
 
           summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
           lines = [
-              "## Nightly Build Results",
+              "## Release Validation Results",
               "",
               "| Job | Status |",
               "|-----|--------|",
@@ -191,6 +181,6 @@ jobs:
       - name: Check for failures
         run: |
           if [ "${INTEGRATION_RESULT}" = "failure" ] || [ "${INTEGRATION_RESULT}" = "cancelled" ] || [ "${BENCHMARKS_RESULT}" = "failure" ] || [ "${BENCHMARKS_RESULT}" = "cancelled" ]; then
-            echo "::error::One or more nightly jobs failed"
+            echo "::error::Release validation failed"
             exit 1
           fi

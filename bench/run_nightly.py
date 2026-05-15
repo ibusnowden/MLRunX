@@ -10,13 +10,13 @@ Orchestrates benchmark execution for CI pipelines:
 
 Usage:
     # Run nightly benchmarks
-    python bench/run_nightly.py --scale nightly
+    python bench/run_nightly.py run --scale nightly --fail-on-threshold
 
     # Run release benchmarks with regression check
-    python bench/run_nightly.py --scale release --fail-on-regression
+    python bench/run_nightly.py run --scale release --fail-on-regression
 
-    # Check thresholds only (no execution)
-    python bench/run_nightly.py check-threshold --workload w1 --results bench/results/w1.json
+    # Check thresholds and command SLOs only (no execution)
+    python bench/run_nightly.py check-threshold --results bench/results/w1_nightly.json
 """
 
 from __future__ import annotations
@@ -689,13 +689,17 @@ def main():
             results = json.load(f)
 
         runner = NightlyRunner(thresholds_path=args.thresholds)
-        passed, violations = runner.check_thresholds(results)
+        threshold_passed, threshold_violations = runner.check_thresholds(results)
+        _, command_slo_violations = runner.check_command_slos(results)
+        passed = threshold_passed and not command_slo_violations
 
         if passed:
             print("Threshold check: PASS")
         else:
             print("Threshold check: FAIL")
-            for v in violations:
+            for v in threshold_violations:
+                print(f"  - {v}")
+            for v in command_slo_violations:
                 print(f"  - {v}")
 
         sys.exit(0 if passed else 1)
