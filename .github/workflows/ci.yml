@@ -171,11 +171,9 @@ jobs:
       matrix:
         include:
           - name: SDK (Python core)
-            sync_args: --package mlrunx --group dev
             lint_target: lint-sdk-core
             test_target: test-sdk-core
           - name: SDK (Integrations)
-            sync_args: --package mlrunx-integrations --group dev
             lint_target: lint-sdk-integrations
             test_target: test-sdk-integrations
     steps:
@@ -196,7 +194,7 @@ jobs:
           key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock') }}
 
       - name: Install package dependencies
-        run: uv sync ${{ matrix.sync_args }} --frozen
+        run: uv sync --all-packages --group dev --frozen
 
       - name: Lint and typecheck
         run: make ${{ matrix.lint_target }}
